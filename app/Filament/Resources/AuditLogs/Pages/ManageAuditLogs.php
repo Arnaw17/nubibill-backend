@@ -1,0 +1,19 @@
+<?php
+
+namespace App\Filament\Resources\AuditLogs\Pages;
+
+use App\Filament\Resources\AuditLogs\AuditLogResource;
+use Filament\Actions\CreateAction;
+use Filament\Resources\Pages\ManageRecords;
+
+class ManageAuditLogs extends ManageRecords
+{
+    protected static string $resource = AuditLogResource::class;
+
+    protected function getHeaderActions(): array
+    {
+        return [
+            CreateAction::make(),
+        ];
+    }
+}
