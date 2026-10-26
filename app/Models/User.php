@@ -18,6 +18,7 @@ class User extends Authenticatable
     use HasApiTokens, HasFactory, HasUuids, Notifiable, SoftDeletes;
 
     protected $keyType = 'string';
+
     public $incrementing = false;
 
     /**
@@ -95,7 +96,12 @@ class User extends Authenticatable
 
     public function isAdmin(): bool
     {
-        return strtoupper((string) $this->role) === 'ADMIN';
+        return in_array(strtoupper((string) $this->role), ['ADMIN', 'SUPER_ADMIN', 'DEVELOPER', 'SUPER_USER'], true);
+    }
+
+    public function isSuperUser(): bool
+    {
+        return in_array(strtoupper((string) $this->role), ['ADMIN', 'SUPER_ADMIN', 'DEVELOPER', 'SUPER_USER'], true);
     }
 
     public function getPhotoUrlAttribute(): ?string
@@ -122,6 +128,8 @@ class User extends Authenticatable
             'address' => $this->address,
             'photo_url' => $this->photo_url,
             'status' => strtolower((string) $this->status),
+            'role' => strtolower((string) $this->role),
+            'is_superuser' => $this->isSuperUser(),
             'email_verified_at' => $this->email_verified_at?->toISOString(),
         ];
     }

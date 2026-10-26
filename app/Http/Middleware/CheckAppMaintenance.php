@@ -6,6 +6,7 @@ use App\Http\Responses\ApiResponse;
 use Closure;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Symfony\Component\HttpFoundation\Response;
 
 class CheckAppMaintenance
@@ -16,7 +17,16 @@ class CheckAppMaintenance
     public function handle(Request $request, Closure $next): Response
     {
         // 1. Allow public config check and admin routes
-        if ($request->is('api/v1/app-config') || $request->is('api/v1/admin/*') || $request->is('admin*') || $request->is('up')) {
+        if ($request->is('api/v1/app-config') ||
+            $request->is('api/v1/admin/*') ||
+            $request->is('api/v1/superuser/*') ||
+            $request->is('admin*') ||
+            $request->is('up')) {
+            return $next($request);
+        }
+
+        // A fresh test/install database may not have the optional app_config table yet.
+        if (! Schema::hasTable('app_config')) {
             return $next($request);
         }
 

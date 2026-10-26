@@ -17,7 +17,6 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
-use Illuminate\Support\Facades\Storage;
 
 class AuthController extends Controller
 {
@@ -106,6 +105,7 @@ class AuthController extends Controller
         $latestOtp = EmailOtp::where('email', $email)->latest('created_at')->first();
         if ($latestOtp && $latestOtp->created_at->diffInSeconds(now()) < 60) {
             $remaining = 60 - $latestOtp->created_at->diffInSeconds(now());
+
             return ApiResponse::error(
                 "Please wait {$remaining} seconds before requesting a new OTP.",
                 429,
@@ -212,7 +212,7 @@ class AuthController extends Controller
     public function login(LoginRequest $request): JsonResponse
     {
         $email = strtolower(trim((string) $request->email));
-        $user = User::where('email', $email)->first();
+        $user = User::whereRaw('LOWER(email) = ?', [$email])->first();
 
         if (! $user || ! Hash::check($request->password, $user->password)) {
             return ApiResponse::error(

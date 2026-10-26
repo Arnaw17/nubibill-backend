@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -11,6 +12,33 @@ use Illuminate\Support\Str;
 
 class EmployeeController extends Controller
 {
+    public function showByUid(Request $request, string $uid): JsonResponse
+    {
+        $row = DB::table('employees')->where('is_deleted', 0)->get()->first(function ($employeeRow) use ($uid, $request): bool {
+            $payload = json_decode($employeeRow->payload, true) ?: [];
+            $fields = $payload['fields'] ?? $payload;
+
+            return (string) ($fields['uid'] ?? '') === $uid
+                && ((string) $request->user()->id === $uid
+                    || (string) ($fields['ownerUid'] ?? '') === (string) $request->user()->id);
+        });
+
+        if (! $row) {
+            return ApiResponse::error('Employee not found.', 404, null, 'NOT_FOUND');
+        }
+
+        $payload = json_decode($row->payload, true) ?: [];
+        $fields = $payload['fields'] ?? $payload;
+
+        return ApiResponse::success([
+            ...$fields,
+            'employeeId' => (string) $row->id,
+            'uid' => (string) ($fields['uid'] ?? ''),
+            'ownerUid' => (string) ($fields['ownerUid'] ?? ''),
+            'status' => (string) ($row->status ?? $fields['status'] ?? 'active'),
+        ], 'Employee details retrieved.');
+    }
+
     /**
      * List employees for a business or outlet.
      */
@@ -99,6 +127,7 @@ class EmployeeController extends Controller
                 'outletIds' => $oIds,
                 'employeeCode' => $fields['employeeCode'] ?? null,
                 'joiningDate' => $fields['joiningDate'] ?? null,
+                'loginEnabled' => (bool) ($fields['loginEnabled'] ?? (! empty($fields['uid']) && ! empty($fields['email']))),
                 'createdAt' => $row->created_at,
                 'updatedAt' => $row->updated_at,
             ];
@@ -147,6 +176,7 @@ class EmployeeController extends Controller
             'outletIds' => $oIds,
             'employeeCode' => $fields['employeeCode'] ?? null,
             'joiningDate' => $fields['joiningDate'] ?? null,
+            'loginEnabled' => (bool) ($fields['loginEnabled'] ?? (! empty($fields['uid']) && ! empty($fields['email']))),
             'createdAt' => $row->created_at,
             'updatedAt' => $row->updated_at,
         ], 'Employee details retrieved.');
@@ -159,7 +189,7 @@ class EmployeeController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'email' => 'nullable|string|email|max:255',
+            'email' => 'required_if:loginEnabled,true|nullable|string|email|max:255',
             'mobile' => 'nullable|string|max:30',
             'phone' => 'nullable|string|max:30',
             'roleIds' => 'nullable|array',
@@ -174,6 +204,8 @@ class EmployeeController extends Controller
             'employeeCode' => 'nullable|string|max:50',
             'joiningDate' => 'nullable|string',
             'loginEnabled' => 'nullable|boolean',
+            'password' => 'required_if:loginEnabled,true|string|min:6|max:255',
+            'status' => 'nullable|string|in:active,inactive,ACTIVE,INACTIVE',
         ]);
 
         $user = $request->user();
@@ -222,8 +254,15 @@ class EmployeeController extends Controller
 
         $now = now()->toIso8601String();
         $nowDateTime = now();
-        $employeeId = 'EMP-' . strtoupper(Str::random(32));
-        $uid = $validated['loginEnabled'] ?? true ? 'USR-' . strtoupper(Str::random(24)) : '';
+        $employeeId = 'EMP-'.strtoupper(Str::random(32));
+        $loginEnabled = (bool) ($validated['loginEnabled'] ?? true);
+        if ($loginEnabled && User::where('email', $email)->exists()) {
+            return ApiResponse::error('An account with this email already exists.', 422, null, 'duplicate_email');
+        }
+
+        $uid = '';
+
+        $status = ! empty($validated['status']) ? strtolower($validated['status']) : 'active';
 
         $fields = [
             'employeeId' => $employeeId,
@@ -233,7 +272,7 @@ class EmployeeController extends Controller
             'email' => $email,
             'mobile' => $mobile,
             'phone' => $mobile,
-            'status' => 'active',
+            'status' => $status,
             'roleIds' => $roleIds,
             'permissionIds' => $permissionIds,
             'businessIds' => $businessIds,
@@ -244,21 +283,39 @@ class EmployeeController extends Controller
             'updatedAt' => $now,
         ];
 
-        DB::table('employees')->insert([
-            'id' => $employeeId,
-            'document_path' => "employees/{$employeeId}",
-            'business_id' => $businessIds[0] ?? null,
-            'outlet_id' => $outletIds[0] ?? null,
-            'status' => 'active',
-            'created_at' => $nowDateTime,
-            'updated_at' => $nowDateTime,
-            'is_deleted' => 0,
-            'payload' => json_encode([
-                '_documentId' => $employeeId,
-                '_documentPath' => "employees/{$employeeId}",
-                'fields' => $fields,
-            ]),
-        ]);
+        DB::transaction(function () use ($loginEnabled, $email, $name, $mobile, $businessIds, $validated, $employeeId, $status, $nowDateTime, &$uid, &$fields): void {
+            if ($loginEnabled) {
+                $staffUser = new User;
+                $staffUser->name = $name;
+                $staffUser->email = $email;
+                $staffUser->phone = $mobile;
+                $staffUser->password = $validated['password'];
+                $staffUser->role = 'STAFF';
+                $staffUser->status = $status === 'active' ? 'ACTIVE' : 'INACTIVE';
+                $staffUser->email_verified_at = now();
+                $staffUser->activated_at = $status === 'active' ? now() : null;
+                $staffUser->business_id = $businessIds[0] ?? null;
+                $staffUser->save();
+                $uid = (string) $staffUser->id;
+                $fields['uid'] = $uid;
+            }
+
+            DB::table('employees')->insert([
+                'id' => $employeeId,
+                'document_path' => "employees/{$employeeId}",
+                'business_id' => $businessIds[0] ?? null,
+                'outlet_id' => $outletIds[0] ?? null,
+                'status' => $status,
+                'created_at' => $nowDateTime,
+                'updated_at' => $nowDateTime,
+                'is_deleted' => 0,
+                'payload' => json_encode([
+                    '_documentId' => $employeeId,
+                    '_documentPath' => "employees/{$employeeId}",
+                    'fields' => $fields,
+                ]),
+            ]);
+        });
 
         return ApiResponse::success($fields, "Employee '{$name}' created successfully.", 201);
     }
@@ -279,6 +336,7 @@ class EmployeeController extends Controller
             'outletIds' => 'nullable|array',
             'employeeCode' => 'nullable|string|max:50',
             'status' => 'nullable|string|in:active,inactive,ACTIVE,INACTIVE',
+            'password' => 'nullable|string|min:6|max:255',
         ]);
 
         $row = DB::table('employees')->where('id', $id)->where('is_deleted', 0)->first();
@@ -288,6 +346,9 @@ class EmployeeController extends Controller
 
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? $payload;
+        if ((string) ($fields['ownerUid'] ?? '') !== (string) $request->user()->id) {
+            return ApiResponse::error('You are not authorized to update this employee.', 403, null, 'FORBIDDEN');
+        }
 
         if (isset($validated['name'])) {
             $fields['name'] = trim($validated['name']);
@@ -323,11 +384,51 @@ class EmployeeController extends Controller
         $fields['updatedAt'] = $now;
         $payload['fields'] = $fields;
 
-        DB::table('employees')->where('id', $id)->update([
-            'status' => $fields['status'] ?? $row->status,
-            'updated_at' => now(),
-            'payload' => json_encode($payload),
-        ]);
+        if (! empty($validated['password'])) {
+            $staffUser = ! empty($fields['uid'])
+                ? User::whereKey($fields['uid'])->first()
+                : null;
+            $staffUser ??= User::where('email', strtolower((string) ($fields['email'] ?? '')))->first();
+            if ($staffUser && strtoupper((string) $staffUser->role) !== 'STAFF') {
+                return ApiResponse::error('This email is already attached to a non-staff account.', 422, null, 'duplicate_email');
+            }
+            if ($staffUser && strtolower((string) $staffUser->email) !== strtolower((string) ($fields['email'] ?? ''))) {
+                return ApiResponse::error('This employee is linked to a different login email.', 422, null, 'employee_email_mismatch');
+            }
+
+            $staffUser ??= new User;
+            $staffUser->name = (string) ($fields['name'] ?? '');
+            $staffUser->email = strtolower((string) ($fields['email'] ?? ''));
+            $staffUser->phone = (string) ($fields['mobile'] ?? $fields['phone'] ?? '');
+            $staffUser->password = $validated['password'];
+            $staffUser->role = 'STAFF';
+            $staffUser->status = ($fields['status'] ?? 'active') === 'active' ? 'ACTIVE' : 'INACTIVE';
+            $staffUser->email_verified_at ??= now();
+            $staffUser->activated_at = $staffUser->status === 'ACTIVE' ? now() : null;
+            $staffUser->business_id = ($fields['businessIds'][0] ?? null);
+            $staffUser->save();
+
+            $fields['uid'] = (string) $staffUser->id;
+            $fields['loginEnabled'] = true;
+            $payload['fields'] = $fields;
+        }
+
+        if (! empty($fields['uid'])) {
+            $staffUser = User::whereKey($fields['uid'])->first();
+            if ($staffUser && strtoupper((string) $staffUser->role) === 'STAFF') {
+                $staffUser->status = ($fields['status'] ?? 'active') === 'active' ? 'ACTIVE' : 'INACTIVE';
+                $staffUser->activated_at = $staffUser->status === 'ACTIVE' ? ($staffUser->activated_at ?? now()) : null;
+                $staffUser->save();
+            }
+        }
+
+        DB::transaction(function () use ($id, $fields, $payload, $row): void {
+            DB::table('employees')->where('id', $id)->update([
+                'status' => $fields['status'] ?? $row->status,
+                'updated_at' => now(),
+                'payload' => json_encode($payload),
+            ]);
+        });
 
         return ApiResponse::success($fields, 'Employee updated successfully.');
     }
@@ -349,9 +450,21 @@ class EmployeeController extends Controller
 
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? $payload;
+        if ((string) ($fields['ownerUid'] ?? '') !== (string) $request->user()->id) {
+            return ApiResponse::error('You are not authorized to update this employee.', 403, null, 'FORBIDDEN');
+        }
         $fields['status'] = $status;
         $fields['updatedAt'] = now()->toIso8601String();
         $payload['fields'] = $fields;
+
+        if (! empty($fields['uid'])) {
+            $staffUser = User::whereKey($fields['uid'])->first();
+            if ($staffUser && strtoupper((string) $staffUser->role) === 'STAFF') {
+                $staffUser->status = $status === 'active' ? 'ACTIVE' : 'INACTIVE';
+                $staffUser->activated_at = $status === 'active' ? ($staffUser->activated_at ?? now()) : null;
+                $staffUser->save();
+            }
+        }
 
         DB::table('employees')->where('id', $id)->update([
             'status' => $status,

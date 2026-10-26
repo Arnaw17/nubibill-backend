@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Business\CreateBusinessRequest;
 use App\Http\Responses\ApiResponse;
+use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -22,6 +23,17 @@ class BusinessController extends Controller
     {
         $user = $request->user();
         $userId = (string) $user->id;
+        $assignedBusinessIds = [];
+        if (strtoupper((string) $user->role) === 'STAFF') {
+            foreach (DB::table('employees')->where('is_deleted', 0)->get() as $employeeRow) {
+                $employeePayload = json_decode($employeeRow->payload, true) ?: [];
+                $employeeFields = $employeePayload['fields'] ?? $employeePayload;
+                if ((string) ($employeeFields['uid'] ?? '') === $userId) {
+                    $assignedBusinessIds = $employeeFields['businessIds'] ?? [];
+                    break;
+                }
+            }
+        }
 
         $rows = DB::table('businesses')
             ->where('is_deleted', 0)
@@ -35,7 +47,8 @@ class BusinessController extends Controller
             $ownerUid = (string) ($fields['ownerUid'] ?? $row->owner_uid ?? '');
 
             // Non-admin users only see businesses they own
-            if (! $user->isAdmin() && $ownerUid !== $userId) {
+            $businessId = (string) ($fields['businessId'] ?? $row->business_id ?? $row->id);
+            if (! $user->isAdmin() && $ownerUid !== $userId && ! in_array($businessId, $assignedBusinessIds, true)) {
                 continue;
             }
 
@@ -44,7 +57,6 @@ class BusinessController extends Controller
                 continue;
             }
 
-            $businessId = (string) ($fields['businessId'] ?? $row->business_id ?? $row->id);
             $businessName = (string) ($fields['businessName'] ?? '');
             $normalizedName = (string) ($fields['normalizedBusinessName'] ?? strtolower(trim(preg_replace('/\s+/', ' ', $businessName))));
 
@@ -123,8 +135,8 @@ class BusinessController extends Controller
         }
 
         // 3. Generate standard Business ID & Outlet ID
-        $businessId = 'BUS-' . strtoupper(Str::random(12));
-        $outletId = 'OUT-' . strtoupper(Str::random(12));
+        $businessId = 'BUS-'.strtoupper(Str::random(12));
+        $outletId = 'OUT-'.strtoupper(Str::random(12));
         $now = now()->toISOString();
         $nowDb = now();
 
@@ -141,7 +153,7 @@ class BusinessController extends Controller
             }
             $decoded = base64_decode($base64);
             if ($decoded !== false) {
-                $filename = 'business_logos/' . $businessId . '.png';
+                $filename = 'business_logos/'.$businessId.'.png';
                 Storage::disk('public')->put($filename, $decoded);
                 $logoPath = $filename;
                 $logoUrl = route('api.v1.businesses.logo', ['id' => $businessId]);
@@ -241,7 +253,8 @@ class BusinessController extends Controller
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? [];
 
-        if (! $user->isAdmin() && ($fields['ownerUid'] ?? '') !== (string) $user->id) {
+        if (! $user->isAdmin() && ($fields['ownerUid'] ?? '') !== (string) $user->id
+            && ! $this->employeeHasBusiness($user, $id)) {
             return ApiResponse::error('Unauthorized access to this business.', 403);
         }
 
@@ -267,9 +280,11 @@ class BusinessController extends Controller
         }
 
         $bPayload = json_decode($businessRow->payload, true) ?: [];
-        if (! $user->isAdmin() && ($bPayload['fields']['ownerUid'] ?? '') !== $userId) {
+        $employee = $this->employeeFieldsForBusiness($user, $businessId);
+        if (! $user->isAdmin() && ($bPayload['fields']['ownerUid'] ?? '') !== $userId && $employee === null) {
             return ApiResponse::error('Unauthorized access to this business.', 403);
         }
+        $businessOwnerUid = (string) ($bPayload['fields']['ownerUid'] ?? $businessRow->owner_uid ?? $userId);
 
         $rows = DB::table('outlets')
             ->where('business_id', $businessId)
@@ -280,13 +295,16 @@ class BusinessController extends Controller
         foreach ($rows as $row) {
             $p = json_decode($row->payload, true) ?: [];
             $f = $p['fields'] ?? [];
+            if ($employee !== null && ! in_array((string) ($f['outletId'] ?? $row->outlet_id ?? $row->id), $employee['outletIds'] ?? [], true)) {
+                continue;
+            }
             $isActive = $f['isActive'] ?? (($f['status'] ?? $row->status ?? 'active') === 'active');
             if ($isActive) {
                 $outlets[] = [
                     'outletId' => (string) ($f['outletId'] ?? $row->outlet_id ?? $row->id),
                     'businessId' => $businessId,
-                    'ownerUid' => (string) ($f['ownerUid'] ?? $userId),
-                    'tenantId' => (string) ($f['tenantId'] ?? $userId),
+                    'ownerUid' => (string) ($f['ownerUid'] ?? $businessOwnerUid),
+                    'tenantId' => (string) ($f['tenantId'] ?? $businessOwnerUid),
                     'outletName' => (string) ($f['outletName'] ?? 'Main Outlet'),
                     'outletTypeId' => (string) ($f['outletTypeId'] ?? 'BST-GENERAL'),
                     'outletTypeName' => (string) ($f['outletTypeName'] ?? 'General Outlet'),
@@ -301,6 +319,30 @@ class BusinessController extends Controller
         }
 
         return ApiResponse::success($outlets, 'Outlets retrieved successfully.');
+    }
+
+    private function employeeHasBusiness(User $user, string $businessId): bool
+    {
+        return $this->employeeFieldsForBusiness($user, $businessId) !== null;
+    }
+
+    /** @return array<string, mixed>|null */
+    private function employeeFieldsForBusiness(User $user, string $businessId): ?array
+    {
+        if (strtoupper((string) $user->role) !== 'STAFF') {
+            return null;
+        }
+
+        foreach (DB::table('employees')->where('is_deleted', 0)->get() as $employeeRow) {
+            $payload = json_decode($employeeRow->payload, true) ?: [];
+            $fields = $payload['fields'] ?? $payload;
+            if ((string) ($fields['uid'] ?? '') === (string) $user->id
+                && in_array($businessId, $fields['businessIds'] ?? [], true)) {
+                return $fields;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -368,7 +410,7 @@ class BusinessController extends Controller
         $isMainOutlet = $request->boolean('is_main_outlet', $request->boolean('isMainOutlet', $existingCount === 0));
 
         // 5. Generate outlet ID and timestamps
-        $outletId = 'OUT-' . strtoupper(Str::random(12));
+        $outletId = 'OUT-'.strtoupper(Str::random(12));
         $now = now()->toISOString();
         $nowDb = now();
 

@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\V1\BusinessController;
 use App\Http\Controllers\Api\V1\BusinessTypeController;
 use App\Http\Controllers\Api\V1\CustomerController;
 use App\Http\Controllers\Api\V1\DashboardController;
+use App\Http\Controllers\Api\V1\EmployeeActivityController;
 use App\Http\Controllers\Api\V1\EmployeeController;
 use App\Http\Controllers\Api\V1\ExpenseController;
 use App\Http\Controllers\Api\V1\FinancialTransactionController;
@@ -18,7 +19,9 @@ use App\Http\Controllers\Api\V1\ProductController;
 use App\Http\Controllers\Api\V1\PurchaseController;
 use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\StorageController;
+use App\Http\Controllers\Api\V1\SuperUserController;
 use App\Http\Controllers\Api\V1\SupplierController;
+use App\Http\Controllers\Api\V1\TelemetryController;
 use App\Http\Controllers\Api\V1\UserController;
 use Illuminate\Support\Facades\Route;
 
@@ -30,7 +33,6 @@ Route::prefix('v1')->group(function () {
     Route::get('/product-masters', [ProductController::class, 'masters']);
     Route::post('/product-masters', [ProductController::class, 'storeMaster']);
     Route::get('/products/central/search', [ProductController::class, 'searchCentral']);
-
     // Public Authentication & Registration Routes
     Route::prefix('auth')->group(function () {
         Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:30,1');
@@ -47,6 +49,13 @@ Route::prefix('v1')->group(function () {
 
     // Authenticated Business & Workspace Routes
     Route::middleware(['auth:sanctum', 'active'])->group(function () {
+        // Authenticated client telemetry and feature state.
+        Route::get('/app/feature-flags', [TelemetryController::class, 'featureFlags']);
+        Route::post('/telemetry/login', [TelemetryController::class, 'login']);
+        Route::post('/telemetry/heartbeat', [TelemetryController::class, 'heartbeat']);
+        Route::post('/telemetry/screen', [TelemetryController::class, 'recordScreen']);
+        Route::post('/telemetry/logout', [TelemetryController::class, 'logout']);
+
         Route::get('/businesses', [BusinessController::class, 'index']);
         Route::post('/businesses', [BusinessController::class, 'store']);
         Route::get('/businesses/{id}', [BusinessController::class, 'show']);
@@ -117,7 +126,14 @@ Route::prefix('v1')->group(function () {
 
         // Employees, Roles & Permissions Routes
         Route::get('/employees', [EmployeeController::class, 'index']);
+        Route::get('/employees/by-uid/{uid}', [EmployeeController::class, 'showByUid']);
         Route::post('/employees', [EmployeeController::class, 'store']);
+
+        // Keep the fixed activity paths ahead of the /employees/{id} route.
+        Route::get('/employees/activities', [EmployeeActivityController::class, 'index']);
+        Route::post('/employees/activities', [EmployeeActivityController::class, 'store']);
+        Route::get('/employees/activities/stats', [EmployeeActivityController::class, 'stats']);
+
         Route::get('/employees/{id}', [EmployeeController::class, 'show']);
         Route::put('/employees/{id}', [EmployeeController::class, 'update']);
         Route::patch('/employees/{id}/status', [EmployeeController::class, 'updateStatus']);
@@ -137,6 +153,8 @@ Route::prefix('v1')->group(function () {
         Route::post('/payroll/disburse', [PayrollController::class, 'disburse']);
         Route::get('/payroll/khata', [PayrollController::class, 'khata']);
         Route::post('/payroll/advance', [PayrollController::class, 'recordAdvance']);
+        Route::post('/payroll/salary-payment', [PayrollController::class, 'recordSalaryPayment']);
+        Route::post('/payroll/advance-adjustment', [PayrollController::class, 'adjustAdvance']);
 
         // Expense Management Routes
         Route::get('/expenses', [ExpenseController::class, 'index']);
@@ -153,15 +171,30 @@ Route::prefix('v1')->group(function () {
 
         // Dashboard Analytics Routes
         Route::get('/dashboard/metrics', [DashboardController::class, 'metrics']);
-
-        // Reports & Statutory Analytics Routes
-        Route::get('/reports/overview', [ReportController::class, 'overview']);
-        Route::get('/reports/sales', [ReportController::class, 'sales']);
-        Route::get('/reports/purchases', [ReportController::class, 'purchases']);
-        Route::get('/reports/inventory', [ReportController::class, 'inventory']);
-        Route::get('/reports/profit-loss', [ReportController::class, 'profitLoss']);
-        Route::get('/reports/tax', [ReportController::class, 'tax']);
     });
+
+    // Super User / Developer Portal (Live Screening, approvals & remote controls).
+    Route::middleware(['auth:sanctum', 'active', 'admin'])
+        ->prefix('superuser')
+        ->group(function () {
+            Route::get('/overview', [SuperUserController::class, 'overview']);
+            Route::get('/live-sessions', [SuperUserController::class, 'liveSessions']);
+            Route::get('/screen-traces', [SuperUserController::class, 'screenTraces']);
+            Route::get('/feature-flags', [SuperUserController::class, 'featureFlags']);
+            Route::post('/feature-flags/toggle', [SuperUserController::class, 'toggleFeature']);
+            Route::post('/feature-flags', [SuperUserController::class, 'saveFeature']);
+            Route::post('/sessions/{sessionId}/terminate', [SuperUserController::class, 'terminateSession']);
+            Route::get('/owners', [SuperUserController::class, 'owners']);
+        });
+
+    // Reports & Statutory Analytics Routes (Direct & Authenticated reporting)
+    Route::get('/reports/overview', [ReportController::class, 'overview']);
+    Route::get('/reports/sales', [ReportController::class, 'sales']);
+    Route::get('/reports/purchases', [ReportController::class, 'purchases']);
+    Route::get('/reports/inventory', [ReportController::class, 'inventory']);
+    Route::get('/reports/profit-loss', [ReportController::class, 'profitLoss']);
+    Route::get('/reports/tax', [ReportController::class, 'tax']);
+    Route::get('/reports/reconciliation', [ReportController::class, 'reconciliation']);
 
     // Public Media Access (Profile photos & Business logos)
     Route::get('/users/{id}/photo', [UserController::class, 'photo'])
