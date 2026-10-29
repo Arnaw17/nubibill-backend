@@ -371,7 +371,8 @@ class StorageController extends Controller
 
         if ($parentLocationType === 'GODOWN') {
             $godown = DB::table('storage_locations')->where('id', $parentLocationId)->where('is_deleted', 0)->first();
-            if (! $godown) {
+            $scopeOutletId = $request->input('outlet_id') ?? $request->query('outlet_id') ?? $request->header('X-Outlet-Id');
+            if (! $godown || (string) $godown->business_id !== (string) $businessId || ($godown->outlet_id && $scopeOutletId && (string) $godown->outlet_id !== (string) $scopeOutletId)) {
                 return ApiResponse::error('Parent godown not found.', 404, null, 'NOT_FOUND');
             }
             $gPayload = json_decode($godown->payload, true) ?: [];
@@ -504,7 +505,9 @@ class StorageController extends Controller
         $userId = (string) $user->id;
 
         $row = DB::table('storage_locations')->where('id', $id)->where('is_deleted', 0)->first();
-        if (! $row) {
+        $businessId = $request->input('business_id') ?? $request->query('business_id') ?? $request->header('X-Business-Id');
+        $scopeOutletId = $request->input('outlet_id') ?? $request->query('outlet_id') ?? $request->header('X-Outlet-Id');
+        if (! $row || ($businessId && (string) $row->business_id !== (string) $businessId) || ($row->outlet_id && $scopeOutletId && (string) $row->outlet_id !== (string) $scopeOutletId)) {
             return ApiResponse::error('Storage location not found.', 404, null, 'NOT_FOUND');
         }
 
@@ -585,7 +588,9 @@ class StorageController extends Controller
         $userId = (string) $user->id;
 
         $row = DB::table('storage_locations')->where('id', $id)->where('is_deleted', 0)->first();
-        if (! $row) {
+        $businessId = $request->input('business_id') ?? $request->query('business_id') ?? $request->header('X-Business-Id');
+        $scopeOutletId = $request->input('outlet_id') ?? $request->query('outlet_id') ?? $request->header('X-Outlet-Id');
+        if (! $row || ($businessId && (string) $row->business_id !== (string) $businessId) || ($row->outlet_id && $scopeOutletId && (string) $row->outlet_id !== (string) $scopeOutletId)) {
             return ApiResponse::error('Storage location not found.', 404, null, 'NOT_FOUND');
         }
 

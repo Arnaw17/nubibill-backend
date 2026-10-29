@@ -30,7 +30,28 @@ class SupplierController extends Controller
             return ApiResponse::success([], 'No active business selected.');
         }
 
-        // 1. Fetch supplier balances for this business
+        // 1. Fetch balances and approved unpaid bills for this business. The
+        // bill total keeps Pay Due available if a legacy balance snapshot is stale.
+        $billDuesBySupplier = [];
+        $isStaffRequest = strtoupper((string) $request->user()?->role) === 'STAFF';
+        $billRows = DB::table('purchase_bills')
+            ->where('business_id', $businessId)
+            ->when($isStaffRequest && $request->query('outlet_id'), fn ($query, $outletId) => $query->where('outlet_id', $outletId))
+            ->where('is_deleted', 0)
+            ->where('payload->fields->status', 'APPROVED')
+            ->get();
+        foreach ($billRows as $billRow) {
+            $billFields = json_decode($billRow->payload, true)['fields'] ?? [];
+            $supplierId = (string) ($billFields['supplierId'] ?? '');
+            if ($supplierId === '') continue;
+            $grand = (int) ($billFields['grandTotal'] ?? 0);
+            $paid = (int) ($billFields['paidAmount'] ?? 0);
+            $due = max(0, (int) ($billFields['outstandingAmount'] ?? ($grand - $paid)));
+            if ($due > 0) {
+                $billDuesBySupplier[$supplierId] = ($billDuesBySupplier[$supplierId] ?? 0) + $due;
+            }
+        }
+
         $balanceRows = DB::table('supplier_balances')
             ->where('business_id', $businessId)
             ->where('is_deleted', 0)
@@ -46,7 +67,12 @@ class SupplierController extends Controller
             }
             if ($sId) {
                 $balancesBySupplier[$sId] = [
-                    'totalPayable' => (int) ($bFields['totalPayable'] ?? 0),
+                    'totalPayable' => $isStaffRequest
+                        ? (int) ($billDuesBySupplier[$sId] ?? 0)
+                        : max(
+                            (int) ($bFields['totalPayable'] ?? 0),
+                            (int) ($billDuesBySupplier[$sId] ?? 0),
+                        ),
                     'unallocatedAdvance' => (int) ($bFields['unallocatedAdvance'] ?? 0),
                     'unallocatedReturnCredit' => (int) ($bFields['unallocatedReturnCredit'] ?? 0),
                     'unallocatedSupplierCredit' => (int) ($bFields['unallocatedSupplierCredit'] ?? 0),
@@ -94,13 +120,6 @@ class SupplierController extends Controller
             $suppliersQuery->where('business_id', $businessId);
         }
 
-        if ($statusFilter !== 'ALL') {
-            $suppliersQuery->where(function ($q) use ($statusFilter) {
-                $q->where('status', $statusFilter)
-                    ->orWhereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.status'))) = ?", [$statusFilter]);
-            });
-        }
-
         $suppliers = $suppliersQuery->orderBy('created_at', 'desc')->get();
 
         $data = [];
@@ -138,6 +157,10 @@ class SupplierController extends Controller
                 'preferred' => false,
                 'status' => $status,
             ];
+            $status = strtoupper((string) $rel['status']);
+            if ($statusFilter !== 'ALL' && $status !== $statusFilter) {
+                continue;
+            }
 
             $bal = $balancesBySupplier[$row->id] ?? [
                 'totalPayable' => 0,
@@ -155,6 +178,7 @@ class SupplierController extends Controller
                 'phone' => $mobile ?: null,
                 'whatsapp' => $fields['whatsapp'] ?? null,
                 'email' => $email ?: null,
+                'upiId' => $fields['upiId'] ?? null,
                 'gstin' => $gstin ?: null,
                 'pan' => $pan ?: null,
                 'stateCode' => $stateCode ?: null,
@@ -170,6 +194,14 @@ class SupplierController extends Controller
                 'status' => $status,
                 'createdAt' => $row->created_at,
                 'updatedAt' => $row->updated_at,
+            ];
+        }
+        foreach ($billDuesBySupplier as $supplierId => $billDue) {
+            $balancesBySupplier[$supplierId] ??= [
+                'totalPayable' => $billDue,
+                'unallocatedAdvance' => 0,
+                'unallocatedReturnCredit' => 0,
+                'unallocatedSupplierCredit' => 0,
             ];
         }
 
@@ -264,6 +296,7 @@ class SupplierController extends Controller
             'phone' => 'nullable|string|max:20',
             'whatsapp' => 'nullable|string|max:20',
             'email' => 'nullable|email|max:255',
+            'upi_id' => ['nullable', 'string', 'max:255', 'regex:/^[A-Za-z0-9._-]{2,256}@[A-Za-z0-9.-]{2,64}$/'],
             'gstin' => 'nullable|string|max:15',
             'pan' => 'nullable|string|max:10',
             'state_code' => 'nullable|string|max:10',
@@ -325,6 +358,7 @@ class SupplierController extends Controller
             'mobile' => $mobile,
             'whatsapp' => $validated['whatsapp'] ?? null,
             'email' => $email,
+            'upiId' => $validated['upi_id'] ?? null,
             'gstin' => $gstin,
             'pan' => $pan,
             'stateCode' => $validated['state_code'] ?? null,
@@ -459,6 +493,7 @@ class SupplierController extends Controller
             'contactPerson' => $contactPerson,
             'mobile' => $mobile,
             'email' => $email,
+            'upiId' => $validated['upi_id'] ?? null,
             'gstin' => $gstin,
             'pan' => $pan,
             'stateCode' => $validated['state_code'] ?? null,
@@ -491,6 +526,7 @@ class SupplierController extends Controller
             'phone' => 'nullable|string|max:20',
             'whatsapp' => 'nullable|string|max:20',
             'email' => 'nullable|email|max:255',
+            'upi_id' => ['nullable', 'string', 'max:255', 'regex:/^[A-Za-z0-9._-]{2,256}@[A-Za-z0-9.-]{2,64}$/'],
             'gstin' => 'nullable|string|max:15',
             'pan' => 'nullable|string|max:10',
             'state_code' => 'nullable|string|max:10',
@@ -542,6 +578,7 @@ class SupplierController extends Controller
         if ($mobile !== null) $fields['mobile'] = $mobile;
         if (isset($validated['whatsapp'])) $fields['whatsapp'] = $validated['whatsapp'];
         if ($email !== null) $fields['email'] = $email;
+        if (array_key_exists('upi_id', $validated)) $fields['upiId'] = trim((string) $validated['upi_id']);
         if ($gstin !== null) $fields['gstin'] = $gstin;
         if (isset($validated['pan'])) $fields['pan'] = strtoupper(trim($validated['pan']));
         if (isset($validated['state_code'])) $fields['stateCode'] = trim($validated['state_code']);
@@ -589,6 +626,7 @@ class SupplierController extends Controller
                 'name' => $name,
                 'mobile' => $fields['mobile'] ?? null,
                 'email' => $fields['email'] ?? null,
+                'upiId' => $fields['upiId'] ?? null,
                 'gstin' => $fields['gstin'] ?? null,
                 'status' => $fields['status'] ?? 'ACTIVE',
             ],
@@ -598,6 +636,41 @@ class SupplierController extends Controller
     /**
      * Soft delete a supplier.
      */
+    public function setStatus(Request $request, string $id): JsonResponse
+    {
+        $validated = $request->validate([
+            'business_id' => 'required|string',
+            'is_active' => 'required|boolean',
+        ]);
+        $businessId = $validated['business_id'];
+        $relation = DB::table('supplier_businesses')
+            ->where('business_id', $businessId)
+            ->where('is_deleted', 0)
+            ->where(function ($query) use ($id) {
+                $query->where('id', 'LIKE', "{$id}_%")
+                    ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.supplierId')) = ?", [$id]);
+            })
+            ->first();
+
+        if (! $relation) {
+            return ApiResponse::error('Supplier is not linked to this business.', 'NOT_FOUND', 404);
+        }
+
+        $status = $validated['is_active'] ? 'ACTIVE' : 'INACTIVE';
+        $payload = json_decode((string) $relation->payload, true) ?: [];
+        $fields = $payload['fields'] ?? [];
+        $fields['status'] = $status;
+        $fields['updatedAt'] = now()->toIso8601String();
+        $payload['fields'] = $fields;
+        DB::table('supplier_businesses')->where('id', $relation->id)->update([
+            'status' => $status,
+            'updated_at' => now(),
+            'payload' => json_encode($payload),
+        ]);
+
+        return ApiResponse::success(['supplierId' => $id, 'status' => $status], 'Supplier status updated.');
+    }
+
     public function destroy(Request $request, string $id): JsonResponse
     {
         $supplier = DB::table('suppliers')->where('id', $id)->first();
@@ -631,6 +704,7 @@ class SupplierController extends Controller
     public function ledger(Request $request, string $id): JsonResponse
     {
         $businessId = $request->query('business_id') ?? $request->header('X-Business-Id');
+        $outletId = $request->query('outlet_id') ?? $request->header('X-Outlet-Id');
         if (! $businessId) {
             $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
             $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
@@ -655,6 +729,8 @@ class SupplierController extends Controller
 
         $missingBills = DB::table('purchase_bills')
             ->where('payload->fields->supplierId', $id)
+            ->when($businessId, fn ($query) => $query->where('business_id', $businessId))
+            ->when($outletId && strtoupper($outletId) !== 'ALL', fn ($query) => $query->where('outlet_id', $outletId))
             ->whereNotIn('id', $existingBills)
             ->where('is_deleted', 0)
             ->get();
@@ -709,6 +785,13 @@ class SupplierController extends Controller
         if ($businessId) {
             $query->where(function ($q) use ($businessId) {
                 $q->where('business_id', $businessId)->orWhereNull('business_id');
+            });
+        }
+        if ($outletId && strtoupper($outletId) !== 'ALL') {
+            $query->where(function ($q) use ($outletId) {
+                $q->where('outlet_id', $outletId)
+                    ->orWhere('payload->fields->outletId', $outletId)
+                    ->orWhere('payload->fields->outlet_id', $outletId);
             });
         }
 
@@ -819,6 +902,42 @@ class SupplierController extends Controller
         return ApiResponse::success($data, 'Supplier ledger entries retrieved successfully.');
     }
 
+    /** List approved bills with an outstanding supplier balance. */
+    public function outstandingBills(Request $request, string $id): JsonResponse
+    {
+        $businessId = (string) ($request->query('business_id') ?? $request->input('business_id', ''));
+        $outletId = (string) ($request->query('outlet_id') ?? $request->input('outlet_id', ''));
+        if ($businessId === '' || $outletId === '') {
+            return ApiResponse::error('A business and outlet context are required.', 'WORKSPACE_REQUIRED', 422);
+        }
+        $supplierBusinessId = "{$id}_{$businessId}";
+        $query = DB::table('purchase_bills')
+            ->where('business_id', $businessId)
+            ->where('is_deleted', 0)
+            ->where('payload->fields->supplierBusinessId', $supplierBusinessId)
+            ->where('payload->fields->status', 'APPROVED');
+        if (strtoupper((string) $request->user()?->role) === 'STAFF') {
+            $query->where('outlet_id', $outletId);
+        }
+        $rows = $query->get();
+        $bills = [];
+        foreach ($rows as $row) {
+            $fields = json_decode($row->payload, true)['fields'] ?? [];
+            $grand = (int) ($fields['grandTotal'] ?? 0);
+            $paid = (int) ($fields['paidAmount'] ?? 0);
+            $due = max(0, (int) ($fields['outstandingAmount'] ?? ($grand - $paid)));
+            if ($due <= 0) continue;
+            $fields['purchaseBillId'] = $row->id;
+            $fields['outstandingAmount'] = $due;
+            $bills[] = $fields;
+        }
+        usort($bills, fn ($a, $b) => strcmp(
+            (string) ($a['invoiceDate'] ?? $a['createdAt'] ?? ''),
+            (string) ($b['invoiceDate'] ?? $b['createdAt'] ?? '')
+        ));
+        return ApiResponse::success($bills, 'Outstanding supplier bills retrieved successfully.');
+    }
+
     /**
      * Record payment to a supplier.
      */
@@ -832,6 +951,8 @@ class SupplierController extends Controller
             'payment_mode' => 'nullable|string|in:CASH,UPI,BANK_TRANSFER,CHEQUE,CARD',
             'reference_no' => 'nullable|string|max:100',
             'notes' => 'nullable|string|max:500',
+            'payment_date' => 'nullable|date',
+            'allow_advance' => 'nullable|boolean',
         ]);
 
         $businessId = $validated['business_id'];
@@ -841,11 +962,16 @@ class SupplierController extends Controller
         $mode = $validated['payment_mode'] ?? 'CASH';
         $refNo = $validated['reference_no'] ?? null;
         $notes = $validated['notes'] ?? null;
+        $allowAdvance = (bool) ($validated['allow_advance'] ?? false);
         $userId = $request->user()?->id ?? 'SYSTEM';
-        $now = now()->toIso8601String();
+        $paymentDate = isset($validated['payment_date'])
+            ? \Illuminate\Support\Carbon::parse($validated['payment_date'])
+            : now();
+        $now = $paymentDate->toIso8601String();
         $dbNow = now();
 
         $supplierBusinessId = "{$id}_{$businessId}";
+        $isStaff = strtoupper((string) $request->user()?->role) === 'STAFF';
 
         return DB::transaction(function () use (
             $id,
@@ -857,11 +983,13 @@ class SupplierController extends Controller
             $mode,
             $refNo,
             $notes,
+            $allowAdvance,
             $userId,
             $now,
-            $dbNow
+            $dbNow,
+            $isStaff,
         ) {
-            // 1. Lock and update balance
+            // Lock the supplier balance and FIFO eligible bills in one SQL transaction.
             $balRow = DB::table('supplier_balances')
                 ->where('business_id', $businessId)
                 ->where(function ($q) use ($id, $supplierBusinessId) {
@@ -873,64 +1001,115 @@ class SupplierController extends Controller
 
             $currentPayable = 0;
             $currentAdvance = 0;
+            $bPayload = [];
+            $bFields = [];
 
             if ($balRow) {
                 $bPayload = json_decode($balRow->payload, true) ?: [];
                 $bFields = $bPayload['fields'] ?? [];
                 $currentPayable = (int) ($bFields['totalPayable'] ?? 0);
                 $currentAdvance = (int) ($bFields['unallocatedAdvance'] ?? 0);
+            }
 
-                if ($amount <= $currentPayable) {
-                    $currentPayable -= $amount;
-                } else {
-                    $excess = $amount - $currentPayable;
-                    $currentPayable = 0;
-                    $currentAdvance += $excess;
-                }
+            // An explicit bill payment settles only that bill. Pay Due (no bill id)
+            // allocates FIFO across all approved outstanding bills for this supplier.
+            $settledBills = [];
+            $remainingToAllocate = $amount;
+            $billQuery = DB::table('purchase_bills')
+                ->where('business_id', $businessId)
+                ->where('is_deleted', 0)
+                ->where('payload->fields->supplierBusinessId', $supplierBusinessId)
+                ->where('payload->fields->status', 'APPROVED');
+            if ($isStaff && $outletId !== '') {
+                $billQuery->where('outlet_id', $outletId);
+            }
+            if ($purchaseBillId) {
+                $billQuery->where('id', $purchaseBillId);
+            }
+            $billRows = $billQuery->lockForUpdate()->get()->sortBy(function ($row) {
+                $fields = json_decode($row->payload, true)['fields'] ?? [];
+                return $fields['invoiceDate'] ?? $row->created_at;
+            })->values();
+            $billDueTotal = $billRows->sum(function ($row) {
+                $fields = json_decode($row->payload, true)['fields'] ?? [];
+                $grand = (int) ($fields['grandTotal'] ?? 0);
+                $paid = (int) ($fields['paidAmount'] ?? 0);
+                return max(0, (int) ($fields['outstandingAmount'] ?? ($grand - $paid)));
+            });
+            if ($currentPayable <= 0) {
+                $currentPayable = $billDueTotal;
+            }
+            $paymentDue = $isStaff ? $billDueTotal : $currentPayable;
+            if (! $purchaseBillId && $paymentDue <= 0 && ! $allowAdvance) {
+                return ApiResponse::error('There is no outstanding supplier due to pay.', 'NO_SUPPLIER_DUE', 422);
+            }
+            $previousDue = $paymentDue;
+            foreach ($billRows as $pbRow) {
+                if ($remainingToAllocate <= 0) break;
+                $pbPayload = json_decode($pbRow->payload, true) ?: [];
+                $pbFields = $pbPayload['fields'] ?? [];
+                $pbGrand = (int) ($pbFields['grandTotal'] ?? 0);
+                $pbOldPaid = (int) ($pbFields['paidAmount'] ?? 0);
+                $pbOutstanding = max(0, (int) ($pbFields['outstandingAmount'] ?? ($pbGrand - $pbOldPaid)));
+                if ($pbOutstanding <= 0) continue;
+                $allocated = min($remainingToAllocate, $pbOutstanding);
+                $remainingToAllocate -= $allocated;
+                $pbNewPaid = min($pbGrand, $pbOldPaid + $allocated);
+                $pbNewOutstanding = max(0, $pbOutstanding - $allocated);
+                $pbFields['paidAmount'] = $pbNewPaid;
+                $pbFields['outstandingAmount'] = $pbNewOutstanding;
+                $pbFields['paymentStatus'] = $pbNewOutstanding === 0 ? 'PAID' : 'PARTIAL';
+                $pbFields['updatedAt'] = $now;
+                $pbFields['updatedBy'] = $userId;
+                $pbFields['version'] = ((int) ($pbFields['version'] ?? 1)) + 1;
+                $pbPayload['fields'] = $pbFields;
+                DB::table('purchase_bills')->where('id', $pbRow->id)->update([
+                    'updated_at' => $dbNow,
+                    'payload' => json_encode($pbPayload),
+                ]);
+                $settledBills[] = [
+                    'purchaseBillId' => $pbRow->id,
+                    'supplierInvoiceNumber' => $pbFields['supplierInvoiceNumber'] ?? $pbFields['purchaseNumber'] ?? $pbRow->id,
+                    'invoiceDate' => $pbFields['invoiceDate'] ?? null,
+                    'grandTotal' => $pbGrand,
+                    'paidBefore' => $pbOldPaid,
+                    'allocatedAmount' => $allocated,
+                    'outstandingBefore' => $pbOutstanding,
+                    'outstandingAfter' => $pbNewOutstanding,
+                ];
+            }
 
-                $bFields['totalPayable'] = $currentPayable;
-                $bFields['unallocatedAdvance'] = $currentAdvance;
-                $bFields['updatedAt'] = $now;
-                $bPayload['fields'] = $bFields;
-
+            $appliedToPayable = min($amount, $paymentDue);
+            $currentPayable = max(0, $currentPayable - $appliedToPayable);
+            $currentAdvance += $amount - $appliedToPayable;
+            $remainingDue = $isStaff
+                ? max(0, $paymentDue - $appliedToPayable)
+                : $currentPayable;
+            $bFields['tenantId'] = $bFields['tenantId'] ?? $userId;
+            $bFields['businessId'] = $businessId;
+            $bFields['supplierId'] = $id;
+            $bFields['supplierBusinessId'] = $supplierBusinessId;
+            $bFields['totalPayable'] = $currentPayable;
+            $bFields['unallocatedAdvance'] = $currentAdvance;
+            $bFields['updatedAt'] = $now;
+            $bPayload['fields'] = $bFields;
+            if ($balRow) {
                 DB::table('supplier_balances')->where('id', $balRow->id)->update([
                     'updated_at' => $dbNow,
                     'payload' => json_encode($bPayload),
                 ]);
-            }
-
-            // 1b. Update purchase bill if specified
-            $settledBills = [];
-            if ($purchaseBillId) {
-                $pbRow = DB::table('purchase_bills')
-                    ->where('id', $purchaseBillId)
-                    ->where('business_id', $businessId)
-                    ->lockForUpdate()
-                    ->first();
-                if ($pbRow) {
-                    $pbPayload = json_decode($pbRow->payload, true) ?: [];
-                    $pbFields = $pbPayload['fields'] ?? [];
-                    $pbGrand = (int) ($pbFields['grandTotal'] ?? 0);
-                    $pbOldPaid = (int) ($pbFields['paidAmount'] ?? 0);
-                    $pbNewPaid = min($pbGrand, $pbOldPaid + $amount);
-                    $pbOutstanding = max(0, $pbGrand - $pbNewPaid);
-                    $pbFields['paidAmount'] = $pbNewPaid;
-                    $pbFields['outstandingAmount'] = $pbOutstanding;
-                    $pbFields['paymentStatus'] = $pbNewPaid >= $pbGrand ? 'PAID' : ($pbNewPaid > 0 ? 'PARTIAL' : 'UNPAID');
-                    $pbFields['updatedAt'] = $now;
-                    $pbPayload['fields'] = $pbFields;
-                    DB::table('purchase_bills')->where('id', $purchaseBillId)->update([
-                        'updated_at' => $dbNow,
-                        'payload' => json_encode($pbPayload),
-                    ]);
-                    $settledBills[] = [
-                        'purchaseBillId' => $purchaseBillId,
-                        'supplierInvoiceNumber' => $pbFields['supplierInvoiceNumber'] ?? '',
-                        'allocatedAmount' => $amount,
-                        'outstandingBefore' => max(0, $pbGrand - $pbOldPaid),
-                        'outstandingAfter' => $pbOutstanding,
-                    ];
-                }
+            } else {
+                DB::table('supplier_balances')->insert([
+                    'id' => $supplierBusinessId,
+                    'document_path' => "supplier_balances/{$supplierBusinessId}",
+                    'business_id' => $businessId,
+                    'outlet_id' => $outletId,
+                    'status' => 'ACTIVE',
+                    'created_at' => $dbNow,
+                    'updated_at' => $dbNow,
+                    'is_deleted' => 0,
+                    'payload' => json_encode($bPayload),
+                ]);
             }
 
             // 2. Insert into payments
@@ -940,7 +1119,7 @@ class SupplierController extends Controller
                 'businessId' => $businessId,
                 'outletId' => $outletId,
                 'supplierId' => $id,
-                'purchaseBillId' => $purchaseBillId,
+                'purchaseBillId' => count($settledBills) === 1 ? $settledBills[0]['purchaseBillId'] : null,
                 'amount' => $amount,
                 'paymentMethod' => $mode,
                 'referenceNumber' => $refNo,
@@ -971,9 +1150,9 @@ class SupplierController extends Controller
                 'supplierBusinessId' => $supplierBusinessId,
                 'supplierId' => $id,
                 'entryType' => 'PAYMENT',
-                'referenceType' => $purchaseBillId ? 'PURCHASE_PAYMENT' : 'PAYMENT',
+                'referenceType' => $settledBills ? 'PURCHASE_PAYMENT' : 'PAYMENT',
                 'referenceId' => $paymentId,
-                'purchaseBillId' => $purchaseBillId,
+                'purchaseBillId' => count($settledBills) === 1 ? $settledBills[0]['purchaseBillId'] : null,
                 'debit' => $amount,
                 'credit' => 0,
                 'transactionDate' => $now,
@@ -1002,9 +1181,14 @@ class SupplierController extends Controller
                     'voucherNumber' => 'VCH-' . strtoupper(substr($paymentId, -8)),
                     'amount' => $amount,
                     'amountPaidPaise' => $amount,
-                    'previousDuePaise' => $currentPayable + $amount,
-                    'remainingDuePaise' => $currentPayable,
+                    'previousDuePaise' => $previousDue,
+                    'remainingDuePaise' => $remainingDue,
                     'unallocatedAdvancePaise' => $currentAdvance,
+                    'supplierName' => (function () use ($id) {
+                        $row = DB::table('suppliers')->where('id', $id)->first();
+                        $fields = $row ? ((json_decode($row->payload, true)['fields'] ?? [])) : [];
+                        return $fields['name'] ?? $fields['supplierName'] ?? 'Supplier';
+                    })(),
                     'paymentMode' => $mode,
                     'paymentMethod' => $mode,
                     'referenceNumber' => $refNo,

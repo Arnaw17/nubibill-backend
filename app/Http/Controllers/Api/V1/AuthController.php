@@ -25,6 +25,19 @@ class AuthController extends Controller
      */
     public function register(RegisterRequest $request): JsonResponse
     {
+        $registrationEnabled = DB::table('app_remote_feature_flags')
+            ->where('feature_key', 'registration')
+            ->value('is_enabled');
+
+        if ($registrationEnabled === null || ! (bool) $registrationEnabled) {
+            return ApiResponse::error(
+                'New user registration is temporarily unavailable. Please try again later.',
+                503,
+                null,
+                'REGISTRATION_DISABLED'
+            );
+        }
+
         return DB::transaction(function () use ($request) {
             $photoPath = null;
             if ($request->hasFile('photo')) {

@@ -404,6 +404,158 @@ class ProductController extends Controller
     /**
      * Create a new product and its variants atomically.
      */
+    /** Assign permanent internal barcodes to active variants missing one. */
+    public function generateMissingBarcodes(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'business_id' => 'required|string',
+            'outlet_id' => 'nullable|string',
+        ]);
+
+        $user = $request->user();
+        $businessId = (string) $validated['business_id'];
+        $outletId = $validated['outlet_id'] ?? null;
+        $business = DB::table('businesses')
+            ->where('id', $businessId)
+            ->where('is_deleted', 0)
+            ->first();
+        if (! $business) {
+            return ApiResponse::error('Business not found.', 404, null, 'BUSINESS_NOT_FOUND');
+        }
+
+        $businessPayload = json_decode((string) $business->payload, true) ?: [];
+        $businessFields = $businessPayload['fields'] ?? $businessPayload;
+        $ownerUid = (string) ($businessFields['ownerUid'] ?? $business->owner_uid ?? '');
+        $isStaff = strtoupper((string) $user->role) === 'STAFF';
+        if (! $user->isAdmin() && ! $isStaff && $ownerUid !== (string) $user->id) {
+            return ApiResponse::error('Unauthorized access to this business.', 403, null, 'PERMISSION_DENIED');
+        }
+
+        if ($outletId !== null) {
+            $outletExists = DB::table('outlets')
+                ->where('id', $outletId)
+                ->where('business_id', $businessId)
+                ->where('is_deleted', 0)
+                ->exists();
+            if (! $outletExists) {
+                return ApiResponse::error('The selected outlet does not belong to this business.', 422, null, 'OUTLET_SCOPE_MISMATCH');
+            }
+        }
+
+        $generated = DB::transaction(function () use ($businessId, $outletId, $ownerUid, $user): int {
+            $products = DB::table('products')
+                ->where('business_id', $businessId)
+                ->where('is_deleted', 0)
+                ->get(['id', 'status', 'payload'])
+                ->keyBy('id');
+            $variants = DB::table('product_variants')
+                ->where('business_id', $businessId)
+                ->where('is_deleted', 0)
+                ->lockForUpdate()
+                ->get();
+
+            $usedNumbers = [];
+            $missing = [];
+            foreach ($variants as $variant) {
+                $payload = json_decode((string) $variant->payload, true) ?: [];
+                $fields = $payload['fields'] ?? $payload;
+                $barcode = trim((string) ($fields['barcode'] ?? ''));
+                if (preg_match('/^\d{12}$/', $barcode)) {
+                    $usedNumbers[] = (int) $barcode;
+                }
+
+                $productId = (string) ($fields['productId'] ?? '');
+                $product = $products->get($productId);
+                if (! $product || strtoupper((string) $product->status) !== 'ACTIVE') {
+                    continue;
+                }
+                $productPayload = json_decode((string) $product->payload, true) ?: [];
+                $productFields = $productPayload['fields'] ?? $productPayload;
+                if (strtoupper((string) ($productFields['status'] ?? $product->status ?? 'ACTIVE')) !== 'ACTIVE' ||
+                    strtoupper((string) ($fields['status'] ?? $variant->status ?? 'ACTIVE')) !== 'ACTIVE' ||
+                    $barcode !== '') {
+                    continue;
+                }
+                $missing[] = [$variant, $payload, $fields];
+            }
+
+            if ($missing === []) {
+                return 0;
+            }
+
+            $sequenceId = "{$ownerUid}_{$businessId}_INTERNAL_BARCODE";
+            $highestUsed = $usedNumbers === [] ? 700000000000 : max($usedNumbers);
+            $initialNext = max(700000000001, $highestUsed + 1);
+            $now = now();
+            $nowIso = $now->toIso8601String();
+            DB::table('document_sequences')->insertOrIgnore([
+                'id' => $sequenceId,
+                'document_path' => "document_sequences/{$sequenceId}",
+                'business_id' => $businessId,
+                'outlet_id' => $outletId,
+                'status' => 'ACTIVE',
+                'created_at' => $now,
+                'updated_at' => $now,
+                'is_deleted' => 0,
+                'payload' => json_encode(['fields' => [
+                    'tenantId' => $ownerUid,
+                    'businessId' => $businessId,
+                    'sequenceType' => 'INTERNAL_BARCODE',
+                    'nextNumber' => $initialNext,
+                    'padding' => 12,
+                    'createdAt' => $nowIso,
+                ]]),
+            ]);
+            $sequence = DB::table('document_sequences')
+                ->where('id', $sequenceId)
+                ->lockForUpdate()
+                ->first();
+            $sequencePayload = json_decode((string) ($sequence->payload ?? ''), true) ?: [];
+            $sequenceFields = $sequencePayload['fields'] ?? $sequencePayload;
+            $nextNumber = max(
+                $initialNext,
+                (int) ($sequenceFields['nextNumber'] ?? $sequenceFields['sequence'] ?? $initialNext),
+            );
+            if ($nextNumber + count($missing) - 1 > 999999999999) {
+                throw new \RuntimeException('The internal barcode range is exhausted.');
+            }
+
+            foreach ($missing as [$variant, $payload, $fields]) {
+                while (in_array($nextNumber, $usedNumbers, true)) {
+                    $nextNumber++;
+                }
+                $barcode = str_pad((string) $nextNumber, 12, '0', STR_PAD_LEFT);
+                $usedNumbers[] = $nextNumber++;
+                $fields['barcode'] = $barcode;
+                $fields['updatedAt'] = $nowIso;
+                $payload['fields'] = $fields;
+                DB::table('product_variants')->where('id', $variant->id)->update([
+                    'payload' => json_encode($payload),
+                    'updated_at' => $now,
+                ]);
+            }
+
+            $sequenceFields['tenantId'] = $ownerUid;
+            $sequenceFields['businessId'] = $businessId;
+            $sequenceFields['sequenceType'] = 'INTERNAL_BARCODE';
+            $sequenceFields['nextNumber'] = $nextNumber;
+            $sequenceFields['padding'] = 12;
+            $sequenceFields['updatedAt'] = $nowIso;
+            $sequencePayload['fields'] = $sequenceFields;
+            DB::table('document_sequences')->where('id', $sequenceId)->update([
+                'updated_at' => $now,
+                'payload' => json_encode($sequencePayload),
+            ]);
+
+            return count($missing);
+        });
+
+        return ApiResponse::success(
+            ['count' => $generated],
+            $generated > 0 ? "{$generated} missing barcode(s) assigned." : 'All active variants already have barcodes.'
+        );
+    }
+
     public function store(Request $request): JsonResponse
     {
         $user = $request->user();

@@ -36,6 +36,9 @@ class CustomerController extends Controller
         $balanceRows = DB::table('customer_balances')
             ->where('business_id', $businessId)
             ->where('is_deleted', 0)
+            ->when($outletId, fn ($query) => $query->where(function ($scope) use ($outletId) {
+                $scope->where('outlet_id', $outletId)->orWhereNull('outlet_id')->orWhere('outlet_id', '');
+            }))
             ->get();
 
         $balancesByCustomer = [];
@@ -55,6 +58,12 @@ class CustomerController extends Controller
         $query = DB::table('customers')
             ->where('business_id', $businessId)
             ->where('is_deleted', 0);
+
+        if ($outletId) {
+            $query->where(function ($scope) use ($outletId) {
+                $scope->where('outlet_id', $outletId)->orWhereNull('outlet_id')->orWhere('outlet_id', '');
+            });
+        }
 
         if ($statusFilter !== 'ALL') {
             $query->where(function ($q) use ($statusFilter) {

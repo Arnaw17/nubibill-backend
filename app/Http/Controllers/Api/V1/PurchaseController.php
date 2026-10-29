@@ -762,7 +762,9 @@ class PurchaseController extends Controller
             ->where('is_deleted', 0)
             ->first();
 
-        if (! $row) {
+        $requestedBusinessId = $request->input('business_id') ?? $request->query('business_id') ?? $request->header('X-Business-Id');
+        $requestedOutletId = $request->input('outlet_id') ?? $request->query('outlet_id') ?? $request->header('X-Outlet-Id');
+        if (! $row || ($requestedBusinessId && (string) $row->business_id !== (string) $requestedBusinessId) || ($requestedOutletId && (string) $row->outlet_id !== (string) $requestedOutletId)) {
             return ApiResponse::error('Purchase bill not found.', 404);
         }
 
@@ -860,33 +862,35 @@ class PurchaseController extends Controller
 
             // Ledger entry
             $ledgerBillId = "PURCHASE_BILL_{$id}_1";
-            DB::table('supplier_ledger_entries')->insert([
-                'id' => $ledgerBillId,
-                'document_path' => "supplier_ledger_entries/{$ledgerBillId}",
-                'business_id' => $businessId,
-                'outlet_id' => $outletId,
-                'status' => 'POSTED',
-                'created_at' => $dbNow,
-                'updated_at' => $dbNow,
-                'is_deleted' => 0,
-                'payload' => json_encode(['fields' => [
-                    'ledgerEntryId' => $ledgerBillId,
-                    'tenantId' => $userId,
-                    'businessId' => $businessId,
-                    'outletId' => $outletId,
-                    'supplierBusinessId' => $supplierBusinessId,
-                    'supplierId' => $supplierId,
-                    'entryType' => 'PURCHASE_BILL',
-                    'referenceType' => 'PURCHASE_BILL',
-                    'referenceId' => $id,
-                    'debit' => 0,
-                    'credit' => $grandTotal,
-                    'transactionDate' => $now,
-                    'createdAt' => $now,
-                    'createdBy' => $userId,
-                    'isReversal' => false,
-                ]]),
-            ]);
+            DB::table('supplier_ledger_entries')->updateOrInsert(
+                ['id' => $ledgerBillId],
+                [
+                    'document_path' => "supplier_ledger_entries/{$ledgerBillId}",
+                    'business_id' => $businessId,
+                    'outlet_id' => $outletId,
+                    'status' => 'POSTED',
+                    'created_at' => $dbNow,
+                    'updated_at' => $dbNow,
+                    'is_deleted' => 0,
+                    'payload' => json_encode(['fields' => [
+                        'ledgerEntryId' => $ledgerBillId,
+                        'tenantId' => $userId,
+                        'businessId' => $businessId,
+                        'outletId' => $outletId,
+                        'supplierBusinessId' => $supplierBusinessId,
+                        'supplierId' => $supplierId,
+                        'entryType' => 'PURCHASE_BILL',
+                        'referenceType' => 'PURCHASE_BILL',
+                        'referenceId' => $id,
+                        'debit' => 0,
+                        'credit' => $grandTotal,
+                        'transactionDate' => $now,
+                        'createdAt' => $now,
+                        'createdBy' => $userId,
+                        'isReversal' => false,
+                    ]]),
+                ]
+            );
 
             // GRN
             $grnId = "AUTO_GRN_{$id}";

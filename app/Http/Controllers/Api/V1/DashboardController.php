@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Services\EmployeePermissionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -13,7 +14,7 @@ class DashboardController extends Controller
     /**
      * Get aggregated dashboard summary & KPIs.
      */
-    public function metrics(Request $request): JsonResponse
+    public function metrics(Request $request, EmployeePermissionService $permissions): JsonResponse
     {
         $businessId = $request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id');
         $outletId = $request->query('outlet_id') ?? $request->query('outletId') ?? $request->header('X-Outlet-Id');
@@ -384,6 +385,37 @@ class DashboardController extends Controller
             'todaySalesTotal' => round($todaySalesTotalRupees, 2),
             'todayExpenseTotal' => round($todayExpensePaise / 100, 2),
         ];
+
+        if (strtoupper((string) $request->user()->role) === 'STAFF') {
+            $salesAllowed = $permissions->isAuthorized($request->user(), ['sales', 'sales.view', 'billing']);
+            $purchasesAllowed = $permissions->isAuthorized($request->user(), ['purchase', 'purchase.view']);
+            $inventoryAllowed = $permissions->isAuthorized($request->user(), ['inventory', 'inventory.view', 'products', 'products.view', 'product.read', 'billing']);
+            $customersAllowed = $permissions->isAuthorized($request->user(), ['customers', 'customers.view', 'CUSTOMER_VIEW', 'billing']);
+            $expensesAllowed = $permissions->isAuthorized($request->user(), ['expenses', 'expenses.view']);
+
+            if (! $salesAllowed) {
+                $summary = array_replace($summary, [
+                    'salesTotal' => 0, 'salesCount' => 0, 'weeklySales' => [], 'recentSales' => [],
+                    'topProducts' => [], 'topProductsByRevenue' => [], 'bottomProducts' => [],
+                    'salesDueTotal' => 0, 'salesDueCount' => 0, 'todaySalesTotal' => 0,
+                ]);
+            }
+            if (! $purchasesAllowed) {
+                $summary = array_replace($summary, ['purchaseTotal' => 0, 'purchaseCount' => 0, 'purchaseDueTotal' => 0]);
+            }
+            if (! $inventoryAllowed) {
+                $summary = array_replace($summary, [
+                    'productCount' => 0, 'activeProductCount' => 0, 'inactiveProductCount' => 0,
+                    'outOfStockCount' => 0, 'lowStockCount' => 0, 'lowStockProducts' => [],
+                ]);
+            }
+            if (! $customersAllowed) {
+                $summary = array_replace($summary, ['customerCount' => 0, 'customerDueTotal' => 0, 'customersWithDueCount' => 0]);
+            }
+            if (! $expensesAllowed) {
+                $summary['todayExpenseTotal'] = 0;
+            }
+        }
 
         return ApiResponse::success($summary, 'Dashboard metrics retrieved successfully.');
     }

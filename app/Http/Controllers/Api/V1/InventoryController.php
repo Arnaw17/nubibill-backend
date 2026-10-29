@@ -111,7 +111,7 @@ class InventoryController extends Controller
             'outletId' => 'nullable|string',
             'variantId' => 'nullable|string',
             'productId' => 'required|string',
-            'type' => 'required|string|in:RECEIVE,ADJUST_IN,ADJUST_OUT,DAMAGE_LOSS,COUNT_CORRECTION,SALE,RETURN,receive,adjustIn,adjustOut,damageLoss,countCorrection,sale,returnStock',
+            'type' => 'required|string|in:RECEIVE,OPENING_STOCK,ADJUST_IN,ADJUST_OUT,DAMAGE_LOSS,COUNT_CORRECTION,SALE,RETURN,receive,openingStock,adjustIn,adjustOut,damageLoss,countCorrection,sale,returnStock',
             'qtyBase' => 'required|integer|min:0',
             'reason' => 'required|string|max:500',
             'unitCostPaise' => 'nullable|integer|min:0',
@@ -139,6 +139,7 @@ class InventoryController extends Controller
         // Normalize type
         $typeMap = [
             'RECEIVE' => 'RECEIVE',
+            'OPENING_STOCK' => 'OPENING_STOCK',
             'ADJUST_IN' => 'ADJUST_IN',
             'ADJUST_OUT' => 'ADJUST_OUT',
             'DAMAGE_LOSS' => 'DAMAGE_LOSS',
@@ -146,6 +147,7 @@ class InventoryController extends Controller
             'SALE' => 'SALE',
             'RETURN' => 'RETURN',
             'receive' => 'RECEIVE',
+            'openingStock' => 'OPENING_STOCK',
             'adjustIn' => 'ADJUST_IN',
             'adjustOut' => 'ADJUST_OUT',
             'damageLoss' => 'DAMAGE_LOSS',
@@ -155,8 +157,16 @@ class InventoryController extends Controller
         ];
         $type = $typeMap[$validated['type']] ?? strtoupper($validated['type']);
 
-        if ($type === 'RECEIVE' && ($unitCostPaise === null || $unitCostPaise < 0)) {
-            return ApiResponse::error('Enter a valid purchase cost for received stock.', 422, null, 'VALIDATION_FAILED');
+        $permissionService = app(\App\Services\EmployeePermissionService::class);
+        $requiredPermission = $type === 'OPENING_STOCK'
+            ? ['inventory.adjust', 'inventory.opening_stock']
+            : ['inventory.adjust'];
+        if (! $permissionService->isAuthorized($user, $requiredPermission)) {
+            return ApiResponse::error('You do not have permission to perform this stock operation.', 403, null, 'PERMISSION_DENIED');
+        }
+
+        if (in_array($type, ['RECEIVE', 'OPENING_STOCK'], true) && ($unitCostPaise === null || $unitCostPaise <= 0)) {
+            return ApiResponse::error('Enter a valid unit cost for received or opening stock.', 422, null, 'VALIDATION_FAILED');
         }
 
         if ($qtyBase <= 0 && $type !== 'COUNT_CORRECTION') {
@@ -192,9 +202,54 @@ class InventoryController extends Controller
                 $balanceId = (string) $balanceRow->id;
             }
 
+            $existingMovement = DB::table('stock_movements')
+                ->where('business_id', $businessId)
+                ->where('outlet_id', $outletId)
+                ->where('payload->fields->variantId', $variantId)
+                ->where('payload->fields->referenceId', $referenceId)
+                ->where('is_deleted', 0)
+                ->first();
+            if ($existingMovement) {
+                $existingPayload = json_decode($existingMovement->payload, true) ?: [];
+                $existingFields = $existingPayload['fields'] ?? $existingPayload;
+
+                return ApiResponse::success([
+                    'movementId' => (string) $existingMovement->id,
+                    'balanceAfter' => (int) ($existingFields['balanceAfter'] ?? $currentQty),
+                    'previousQuantity' => (int) ($existingFields['previousQuantity'] ?? 0),
+                    'changedQuantity' => (int) ($existingFields['qtyBase'] ?? 0),
+                    'type' => $existingFields['type'] ?? $type,
+                    'variantId' => $variantId,
+                    'outletId' => $outletId,
+                    'avgCostPaise' => (int) ($existingFields['avgCostPaise'] ?? $currentAvgCost),
+                ], 'Stock movement was already recorded.');
+            }
+
+            if ($type === 'OPENING_STOCK') {
+                $purchaseReceiptExists = DB::table('purchase_bill_items')
+                    ->where('business_id', $businessId)
+                    ->where('outlet_id', $outletId)
+                    ->where('is_deleted', 0)
+                    ->where('status', 'APPROVED')
+                    ->where('payload->fields->variantId', $variantId)
+                    ->exists();
+                $priorInitializationExists = DB::table('stock_movements')
+                    ->where('business_id', $businessId)
+                    ->where('outlet_id', $outletId)
+                    ->where('payload->fields->variantId', $variantId)
+                    ->where('is_deleted', 0)
+                    ->whereIn(DB::raw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.type'))"), [
+                        'OPENING_STOCK', 'RECEIVE', 'ADJUST_IN', 'RETURN', 'COUNT_CORRECTION',
+                    ])
+                    ->exists();
+                if ($currentQty > 0 || $purchaseReceiptExists || $priorInitializationExists) {
+                    return ApiResponse::error('Opening stock can only be registered before the first stock receipt.', 409, null, 'STOCK_ALREADY_INITIALIZED');
+                }
+            }
+
             // Calculate balance after
             $balanceAfter = match ($type) {
-                'RECEIVE', 'ADJUST_IN', 'RETURN' => $currentQty + $qtyBase,
+                'RECEIVE', 'OPENING_STOCK', 'ADJUST_IN', 'RETURN' => $currentQty + $qtyBase,
                 'ADJUST_OUT', 'DAMAGE_LOSS', 'SALE' => max(0, $currentQty - $qtyBase),
                 'COUNT_CORRECTION' => $qtyBase,
                 default => $currentQty,
@@ -203,7 +258,7 @@ class InventoryController extends Controller
             // Calculate weighted average cost if RECEIVE
             $avgCost = $currentAvgCost;
             $lastPurchasePrice = $currentLastPurchasePrice;
-            if ($type === 'RECEIVE') {
+            if (in_array($type, ['RECEIVE', 'OPENING_STOCK'], true)) {
                 $lastPurchasePrice = $unitCostPaise;
                 $totalUnits = $currentQty + $qtyBase;
                 if ($totalUnits > 0) {
@@ -230,7 +285,9 @@ class InventoryController extends Controller
                 'userId' => $userId,
                 'createdAt' => $now,
                 'balanceAfter' => $balanceAfter,
+                'previousQuantity' => $currentQty,
                 'immutable' => true,
+                'avgCostPaise' => $avgCost,
             ];
 
             DB::table('stock_movements')->insert([

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Services\EmployeePermissionService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -97,12 +98,37 @@ class PayrollController extends Controller
 
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            return ApiResponse::error('A business context is required to configure salary.', 422, null, 'VALIDATION_ERROR');
         }
 
         $employeeId = $validated['employee_id'] ?? $validated['employeeId'];
         $outletId = $validated['outlet_id'] ?? $validated['outletId'] ?? null;
+        $employeeRow = DB::table('employees')
+            ->where('id', $employeeId)
+            ->where('is_deleted', 0)
+            ->first();
+        if (! $employeeRow) {
+            return ApiResponse::error('The selected employee was not found.', 404, null, 'EMPLOYEE_NOT_FOUND');
+        }
+        $employeePayload = json_decode((string) $employeeRow->payload, true) ?: [];
+        $employeeFields = $employeePayload['fields'] ?? $employeePayload;
+        $employeeBusinesses = $employeeFields['businessIds'] ?? [];
+        $employeeOutlets = $employeeFields['outletIds'] ?? [];
+        if (! is_array($employeeBusinesses)) {
+            $employeeBusinesses = [$employeeBusinesses];
+        }
+        if (! is_array($employeeOutlets)) {
+            $employeeOutlets = [$employeeOutlets];
+        }
+        if ($employeeRow->outlet_id && ! in_array((string) $employeeRow->outlet_id, $employeeOutlets, true)) {
+            $employeeOutlets[] = (string) $employeeRow->outlet_id;
+        }
+        if (! in_array((string) $businessId, array_map('strval', $employeeBusinesses), true)) {
+            return ApiResponse::error('The selected employee is not assigned to this business.', 422, null, 'EMPLOYEE_SCOPE_MISMATCH');
+        }
+        if ($outletId !== null && ! in_array((string) $outletId, array_map('strval', $employeeOutlets), true)) {
+            return ApiResponse::error('The selected employee is not assigned to this outlet.', 422, null, 'EMPLOYEE_SCOPE_MISMATCH');
+        }
         $profileId = "SAL_PROF_{$businessId}_{$employeeId}";
 
         $nowDateTime = now();
@@ -253,10 +279,17 @@ class PayrollController extends Controller
         $user = $request->user();
         $userId = (string) $user->id;
 
+        $requestedStatus = strtoupper((string) ($validated['status'] ?? 'DISBURSED'));
+        $requiredPermissions = $requestedStatus === 'APPROVED'
+            ? ['SALARY_APPROVE', 'staff_salary.approve']
+            : ['SALARY_PAY', 'staff_salary.pay'];
+        if (! app(EmployeePermissionService::class)->isAuthorized($user, $requiredPermissions)) {
+            return ApiResponse::error('You do not have permission to perform this operation.', 403, null, 'PERMISSION_DENIED');
+        }
+
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            return ApiResponse::error('A business context is required for payroll approval.', 422, null, 'VALIDATION_ERROR');
         }
 
         $month = (int) ($validated['periodMonth'] ?? now()->month);
@@ -265,6 +298,32 @@ class PayrollController extends Controller
         $employeeId = $validated['employee_id'] ?? $validated['employeeId'] ?? null;
         if (! $employeeId && ! empty($validated['employeeIds'])) {
             $employeeId = $validated['employeeIds'][0];
+        }
+
+        if ($employeeId) {
+            $employeeRow = DB::table('employees')->where('id', $employeeId)->where('is_deleted', 0)->first();
+            if (! $employeeRow) {
+                return ApiResponse::error('The selected employee was not found.', 404, null, 'EMPLOYEE_NOT_FOUND');
+            }
+            $employeePayload = json_decode((string) $employeeRow->payload, true) ?: [];
+            $employeeFields = $employeePayload['fields'] ?? $employeePayload;
+            $employeeBusinesses = $employeeFields['businessIds'] ?? [];
+            $employeeOutlets = $employeeFields['outletIds'] ?? [];
+            if (! is_array($employeeBusinesses)) {
+                $employeeBusinesses = [$employeeBusinesses];
+            }
+            if (! is_array($employeeOutlets)) {
+                $employeeOutlets = [$employeeOutlets];
+            }
+            if ($employeeRow->outlet_id && ! in_array((string) $employeeRow->outlet_id, $employeeOutlets, true)) {
+                $employeeOutlets[] = (string) $employeeRow->outlet_id;
+            }
+            if (! in_array((string) $businessId, array_map('strval', $employeeBusinesses), true)) {
+                return ApiResponse::error('The selected employee is not assigned to this business.', 422, null, 'EMPLOYEE_SCOPE_MISMATCH');
+            }
+            if ($outletId !== null && ! in_array((string) $outletId, array_map('strval', $employeeOutlets), true)) {
+                return ApiResponse::error('The selected employee is not assigned to this outlet.', 422, null, 'EMPLOYEE_SCOPE_MISMATCH');
+            }
         }
 
         $nowDateTime = now();
@@ -277,16 +336,33 @@ class PayrollController extends Controller
             $periodId = sprintf('SALPER_%s_%s_%04d%02d', $businessId, $employeeId, $year, $month);
 
             // Fetch profile if rate not provided
-            $gross = (int) ($validated['grossEarningsPaise'] ?? 0);
-            $net = (int) ($validated['netEarnedPaise'] ?? $gross);
-            if ($gross === 0) {
-                $prof = DB::table('salary_profiles')->where('business_id', $businessId)->where('employee_id', $employeeId)->where('is_deleted', 0)->first();
-                if ($prof) {
-                    $pPayload = json_decode($prof->payload, true) ?: [];
-                    $pF = $pPayload['fields'] ?? $pPayload;
-                    $gross = (int) ($pF['baseRatePaise'] ?? $pF['baseSalaryPaise'] ?? 0);
-                    $net = $gross;
-                }
+            $profileQuery = DB::table('salary_profiles')
+                ->where('business_id', $businessId)
+                ->where('employee_id', $employeeId)
+                ->where('is_deleted', 0);
+            $requestedProfileId = $validated['profile_id'] ?? $validated['profileId'] ?? null;
+            if ($requestedProfileId) {
+                $profileQuery->where('id', $requestedProfileId);
+            }
+            $prof = $profileQuery->first();
+            if (! $prof) {
+                return ApiResponse::error('The effective salary profile is unavailable.', 422, null, 'SALARY_PROFILE_UNAVAILABLE');
+            }
+            $pPayload = json_decode((string) $prof->payload, true) ?: [];
+            $pF = $pPayload['fields'] ?? $pPayload;
+            $salaryType = strtoupper((string) ($pF['salaryType'] ?? 'MONTHLY'));
+            $baseRate = (int) ($pF['baseRatePaise'] ?? $pF['baseSalaryPaise'] ?? $pF['dailyWagePaise'] ?? 0);
+            $units = (int) ($validated['workUnitsMilli'] ?? 1000);
+            $bonus = (int) ($validated['bonusPaise'] ?? 0);
+            $overtime = (int) ($validated['overtimePaise'] ?? 0);
+            $deductions = (int) ($validated['approvedDeductionsPaise'] ?? 0);
+            $baseEarnings = $salaryType === 'MONTHLY'
+                ? $baseRate
+                : intdiv(($baseRate * $units) + 500, 1000);
+            $gross = (int) ($validated['grossEarningsPaise'] ?? ($baseEarnings + $bonus + $overtime));
+            $net = (int) ($validated['netEarnedPaise'] ?? ($gross - $deductions));
+            if ($gross < 0 || $net < 0) {
+                return ApiResponse::error('Deductions cannot exceed salary earnings.', 422, null, 'INVALID_SALARY_TOTAL');
             }
 
             $fields = [
@@ -294,7 +370,7 @@ class PayrollController extends Controller
                 'businessId' => $businessId,
                 'outletId' => $outletId,
                 'employeeId' => $employeeId,
-                'profileId' => $validated['profile_id'] ?? $validated['profileId'] ?? "SAL_PROF_{$businessId}_{$employeeId}",
+                'profileId' => $prof->id,
                 'periodStart' => $periodStart,
                 'periodEnd' => $periodEnd,
                 'workUnitsMilli' => (int) ($validated['workUnitsMilli'] ?? 1000),
@@ -308,7 +384,7 @@ class PayrollController extends Controller
                 'staffPurchaseAdjustedPaise' => 0,
                 'periodMonth' => $month,
                 'periodYear' => $year,
-                'status' => strtoupper($validated['status'] ?? 'APPROVED'),
+                'status' => $requestedStatus,
                 'approvedBy' => $userId,
                 'approvedAt' => $nowIso,
                 'createdAt' => $nowIso,
@@ -579,6 +655,14 @@ class PayrollController extends Controller
         $transactionId = 'SKH-PAY-'.$validated['request_id'];
         $financialId = 'FIN-SAL-'.$validated['request_id'];
 
+        $authorization = app(EmployeePermissionService::class);
+        if (! $authorization->isAuthorized($user, ['SALARY_PAY', 'staff_salary.pay'])) {
+            return ApiResponse::error('You do not have permission to disburse salary payments.', 403, null, 'PERMISSION_DENIED');
+        }
+        if (! $authorization->isWithinAssignedScope($user, $businessId, $outletId)) {
+            return ApiResponse::error('This business or outlet is not assigned to your account.', 403, null, 'PERMISSION_DENIED');
+        }
+
         $result = DB::transaction(function () use ($user, $userId, $businessId, $outletId, $employeeId, $periodId, $amountPaise, $transactionId, $financialId, $validated) {
             $business = DB::table('businesses')->where('id', $businessId)->where('is_deleted', 0)->first();
             if (! $business) {
@@ -588,7 +672,8 @@ class PayrollController extends Controller
             $businessFields = $businessPayload['fields'] ?? $businessPayload;
             $ownerUid = (string) ($businessFields['ownerUid'] ?? $business->owner_uid ?? '');
             $isOwner = $ownerUid === $userId;
-            if (! $user->isAdmin() && ! $isOwner) {
+            $isStaff = strtoupper((string) $user->role) === 'STAFF';
+            if (! $user->isAdmin() && ! $isStaff && ! $isOwner) {
                 return ['error' => 'Unauthorized access to this business.', 'status' => 403];
             }
 
@@ -643,7 +728,10 @@ class PayrollController extends Controller
             $periodPayload = json_decode($period->payload, true) ?: [];
             $periodFields = $periodPayload['fields'] ?? $periodPayload;
             $periodStatus = strtoupper((string) ($period->status ?? $periodFields['status'] ?? ''));
-            if (($periodFields['employeeId'] ?? null) !== $employeeId || ! in_array($periodStatus, ['APPROVED', 'PARTIALLY_PAID'], true)) {
+            $periodOutletId = (string) ($periodFields['outletId'] ?? $period->outlet_id ?? '');
+            if (($periodFields['employeeId'] ?? null) !== $employeeId ||
+                ($periodOutletId !== '' && $periodOutletId !== $outletId) ||
+                ! in_array($periodStatus, ['APPROVED', 'PARTIALLY_PAID'], true)) {
                 return ['error' => 'Approved salary payable was not found.', 'status' => 404];
             }
 
@@ -781,6 +869,14 @@ class PayrollController extends Controller
         $amountPaise = (int) $validated['amountPaise'];
         $transactionId = 'SKH-ADJ-'.$validated['request_id'];
 
+        $authorization = app(EmployeePermissionService::class);
+        if (! $authorization->isAuthorized($user, ['SALARY_APPROVE', 'staff_salary.approve'])) {
+            return ApiResponse::error('You do not have permission to adjust an employee advance.', 403, null, 'PERMISSION_DENIED');
+        }
+        if (! $authorization->isWithinAssignedScope($user, $businessId, $outletId)) {
+            return ApiResponse::error('This business or outlet is not assigned to your account.', 403, null, 'PERMISSION_DENIED');
+        }
+
         $result = DB::transaction(function () use (
             $user,
             $userId,
@@ -802,7 +898,8 @@ class PayrollController extends Controller
             $businessPayload = json_decode($business->payload, true) ?: [];
             $businessFields = $businessPayload['fields'] ?? $businessPayload;
             $ownerUid = (string) ($businessFields['ownerUid'] ?? $business->owner_uid ?? '');
-            if (! $user->isAdmin() && $ownerUid !== $userId) {
+            $isStaff = strtoupper((string) $user->role) === 'STAFF';
+            if (! $user->isAdmin() && ! $isStaff && $ownerUid !== $userId) {
                 return ['error' => 'Unauthorized access to this business.', 'status' => 403];
             }
 
@@ -872,7 +969,9 @@ class PayrollController extends Controller
             $periodPayload = json_decode($period->payload, true) ?: [];
             $periodFields = $periodPayload['fields'] ?? $periodPayload;
             $periodStatus = strtoupper((string) ($period->status ?? $periodFields['status'] ?? ''));
+            $periodOutletId = (string) ($periodFields['outletId'] ?? $period->outlet_id ?? '');
             if (($periodFields['employeeId'] ?? null) !== $employeeId ||
+                ($periodOutletId !== '' && $periodOutletId !== $outletId) ||
                 ! in_array($periodStatus, ['APPROVED', 'PARTIALLY_PAID'], true)) {
                 return ['error' => 'Approved salary payable was not found.', 'status' => 404];
             }

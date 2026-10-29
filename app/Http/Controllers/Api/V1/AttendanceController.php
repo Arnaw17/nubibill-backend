@@ -132,9 +132,10 @@ class AttendanceController extends Controller
         $punchTimeIso = $punchTime->toIso8601String();
         $todayDate = $punchTime->clone()->startOfDay()->toIso8601String();
         $dateKey = $punchTime->format('Ymd');
-        $attendanceId = 'ATT-' . substr(hash('sha256', "{$userId}|{$businessId}|{$employeeId}|{$outletId}|{$dateKey}"), 0, 40);
+        $tenantId = $this->tenantIdForBusiness((string) $businessId, $userId);
+        $attendanceId = 'ATT-' . substr(hash('sha256', "{$tenantId}|{$businessId}|{$employeeId}|{$outletId}|{$dateKey}"), 0, 40);
 
-        return DB::transaction(function () use ($businessId, $outletId, $employeeId, $type, $punchTime, $punchTimeIso, $todayDate, $attendanceId, $validated, $userId) {
+        return DB::transaction(function () use ($businessId, $outletId, $employeeId, $type, $punchTime, $punchTimeIso, $todayDate, $attendanceId, $validated, $userId, $tenantId) {
             $existing = DB::table('staff_attendance')
                 ->where('business_id', $businessId)
                 ->where('outlet_id', $outletId)
@@ -169,7 +170,7 @@ class AttendanceController extends Controller
                 $fields = [
                     'attendanceId' => $attendanceId,
                     'recordId' => $attendanceId,
-                    'tenantId' => $userId,
+                    'tenantId' => $tenantId,
                     'businessId' => $businessId,
                     'outletId' => $outletId,
                     'employeeId' => $employeeId,
@@ -212,7 +213,7 @@ class AttendanceController extends Controller
                     $fields = [
                         'attendanceId' => $attendanceId,
                         'recordId' => $attendanceId,
-                        'tenantId' => $userId,
+                        'tenantId' => $tenantId,
                         'businessId' => $businessId,
                         'outletId' => $outletId,
                         'employeeId' => $employeeId,
@@ -311,7 +312,8 @@ class AttendanceController extends Controller
         $employeeId = $validated['employee_id'] ?? $validated['employeeId'];
         $wDate = Carbon::parse($validated['workDate']);
         $dateKey = $wDate->format('Ymd');
-        $attendanceId = 'ATT-' . substr(hash('sha256', "{$userId}|{$businessId}|{$employeeId}|{$outletId}|{$dateKey}"), 0, 40);
+        $tenantId = $this->tenantIdForBusiness((string) $businessId, $userId);
+        $attendanceId = 'ATT-' . substr(hash('sha256', "{$tenantId}|{$businessId}|{$employeeId}|{$outletId}|{$dateKey}"), 0, 40);
 
         $nowDateTime = now();
         $nowIso = now()->toIso8601String();
@@ -326,7 +328,7 @@ class AttendanceController extends Controller
         $fields = [
             'attendanceId' => $attendanceId,
             'recordId' => $attendanceId,
-            'tenantId' => $userId,
+            'tenantId' => $tenantId,
             'businessId' => $businessId,
             'outletId' => $outletId,
             'employeeId' => $employeeId,
@@ -338,10 +340,8 @@ class AttendanceController extends Controller
             'approvedOvertimeMinutes' => max(0, $workedMinutes - 480),
             'overtimePaise' => 0,
             'attendanceStatus' => strtoupper($validated['attendanceStatus']),
-            'approvalStatus' => 'APPROVED',
+            'approvalStatus' => 'PENDING_APPROVAL',
             'recordedBy' => $userId,
-            'approvedBy' => $userId,
-            'approvedAt' => $nowIso,
             'notes' => $validated['notes'] ?? null,
             'createdAt' => $nowIso,
             'updatedAt' => $nowIso,
@@ -353,7 +353,7 @@ class AttendanceController extends Controller
                 'document_path' => "staff_attendance/{$attendanceId}",
                 'business_id' => $businessId,
                 'outlet_id' => $outletId,
-                'status' => 'APPROVED',
+                'status' => 'PENDING_APPROVAL',
                 'created_at' => $nowDateTime,
                 'updated_at' => $nowDateTime,
                 'is_deleted' => 0,
@@ -383,6 +383,18 @@ class AttendanceController extends Controller
 
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? $payload;
+        $businessId = (string) ($request->input('business_id') ?? $request->input('businessId') ?? $request->query('business_id') ?? $request->header('X-Business-Id') ?? '');
+        if ($businessId === '' || (string) $row->business_id !== $businessId) {
+            return ApiResponse::error('Attendance record not found.', 404, null, 'NOT_FOUND');
+        }
+        if (! app(\App\Services\EmployeePermissionService::class)->isWithinAssignedScope(
+            $user,
+            $businessId,
+            (string) $row->outlet_id,
+            true,
+        )) {
+            return ApiResponse::error('Attendance record not found.', 404, null, 'NOT_FOUND');
+        }
 
         $nowIso = now()->toIso8601String();
         $fields['approvalStatus'] = 'APPROVED';
@@ -404,5 +416,17 @@ class AttendanceController extends Controller
             'approvedBy' => $userId,
             'approvedAt' => $nowIso,
         ], 'Attendance approved successfully.');
+    }
+
+    private function tenantIdForBusiness(string $businessId, string $fallback): string
+    {
+        $row = DB::table('businesses')->where('business_id', $businessId)->where('is_deleted', 0)->first();
+        if (! $row) {
+            return $fallback;
+        }
+        $payload = json_decode((string) $row->payload, true) ?: [];
+        $fields = $payload['fields'] ?? $payload;
+
+        return (string) ($fields['ownerUid'] ?? $fields['owner_uid'] ?? $row->owner_uid ?? $fallback);
     }
 }
