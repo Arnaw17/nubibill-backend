@@ -20,13 +20,13 @@ class ReportController extends Controller
         $startDate = $request->query('start_date') ?? $request->query('startDate') ?? date('Y-m-01');
         $endDate = $request->query('end_date') ?? $request->query('endDate') ?? date('Y-m-d');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (! $businessId) {
-            return ApiResponse::success([], 'No active business selected.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $startDt = date('Y-m-d 00:00:00', strtotime($startDate));
@@ -244,9 +244,13 @@ class ReportController extends Controller
         $startDate = $request->query('start_date') ?? $request->query('startDate') ?? date('Y-m-01');
         $endDate = $request->query('end_date') ?? $request->query('endDate') ?? date('Y-m-d');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $startDt = date('Y-m-d 00:00:00', strtotime($startDate));
@@ -307,9 +311,13 @@ class ReportController extends Controller
         $startDate = $request->query('start_date') ?? $request->query('startDate') ?? date('Y-m-01');
         $endDate = $request->query('end_date') ?? $request->query('endDate') ?? date('Y-m-d');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $startDt = date('Y-m-d 00:00:00', strtotime($startDate));
@@ -361,9 +369,13 @@ class ReportController extends Controller
     {
         $businessId = $request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $products = DB::table('products')
@@ -421,9 +433,13 @@ class ReportController extends Controller
         $startDate = $request->query('start_date') ?? $request->query('startDate') ?? date('Y-m-01');
         $endDate = $request->query('end_date') ?? $request->query('endDate') ?? date('Y-m-d');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $startDt = date('Y-m-d 00:00:00', strtotime($startDate));
@@ -474,14 +490,54 @@ class ReportController extends Controller
             $expensesByCategory[$cat] = ($expensesByCategory[$cat] ?? 0) + $amt;
         }
 
-        $grossProfitPaise = $salesPaise - $cogsPaise;
+        // Returns (Sales Returns & Purchase Returns)
+        $salesReturnsPaise = 0;
+        $purchaseReturnsPaise = 0;
+        if (DB::getSchemaBuilder()->hasTable('returns')) {
+            $returns = DB::table('returns')
+                ->where('business_id', $businessId)
+                ->where('status', 'completed')
+                ->whereNull('deleted_at')
+                ->where('return_date', '>=', date('Y-m-d', strtotime($startDate)))
+                ->where('return_date', '<=', date('Y-m-d 23:59:59', strtotime($endDate)))
+                ->get();
+
+            foreach ($returns as $ret) {
+                $grandTotalPaise = (int) round(((float) $ret->grand_total) * 100);
+                if ($ret->type === 'sale_return') {
+                    $salesReturnsPaise += $grandTotalPaise;
+                } elseif ($ret->type === 'purchase_return') {
+                    $purchaseReturnsPaise += $grandTotalPaise;
+                }
+            }
+        }
+
+        // Net Sales = Gross Sales - Sales Returns
+        $netSalesPaise = max(0, $salesPaise - $salesReturnsPaise);
+
+        // Net Purchases = Gross Purchases - Purchase Returns
+        $netCogsPaise = max(0, $cogsPaise - $purchaseReturnsPaise);
+
+        $grossProfitPaise = $netSalesPaise - $netCogsPaise;
         $netProfitPaise = $grossProfitPaise - $expensesPaise;
 
         return ApiResponse::success([
-            'salesRevenuePaise' => $salesPaise,
-            'salesRevenueRupees' => round($salesPaise / 100, 2),
-            'costOfGoodsSoldPaise' => $cogsPaise,
-            'costOfGoodsSoldRupees' => round($cogsPaise / 100, 2),
+            'grossSalesPaise' => $salesPaise,
+            'grossSalesRupees' => round($salesPaise / 100, 2),
+            'salesReturnsPaise' => $salesReturnsPaise,
+            'salesReturnsRupees' => round($salesReturnsPaise / 100, 2),
+            'netSalesPaise' => $netSalesPaise,
+            'netSalesRupees' => round($netSalesPaise / 100, 2),
+            'salesRevenuePaise' => $netSalesPaise,
+            'salesRevenueRupees' => round($netSalesPaise / 100, 2),
+            'grossPurchasesPaise' => $cogsPaise,
+            'grossPurchasesRupees' => round($cogsPaise / 100, 2),
+            'purchaseReturnsPaise' => $purchaseReturnsPaise,
+            'purchaseReturnsRupees' => round($purchaseReturnsPaise / 100, 2),
+            'netPurchasesPaise' => $netCogsPaise,
+            'netPurchasesRupees' => round($netCogsPaise / 100, 2),
+            'costOfGoodsSoldPaise' => $netCogsPaise,
+            'costOfGoodsSoldRupees' => round($netCogsPaise / 100, 2),
             'grossProfitPaise' => $grossProfitPaise,
             'grossProfitRupees' => round($grossProfitPaise / 100, 2),
             'operatingExpensesPaise' => $expensesPaise,
@@ -489,7 +545,7 @@ class ReportController extends Controller
             'expensesByCategory' => $expensesByCategory,
             'netProfitPaise' => $netProfitPaise,
             'netProfitRupees' => round($netProfitPaise / 100, 2),
-            'netMarginPercentage' => $salesPaise > 0 ? round(($netProfitPaise / $salesPaise) * 100, 2) : 0,
+            'netMarginPercentage' => $netSalesPaise > 0 ? round(($netProfitPaise / $netSalesPaise) * 100, 2) : 0,
         ], 'Profit and Loss statement generated.');
     }
 
@@ -502,9 +558,13 @@ class ReportController extends Controller
         $startDate = $request->query('start_date') ?? $request->query('startDate') ?? date('Y-m-01');
         $endDate = $request->query('end_date') ?? $request->query('endDate') ?? date('Y-m-d');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $startDt = date('Y-m-d 00:00:00', strtotime($startDate));
@@ -555,9 +615,13 @@ class ReportController extends Controller
         $startDate = $request->query('start_date') ?? $request->query('startDate') ?? date('Y-m-01');
         $endDate = $request->query('end_date') ?? $request->query('endDate') ?? date('Y-m-d');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         if (! $businessId) {
@@ -1165,5 +1229,161 @@ class ReportController extends Controller
         ];
 
         return ApiResponse::success($auditData, 'Automated financial reconciliation completed successfully.');
+    }
+
+    /**
+     * Returns analytics summary report.
+     */
+    public function returnsSummary(Request $request): JsonResponse
+    {
+        $businessId = $request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id');
+        $startDate = $request->query('start_date') ?? $request->query('startDate') ?? date('Y-m-01');
+        $endDate = $request->query('end_date') ?? $request->query('endDate') ?? date('Y-m-d');
+        $type = $request->query('type'); // 'sale_return' or 'purchase_return'
+
+        $user = $request->user();
+        if (! $businessId) {
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
+        }
+
+        if (! DB::getSchemaBuilder()->hasTable('returns')) {
+            return ApiResponse::success([
+                'totalReturns' => 0,
+                'totalReturnValue' => 0.0,
+                'salesReturnsCount' => 0,
+                'salesReturnsValue' => 0.0,
+                'purchaseReturnsCount' => 0,
+                'purchaseReturnsValue' => 0.0,
+                'byReason' => [],
+                'byProduct' => [],
+                'byParty' => [],
+                'timeline' => [],
+            ], 'Returns report generated.');
+        }
+
+        $query = DB::table('returns')
+            ->where('business_id', $businessId)
+            ->where('status', 'completed')
+            ->whereNull('deleted_at')
+            ->where('return_date', '>=', date('Y-m-d', strtotime($startDate)))
+            ->where('return_date', '<=', date('Y-m-d 23:59:59', strtotime($endDate)));
+
+        if ($type) {
+            $query->where('type', $type);
+        }
+
+        $returns = $query->get();
+
+        $totalReturns = $returns->count();
+        $totalReturnValue = 0.0;
+        $salesReturnsCount = 0;
+        $salesReturnsValue = 0.0;
+        $purchaseReturnsCount = 0;
+        $purchaseReturnsValue = 0.0;
+
+        $byReasonMap = [];
+        $byPartyMap = [];
+        $timelineMap = [];
+
+        foreach ($returns as $ret) {
+            $val = (float) $ret->grand_total;
+            $totalReturnValue += $val;
+
+            if ($ret->type === 'sale_return') {
+                $salesReturnsCount++;
+                $salesReturnsValue += $val;
+            } else {
+                $purchaseReturnsCount++;
+                $purchaseReturnsValue += $val;
+            }
+
+            // By reason
+            $rKey = $ret->reason_id ?? 'OTHER';
+            if (! isset($byReasonMap[$rKey])) {
+                $byReasonMap[$rKey] = [
+                    'reasonId' => $ret->reason_id,
+                    'count' => 0,
+                    'totalValue' => 0.0,
+                ];
+            }
+            $byReasonMap[$rKey]['count']++;
+            $byReasonMap[$rKey]['totalValue'] += $val;
+
+            // By party
+            $pKey = $ret->party_id;
+            if (! isset($byPartyMap[$pKey])) {
+                $byPartyMap[$pKey] = [
+                    'partyId' => $ret->party_id,
+                    'partyName' => $ret->party_name ?? 'Unknown',
+                    'count' => 0,
+                    'totalValue' => 0.0,
+                ];
+            }
+            $byPartyMap[$pKey]['count']++;
+            $byPartyMap[$pKey]['totalValue'] += $val;
+
+            // By timeline date
+            $d = substr((string) $ret->return_date, 0, 10);
+            if (! isset($timelineMap[$d])) {
+                $timelineMap[$d] = [
+                    'date' => $d,
+                    'count' => 0,
+                    'totalValue' => 0.0,
+                ];
+            }
+            $timelineMap[$d]['count']++;
+            $timelineMap[$d]['totalValue'] += $val;
+        }
+
+        // Fill reason names if return_reasons exists
+        if (! empty($byReasonMap) && DB::getSchemaBuilder()->hasTable('return_reasons')) {
+            $reasonNames = DB::table('return_reasons')->whereIn('id', array_keys($byReasonMap))->pluck('name', 'id');
+            foreach ($byReasonMap as $k => $v) {
+                $byReasonMap[$k]['reasonName'] = $reasonNames[$k] ?? 'Uncategorized';
+            }
+        }
+
+        // By product
+        $byProduct = [];
+        if ($totalReturns > 0 && DB::getSchemaBuilder()->hasTable('return_items')) {
+            $returnIds = $returns->pluck('id')->toArray();
+            $items = DB::table('return_items')
+                ->whereIn('return_id', $returnIds)
+                ->get();
+
+            $pMap = [];
+            foreach ($items as $item) {
+                $pId = $item->product_id;
+                if (! isset($pMap[$pId])) {
+                    $pMap[$pId] = [
+                        'productId' => $pId,
+                        'productName' => $item->product_name,
+                        'qtyReturned' => 0.0,
+                        'returnValue' => 0.0,
+                    ];
+                }
+                $pMap[$pId]['qtyReturned'] += (float) $item->qty_returned;
+                $pMap[$pId]['returnValue'] += (float) $item->line_total;
+            }
+            usort($pMap, fn ($a, $b) => $b['returnValue'] <=> $a['returnValue']);
+            $byProduct = array_slice($pMap, 0, 10);
+        }
+
+        return ApiResponse::success([
+            'totalReturns' => $totalReturns,
+            'totalReturnValue' => round($totalReturnValue, 2),
+            'salesReturnsCount' => $salesReturnsCount,
+            'salesReturnsValue' => round($salesReturnsValue, 2),
+            'purchaseReturnsCount' => $purchaseReturnsCount,
+            'purchaseReturnsValue' => round($purchaseReturnsValue, 2),
+            'byReason' => array_values($byReasonMap),
+            'byProduct' => $byProduct,
+            'byParty' => array_values($byPartyMap),
+            'timeline' => array_values($timelineMap),
+        ], 'Returns report summary generated.');
     }
 }

@@ -5,22 +5,22 @@ namespace App\Filament\Resources\AppConfig;
 use App\Filament\Resources\AppConfig\Pages\ManageAppConfig;
 use App\Models\AppConfig;
 use BackedEnum;
-use UnitEnum;
 use Filament\Actions\Action;
 use Filament\Actions\BulkActionGroup;
 use Filament\Actions\DeleteAction;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
-use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
-use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\IconColumn;
+use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
+use UnitEnum;
 
 class AppConfigResource extends Resource
 {
@@ -63,6 +63,7 @@ class AppConfigResource extends Resource
                             return 'N/A';
                         }
                         $isActive = (bool) ($record->payload['fields']['isActive'] ?? true);
+
                         return $isActive ? 'ONLINE (Active)' : 'MAINTENANCE';
                     })
                     ->badge()
@@ -109,6 +110,7 @@ class AppConfigResource extends Resource
                     ])
                     ->fillForm(function (AppConfig $record): array {
                         $fields = $record->payload['fields'] ?? [];
+
                         return [
                             'isActive' => (bool) ($fields['isActive'] ?? true),
                             'maintenanceTitle' => $fields['maintenanceTitle'] ?? 'System Maintenance',

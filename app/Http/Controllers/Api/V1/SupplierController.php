@@ -6,8 +6,8 @@ use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class SupplierController extends Controller
@@ -21,13 +21,13 @@ class SupplierController extends Controller
         $search = trim((string) ($request->query('search') ?? $request->query('q') ?? ''));
         $statusFilter = strtoupper((string) ($request->query('status') ?? 'ACTIVE'));
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (! $businessId) {
-            return ApiResponse::success([], 'No active business selected.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         // 1. Fetch balances and approved unpaid bills for this business. The
@@ -43,7 +43,9 @@ class SupplierController extends Controller
         foreach ($billRows as $billRow) {
             $billFields = json_decode($billRow->payload, true)['fields'] ?? [];
             $supplierId = (string) ($billFields['supplierId'] ?? '');
-            if ($supplierId === '') continue;
+            if ($supplierId === '') {
+                continue;
+            }
             $grand = (int) ($billFields['grandTotal'] ?? 0);
             $paid = (int) ($billFields['paidAmount'] ?? 0);
             $due = max(0, (int) ($billFields['outstandingAmount'] ?? ($grand - $paid)));
@@ -213,10 +215,14 @@ class SupplierController extends Controller
      */
     public function show(Request $request, string $id): JsonResponse
     {
+        $user = $request->user();
         $businessId = $request->query('business_id') ?? $request->header('X-Business-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('Unauthorized access to this supplier or invalid business.', 'FORBIDDEN', 403);
         }
 
         $row = DB::table('suppliers')
@@ -309,6 +315,10 @@ class SupplierController extends Controller
         ]);
 
         $businessId = $validated['business_id'];
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness($businessId)) {
+            return ApiResponse::error('Unauthorized access to this business.', 'FORBIDDEN', 403);
+        }
         $name = trim($validated['name']);
         $mobile = ! empty($validated['mobile']) ? preg_replace('/\D/', '', $validated['mobile']) : (! empty($validated['phone']) ? preg_replace('/\D/', '', $validated['phone']) : null);
         $gstin = ! empty($validated['gstin']) ? strtoupper(trim($validated['gstin'])) : null;
@@ -343,7 +353,7 @@ class SupplierController extends Controller
             );
         }
 
-        $supplierId = 'SUP-' . strtoupper(Str::random(32));
+        $supplierId = 'SUP-'.strtoupper(Str::random(32));
         $supplierBusinessId = "{$supplierId}_{$businessId}";
         $now = now()->toIso8601String();
         $dbNow = now();
@@ -575,15 +585,33 @@ class SupplierController extends Controller
 
         $fields['name'] = $name;
         $fields['contactName'] = $validated['contact_person'] ?? $validated['contact_name'] ?? ($fields['contactName'] ?? null);
-        if ($mobile !== null) $fields['mobile'] = $mobile;
-        if (isset($validated['whatsapp'])) $fields['whatsapp'] = $validated['whatsapp'];
-        if ($email !== null) $fields['email'] = $email;
-        if (array_key_exists('upi_id', $validated)) $fields['upiId'] = trim((string) $validated['upi_id']);
-        if ($gstin !== null) $fields['gstin'] = $gstin;
-        if (isset($validated['pan'])) $fields['pan'] = strtoupper(trim($validated['pan']));
-        if (isset($validated['state_code'])) $fields['stateCode'] = trim($validated['state_code']);
-        if (isset($validated['supplier_type'])) $fields['supplierType'] = trim($validated['supplier_type']);
-        if (isset($validated['address'])) $fields['address'] = trim($validated['address']);
+        if ($mobile !== null) {
+            $fields['mobile'] = $mobile;
+        }
+        if (isset($validated['whatsapp'])) {
+            $fields['whatsapp'] = $validated['whatsapp'];
+        }
+        if ($email !== null) {
+            $fields['email'] = $email;
+        }
+        if (array_key_exists('upi_id', $validated)) {
+            $fields['upiId'] = trim((string) $validated['upi_id']);
+        }
+        if ($gstin !== null) {
+            $fields['gstin'] = $gstin;
+        }
+        if (isset($validated['pan'])) {
+            $fields['pan'] = strtoupper(trim($validated['pan']));
+        }
+        if (isset($validated['state_code'])) {
+            $fields['stateCode'] = trim($validated['state_code']);
+        }
+        if (isset($validated['supplier_type'])) {
+            $fields['supplierType'] = trim($validated['supplier_type']);
+        }
+        if (isset($validated['address'])) {
+            $fields['address'] = trim($validated['address']);
+        }
         $fields['updatedAt'] = $now;
 
         $payload['fields'] = $fields;
@@ -605,12 +633,16 @@ class SupplierController extends Controller
         if ($relRow) {
             $relPayload = json_decode($relRow->payload, true) ?: [];
             $relFields = $relPayload['fields'] ?? [];
-            if (isset($validated['credit_limit'])) $relFields['creditLimit'] = (int) $validated['credit_limit'];
+            if (isset($validated['credit_limit'])) {
+                $relFields['creditLimit'] = (int) $validated['credit_limit'];
+            }
             if (isset($validated['payment_terms_days'])) {
                 $relFields['paymentTerms'] = (int) $validated['payment_terms_days'];
                 $relFields['paymentTermsDays'] = (int) $validated['payment_terms_days'];
             }
-            if (isset($validated['preferred'])) $relFields['preferred'] = (bool) $validated['preferred'];
+            if (isset($validated['preferred'])) {
+                $relFields['preferred'] = (bool) $validated['preferred'];
+            }
             $relFields['updatedAt'] = $now;
             $relPayload['fields'] = $relFields;
 
@@ -643,6 +675,10 @@ class SupplierController extends Controller
             'is_active' => 'required|boolean',
         ]);
         $businessId = $validated['business_id'];
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness($businessId)) {
+            return ApiResponse::error('Unauthorized access to this business.', 'FORBIDDEN', 403);
+        }
         $relation = DB::table('supplier_businesses')
             ->where('business_id', $businessId)
             ->where('is_deleted', 0)
@@ -678,6 +714,21 @@ class SupplierController extends Controller
             return ApiResponse::error('Supplier not found.', 'NOT_FOUND', 404);
         }
 
+        $user = $request->user();
+        if ($user && ! $user->isAdmin()) {
+            $linkedAccessible = DB::table('supplier_businesses')
+                ->whereIn('business_id', $user->accessibleBusinessIds())
+                ->where('is_deleted', 0)
+                ->where(function ($query) use ($id) {
+                    $query->where('id', 'LIKE', "{$id}_%")
+                        ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.supplierId')) = ?", [$id]);
+                })
+                ->exists();
+            if (! $linkedAccessible) {
+                return ApiResponse::error('Unauthorized to delete this supplier.', 'FORBIDDEN', 403);
+            }
+        }
+
         DB::transaction(function () use ($id) {
             DB::table('suppliers')->where('id', $id)->update([
                 'is_deleted' => 1,
@@ -703,11 +754,15 @@ class SupplierController extends Controller
      */
     public function ledger(Request $request, string $id): JsonResponse
     {
+        $user = $request->user();
         $businessId = $request->query('business_id') ?? $request->header('X-Business-Id');
         $outletId = $request->query('outlet_id') ?? $request->header('X-Outlet-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('Unauthorized access to this supplier ledger or invalid business.', 'FORBIDDEN', 403);
         }
 
         // Auto-backfill any purchase_bills for this supplier that might be missing from supplier_ledger_entries
@@ -721,6 +776,7 @@ class SupplierController extends Controller
             ->pluck('payload')
             ->map(function ($p) {
                 $dec = json_decode($p, true) ?: [];
+
                 return $dec['fields']['referenceId'] ?? null;
             })
             ->filter()
@@ -853,12 +909,14 @@ class SupplierController extends Controller
                     $names = [];
                     foreach ($items as $item) {
                         $pName = $item['productName'] ?? '';
-                        if ($pName) $names[] = $pName;
+                        if ($pName) {
+                            $names[] = $pName;
+                        }
                     }
                     if (! empty($names)) {
                         $itemsSummary = implode(', ', array_slice($names, 0, 3));
                     }
-                    $particulars = $voucherNo ? "Purchase Bill #{$voucherNo}" . ($itemsSummary ? " ({$itemsSummary})" : '') : 'Purchase Bill';
+                    $particulars = $voucherNo ? "Purchase Bill #{$voucherNo}".($itemsSummary ? " ({$itemsSummary})" : '') : 'Purchase Bill';
                 } else {
                     $voucherNo = $refId;
                     $particulars = $refId ? "Purchase Bill #{$refId}" : 'Purchase Bill';
@@ -926,7 +984,9 @@ class SupplierController extends Controller
             $grand = (int) ($fields['grandTotal'] ?? 0);
             $paid = (int) ($fields['paidAmount'] ?? 0);
             $due = max(0, (int) ($fields['outstandingAmount'] ?? ($grand - $paid)));
-            if ($due <= 0) continue;
+            if ($due <= 0) {
+                continue;
+            }
             $fields['purchaseBillId'] = $row->id;
             $fields['outstandingAmount'] = $due;
             $bills[] = $fields;
@@ -935,6 +995,7 @@ class SupplierController extends Controller
             (string) ($a['invoiceDate'] ?? $a['createdAt'] ?? ''),
             (string) ($b['invoiceDate'] ?? $b['createdAt'] ?? '')
         ));
+
         return ApiResponse::success($bills, 'Outstanding supplier bills retrieved successfully.');
     }
 
@@ -956,6 +1017,10 @@ class SupplierController extends Controller
         ]);
 
         $businessId = $validated['business_id'];
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness($businessId)) {
+            return ApiResponse::error('Unauthorized access to this business.', 'FORBIDDEN', 403);
+        }
         $outletId = $validated['outlet_id'] ?? '';
         $purchaseBillId = $request->input('purchase_bill_id') ?? $request->input('purchaseBillId');
         $amount = (int) $validated['amount'];
@@ -965,7 +1030,7 @@ class SupplierController extends Controller
         $allowAdvance = (bool) ($validated['allow_advance'] ?? false);
         $userId = $request->user()?->id ?? 'SYSTEM';
         $paymentDate = isset($validated['payment_date'])
-            ? \Illuminate\Support\Carbon::parse($validated['payment_date'])
+            ? Carbon::parse($validated['payment_date'])
             : now();
         $now = $paymentDate->toIso8601String();
         $dbNow = now();
@@ -1028,12 +1093,14 @@ class SupplierController extends Controller
             }
             $billRows = $billQuery->lockForUpdate()->get()->sortBy(function ($row) {
                 $fields = json_decode($row->payload, true)['fields'] ?? [];
+
                 return $fields['invoiceDate'] ?? $row->created_at;
             })->values();
             $billDueTotal = $billRows->sum(function ($row) {
                 $fields = json_decode($row->payload, true)['fields'] ?? [];
                 $grand = (int) ($fields['grandTotal'] ?? 0);
                 $paid = (int) ($fields['paidAmount'] ?? 0);
+
                 return max(0, (int) ($fields['outstandingAmount'] ?? ($grand - $paid)));
             });
             if ($currentPayable <= 0) {
@@ -1045,13 +1112,17 @@ class SupplierController extends Controller
             }
             $previousDue = $paymentDue;
             foreach ($billRows as $pbRow) {
-                if ($remainingToAllocate <= 0) break;
+                if ($remainingToAllocate <= 0) {
+                    break;
+                }
                 $pbPayload = json_decode($pbRow->payload, true) ?: [];
                 $pbFields = $pbPayload['fields'] ?? [];
                 $pbGrand = (int) ($pbFields['grandTotal'] ?? 0);
                 $pbOldPaid = (int) ($pbFields['paidAmount'] ?? 0);
                 $pbOutstanding = max(0, (int) ($pbFields['outstandingAmount'] ?? ($pbGrand - $pbOldPaid)));
-                if ($pbOutstanding <= 0) continue;
+                if ($pbOutstanding <= 0) {
+                    continue;
+                }
                 $allocated = min($remainingToAllocate, $pbOutstanding);
                 $remainingToAllocate -= $allocated;
                 $pbNewPaid = min($pbGrand, $pbOldPaid + $allocated);
@@ -1113,7 +1184,7 @@ class SupplierController extends Controller
             }
 
             // 2. Insert into payments
-            $paymentId = 'PAY-' . strtoupper(Str::random(24));
+            $paymentId = 'PAY-'.strtoupper(Str::random(24));
             $paymentFields = [
                 'paymentId' => $paymentId,
                 'businessId' => $businessId,
@@ -1141,7 +1212,7 @@ class SupplierController extends Controller
             ]);
 
             // 3. Insert into supplier_ledger_entries (debit reduces payable)
-            $ledgerId = 'SUPPLIER_PAYMENT_' . strtoupper(Str::random(24));
+            $ledgerId = 'SUPPLIER_PAYMENT_'.strtoupper(Str::random(24));
             $ledgerFields = [
                 'ledgerEntryId' => $ledgerId,
                 'tenantId' => $userId,
@@ -1178,7 +1249,7 @@ class SupplierController extends Controller
                 'payment' => [
                     'id' => $paymentId,
                     'paymentId' => $paymentId,
-                    'voucherNumber' => 'VCH-' . strtoupper(substr($paymentId, -8)),
+                    'voucherNumber' => 'VCH-'.strtoupper(substr($paymentId, -8)),
                     'amount' => $amount,
                     'amountPaidPaise' => $amount,
                     'previousDuePaise' => $previousDue,
@@ -1187,6 +1258,7 @@ class SupplierController extends Controller
                     'supplierName' => (function () use ($id) {
                         $row = DB::table('suppliers')->where('id', $id)->first();
                         $fields = $row ? ((json_decode($row->payload, true)['fields'] ?? [])) : [];
+
                         return $fields['name'] ?? $fields['supplierName'] ?? 'Supplier';
                     })(),
                     'paymentMode' => $mode,

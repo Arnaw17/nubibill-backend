@@ -47,6 +47,10 @@ class EnsurePermission
             return ApiResponse::error('A business context is required for this operation.', 403, null, 'PERMISSION_DENIED');
         }
 
+        if ($businessId !== null && ! $user->canAccessBusiness((string) $businessId)) {
+            return ApiResponse::error('This business or outlet is not assigned to your account.', 403, null, 'PERMISSION_DENIED');
+        }
+
         if (! $authorization->isWithinAssignedScope(
             $user,
             $businessId !== null ? (string) $businessId : null,

@@ -383,18 +383,19 @@ class SuperUserController extends Controller
      */
     public function terminateSession(Request $request, string $sessionId): JsonResponse
     {
+        $session = DB::table('app_user_sessions')->where('session_id', $sessionId)->first();
+        if (! $session) {
+            return ApiResponse::error('Session not found.', 404);
+        }
+
         $now = Carbon::now();
-        $updated = DB::table('app_user_sessions')
+        DB::table('app_user_sessions')
             ->where('session_id', $sessionId)
             ->update([
                 'status' => 'TERMINATED',
                 'logout_at' => $now,
                 'updated_at' => $now,
             ]);
-
-        if (! $updated) {
-            return ApiResponse::error('Session not found.', 404);
-        }
 
         return ApiResponse::success([
             'session_id' => $sessionId,

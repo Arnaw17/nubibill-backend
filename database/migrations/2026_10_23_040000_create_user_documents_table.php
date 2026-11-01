@@ -34,7 +34,7 @@ return new class extends Migration
             try {
                 // MySQL 8.0+ functional unique index
                 DB::statement('CREATE UNIQUE INDEX user_documents_user_id_type_unique ON user_documents (user_id, type, (CASE WHEN deleted_at IS NULL THEN 1 ELSE NULL END));');
-            } catch (\Throwable) {
+            } catch (Throwable) {
                 Schema::table('user_documents', function (Blueprint $table) {
                     $table->unique(['user_id', 'type'], 'user_documents_user_id_type_unique');
                 });

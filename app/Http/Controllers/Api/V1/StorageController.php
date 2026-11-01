@@ -22,13 +22,13 @@ class StorageController extends Controller
         $parentLocationId = $request->query('parent_location_id') ?? $request->query('parentLocationId');
         $status = strtoupper((string) ($request->query('status') ?? 'ALL'));
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (! $businessId) {
-            return ApiResponse::success([], 'No active business found.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business found or unauthorized.');
         }
 
         $query = DB::table('storage_locations')
@@ -38,7 +38,7 @@ class StorageController extends Controller
         if ($outletId) {
             $query->where(function ($q) use ($outletId) {
                 $q->where('outlet_id', $outletId)
-                  ->orWhereNull('outlet_id');
+                    ->orWhereNull('outlet_id');
             });
         }
 
@@ -111,6 +111,11 @@ class StorageController extends Controller
             return ApiResponse::error('Storage location not found.', 404, null, 'NOT_FOUND');
         }
 
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
+            return ApiResponse::error('Unauthorized access to this storage location.', 403, null, 'FORBIDDEN');
+        }
+
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? $payload;
 
@@ -176,12 +181,11 @@ class StorageController extends Controller
 
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (! $businessId) {
-            return ApiResponse::error('Active business ID is required.', 422, null, 'VALIDATION_FAILED');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('A valid, authorized business ID is required.', 403, null, 'FORBIDDEN');
         }
 
         $type = strtoupper($validated['type']);
@@ -192,7 +196,7 @@ class StorageController extends Controller
         $nowDateTime = now();
 
         return DB::transaction(function () use ($businessId, $outletId, $type, $name, $code, $validated, $userId, $now, $nowDateTime) {
-            $locationId = 'LOC-' . strtoupper(Str::random(32));
+            $locationId = 'LOC-'.strtoupper(Str::random(32));
 
             // Generate or validate Code
             if ($type === 'GODOWN') {
@@ -252,11 +256,11 @@ class StorageController extends Controller
                 ]);
             } elseif ($type === 'RACK') {
                 if (empty($code)) {
-                    $code = 'RK-' . strtoupper(substr(md5($name . microtime()), 0, 6));
+                    $code = 'RK-'.strtoupper(substr(md5($name.microtime()), 0, 6));
                 }
             } else {
                 if (empty($code)) {
-                    $code = 'SH-' . strtoupper(substr(md5($name . microtime()), 0, 6));
+                    $code = 'SH-'.strtoupper(substr(md5($name.microtime()), 0, 6));
                 }
             }
 
@@ -355,8 +359,11 @@ class StorageController extends Controller
 
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('A valid, authorized business ID is required.', 403, null, 'FORBIDDEN');
         }
 
         $parentLocationId = $validated['parentLocationId'];
@@ -417,7 +424,7 @@ class StorageController extends Controller
                 $rackNumber = $maxNumber + $i;
                 $rackName = "{$prefix} {$rackNumber}";
                 $rackCode = sprintf('RK-%03d', $rackNumber);
-                $locationId = 'LOC-' . strtoupper(Str::random(32));
+                $locationId = 'LOC-'.strtoupper(Str::random(32));
 
                 $fields = [
                     'storageLocationId' => $locationId,
@@ -511,6 +518,10 @@ class StorageController extends Controller
             return ApiResponse::error('Storage location not found.', 404, null, 'NOT_FOUND');
         }
 
+        if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
+            return ApiResponse::error('Unauthorized to access this storage location.', 403, null, 'FORBIDDEN');
+        }
+
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? $payload;
 
@@ -594,6 +605,10 @@ class StorageController extends Controller
             return ApiResponse::error('Storage location not found.', 404, null, 'NOT_FOUND');
         }
 
+        if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
+            return ApiResponse::error('Unauthorized to access this storage location.', 403, null, 'FORBIDDEN');
+        }
+
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? $payload;
 
@@ -630,9 +645,13 @@ class StorageController extends Controller
         $locationId = $request->query('location_id') ?? $request->query('locationId');
         $variantId = $request->query('variant_id') ?? $request->query('variantId');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business found or unauthorized.');
         }
 
         $query = DB::table('stock_balances')

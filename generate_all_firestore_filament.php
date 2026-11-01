@@ -2,11 +2,11 @@
 
 // Script to generate Eloquent Models and Filament Resources for all 57 Firestore collections
 
-require __DIR__ . '/vendor/autoload.php';
+require __DIR__.'/vendor/autoload.php';
 
 $summaryPath = 'D:/firestore_full_backup/summary.json';
-if (!file_exists($summaryPath)) {
-    die("summary.json not found at $summaryPath\n");
+if (! file_exists($summaryPath)) {
+    exit("summary.json not found at $summaryPath\n");
 }
 
 $summary = json_decode(file_get_contents($summaryPath), true);
@@ -85,7 +85,8 @@ $groupMapping = [
     'user' => 'System & Logs',
 ];
 
-function tableNameToClass($table) {
+function tableNameToClass($table)
+{
     if ($table === 'user') {
         return 'FirestoreUser';
     }
@@ -94,33 +95,38 @@ function tableNameToClass($table) {
     $last = array_pop($parts);
 
     if (str_ends_with($last, 'ies')) {
-        $last = substr($last, 0, -3) . 'y';
+        $last = substr($last, 0, -3).'y';
     } elseif (str_ends_with($last, 'ses')) {
         $last = substr($last, 0, -2);
-    } elseif (str_ends_with($last, 's') && !str_ends_with($last, 'ss')) {
+    } elseif (str_ends_with($last, 's') && ! str_ends_with($last, 'ss')) {
         $last = substr($last, 0, -1);
     }
     $parts[] = $last;
+
     return implode('', array_map('ucfirst', $parts));
 }
 
-function tableNameToPluralClass($table) {
+function tableNameToPluralClass($table)
+{
     if ($table === 'user') {
         return 'FirestoreUsers';
     }
     $parts = explode('_', $table);
+
     return implode('', array_map('ucfirst', $parts));
 }
 
-function tableNameToLabel($table) {
+function tableNameToLabel($table)
+{
     if ($table === 'user') {
         return 'Firestore Users';
     }
+
     return ucwords(str_replace('_', ' ', $table));
 }
 
-$modelsDir = __DIR__ . '/app/Models';
-$resourcesBaseDir = __DIR__ . '/app/Filament/Resources';
+$modelsDir = __DIR__.'/app/Models';
+$resourcesBaseDir = __DIR__.'/app/Filament/Resources';
 
 $createdCount = 0;
 
@@ -136,7 +142,7 @@ foreach ($collections as $collection) {
     }
 
     $modelFile = "$modelsDir/{$className}.php";
-    if (!file_exists($modelFile)) {
+    if (! file_exists($modelFile)) {
         $modelContent = <<<PHP
 <?php
 
@@ -154,7 +160,7 @@ PHP;
     // 2. Generate Filament Resource directory
     $resourceDir = "$resourcesBaseDir/{$pluralClass}";
     $pagesDir = "$resourceDir/Pages";
-    if (!is_dir($pagesDir)) {
+    if (! is_dir($pagesDir)) {
         mkdir($pagesDir, 0777, true);
     }
 

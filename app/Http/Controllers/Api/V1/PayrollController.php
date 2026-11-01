@@ -21,9 +21,13 @@ class PayrollController extends Controller
         $businessId = $request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id');
         $employeeId = $request->query('employee_id') ?? $request->query('employeeId');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('salary_profiles')
@@ -189,9 +193,13 @@ class PayrollController extends Controller
         $outletId = $request->query('outlet_id') ?? $request->query('outletId') ?? $request->header('X-Outlet-Id');
         $employeeId = $request->query('employee_id') ?? $request->query('employeeId');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('salary_periods')
@@ -484,9 +492,13 @@ class PayrollController extends Controller
         $businessId = $request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id');
         $employeeId = $request->query('employee_id') ?? $request->query('employeeId');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('staff_khata_transactions')
@@ -555,8 +567,11 @@ class PayrollController extends Controller
 
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('A valid, authorized business context is required to record advance.', 403, null, 'FORBIDDEN');
         }
 
         $employeeId = $validated['employee_id'] ?? $validated['employeeId'];

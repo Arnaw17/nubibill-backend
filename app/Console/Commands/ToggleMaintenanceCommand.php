@@ -39,10 +39,11 @@ class ToggleMaintenanceCommand extends Command
         if (empty($statusInput)) {
             $currentStatus = ($fields['isActive'] ?? true) ? 'ACTIVE (Maintenance OFF)' : 'INACTIVE (Maintenance ON)';
             $this->info("Current System Status: {$currentStatus}");
-            $this->line("Title: " . ($fields['maintenanceTitle'] ?? 'N/A'));
-            $this->line("Message: " . ($fields['maintenanceMessage'] ?? 'N/A'));
-            $this->line("Image: " . ($fields['maintenanceImageUrl'] ?? 'N/A'));
-            $this->line("Use --status=enable to turn ON maintenance, or --status=disable to turn OFF maintenance.");
+            $this->line('Title: '.($fields['maintenanceTitle'] ?? 'N/A'));
+            $this->line('Message: '.($fields['maintenanceMessage'] ?? 'N/A'));
+            $this->line('Image: '.($fields['maintenanceImageUrl'] ?? 'N/A'));
+            $this->line('Use --status=enable to turn ON maintenance, or --status=disable to turn OFF maintenance.');
+
             return Command::SUCCESS;
         }
 
@@ -89,11 +90,11 @@ class ToggleMaintenanceCommand extends Command
         }
 
         $modeText = $isActive ? 'DISABLED (System is now ACTIVE)' : 'ENABLED (System is now under MAINTENANCE)';
-        $this->info("--------------------------------------------------");
+        $this->info('--------------------------------------------------');
         $this->info(" SUCCESS: Maintenance mode is now {$modeText}");
-        $this->line(" Title: " . ($fields['maintenanceTitle'] ?? ''));
-        $this->line(" Message: " . ($fields['maintenanceMessage'] ?? ''));
-        $this->info("--------------------------------------------------");
+        $this->line(' Title: '.($fields['maintenanceTitle'] ?? ''));
+        $this->line(' Message: '.($fields['maintenanceMessage'] ?? ''));
+        $this->info('--------------------------------------------------');
 
         return Command::SUCCESS;
     }

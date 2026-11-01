@@ -16,9 +16,7 @@ class SendOtpMail extends Mailable implements ShouldQueue
     /**
      * Create a new message instance.
      */
-    public function __construct(public string $otp)
-    {
-    }
+    public function __construct(public string $otp) {}
 
     /**
      * Get the message envelope.

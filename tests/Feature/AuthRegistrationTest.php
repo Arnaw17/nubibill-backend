@@ -25,16 +25,17 @@ class AuthRegistrationTest extends TestCase
 
     private function createAdminUser(): User
     {
-        $admin = new User([
+        $admin = new User;
+        $admin->forceFill([
             'name' => 'System Admin',
             'email' => 'admin@nubibilling.com',
             'phone' => '9999999999',
             'password' => Hash::make('AdminPass123!'),
             'role' => 'ADMIN',
+            'status' => 'ACTIVE',
             'email_verified_at' => now(),
             'activated_at' => now(),
         ]);
-        $admin->status = 'ACTIVE';
         $admin->save();
 
         return $admin;
@@ -337,7 +338,7 @@ class AuthRegistrationTest extends TestCase
         ]);
 
         // Attempt activation while docs are PENDING -> Must fail (422)
-        $failRes = $this->withHeader('Authorization', 'Bearer ' . $adminToken)
+        $failRes = $this->withHeader('Authorization', 'Bearer '.$adminToken)
             ->patchJson("/api/v1/admin/users/{$user->id}/status", [
                 'status' => 'ACTIVE',
             ]);
@@ -349,7 +350,7 @@ class AuthRegistrationTest extends TestCase
             ]);
 
         // Admin approves Aadhaar document with masked number
-        $aadhaarRes = $this->withHeader('Authorization', 'Bearer ' . $adminToken)
+        $aadhaarRes = $this->withHeader('Authorization', 'Bearer '.$adminToken)
             ->patchJson("/api/v1/admin/users/{$user->id}/documents/{$aadhaar->id}", [
                 'status' => 'APPROVED',
                 'number' => '123456789012',
@@ -362,14 +363,14 @@ class AuthRegistrationTest extends TestCase
         $this->assertEquals('XXXX-XXXX-9012', $aadhaar->number_encrypted);
 
         // Still blocked because PAN is not approved
-        $failRes2 = $this->withHeader('Authorization', 'Bearer ' . $adminToken)
+        $failRes2 = $this->withHeader('Authorization', 'Bearer '.$adminToken)
             ->patchJson("/api/v1/admin/users/{$user->id}/status", [
                 'status' => 'ACTIVE',
             ]);
         $failRes2->assertStatus(422);
 
         // Admin approves PAN document
-        $panRes = $this->withHeader('Authorization', 'Bearer ' . $adminToken)
+        $panRes = $this->withHeader('Authorization', 'Bearer '.$adminToken)
             ->patchJson("/api/v1/admin/users/{$user->id}/documents/{$pan->id}", [
                 'status' => 'APPROVED',
                 'number' => 'ABCDE1234F',
@@ -377,7 +378,7 @@ class AuthRegistrationTest extends TestCase
         $panRes->assertStatus(200);
 
         // Now activate user
-        $activateRes = $this->withHeader('Authorization', 'Bearer ' . $adminToken)
+        $activateRes = $this->withHeader('Authorization', 'Bearer '.$adminToken)
             ->patchJson("/api/v1/admin/users/{$user->id}/status", [
                 'status' => 'ACTIVE',
             ]);
@@ -430,7 +431,7 @@ class AuthRegistrationTest extends TestCase
         $userToken = $user->createToken('worker-token')->plainTextToken;
 
         // User can access /auth/me
-        $meRes = $this->withHeader('Authorization', 'Bearer ' . $userToken)
+        $meRes = $this->withHeader('Authorization', 'Bearer '.$userToken)
             ->getJson('/api/v1/auth/me');
         if ($meRes->status() !== 200) {
             $this->fail(json_encode($meRes->json()));
@@ -439,7 +440,7 @@ class AuthRegistrationTest extends TestCase
 
         // Admin deactivates user
         auth()->forgetGuards();
-        $deactivateRes = $this->withHeader('Authorization', 'Bearer ' . $adminToken)
+        $deactivateRes = $this->withHeader('Authorization', 'Bearer '.$adminToken)
             ->patchJson("/api/v1/admin/users/{$user->id}/status", [
                 'status' => 'INACTIVE',
             ]);
@@ -447,7 +448,7 @@ class AuthRegistrationTest extends TestCase
 
         // User's next request fails with 401 or 403
         auth()->forgetGuards();
-        $meResAfter = $this->withHeader('Authorization', 'Bearer ' . $userToken)
+        $meResAfter = $this->withHeader('Authorization', 'Bearer '.$userToken)
             ->getJson('/api/v1/auth/me');
         $this->assertContains($meResAfter->status(), [401, 403]);
     }
@@ -468,7 +469,7 @@ class AuthRegistrationTest extends TestCase
 
         $token = $user->createToken('regular-token')->plainTextToken;
 
-        $res = $this->withHeader('Authorization', 'Bearer ' . $token)
+        $res = $this->withHeader('Authorization', 'Bearer '.$token)
             ->patchJson("/api/v1/admin/users/{$user->id}/status", [
                 'status' => 'ACTIVE',
             ]);
@@ -495,7 +496,7 @@ class AuthRegistrationTest extends TestCase
             'status' => 'PENDING',
         ]);
 
-        $res = $this->withHeader('Authorization', 'Bearer ' . $adminToken)
+        $res = $this->withHeader('Authorization', 'Bearer '.$adminToken)
             ->get("/api/v1/admin/users/{$admin->id}/documents/{$doc->id}/file");
 
         $res->assertStatus(200);
@@ -526,7 +527,7 @@ class AuthRegistrationTest extends TestCase
             'status' => 'PENDING',
         ]);
 
-        $res = $this->withHeader('Authorization', 'Bearer ' . $token)
+        $res = $this->withHeader('Authorization', 'Bearer '.$token)
             ->get("/api/v1/admin/users/{$admin->id}/documents/{$doc->id}/file");
 
         $res->assertStatus(403)

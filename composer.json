@@ -7,6 +7,7 @@
     "license": "MIT",
     "require": {
         "php": "^8.3",
+        "barryvdh/laravel-dompdf": "*",
         "filament/filament": "^5.10",
         "laravel/framework": "^13.17",
         "laravel/sanctum": "^4.0",
@@ -77,7 +78,7 @@
         }
     },
     "config": {
-        "optimize-autoloader": true,
+        "optimize-autoloader": false,
         "preferred-install": "dist",
         "sort-packages": true,
         "allow-plugins": {

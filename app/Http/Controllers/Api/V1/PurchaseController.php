@@ -7,7 +7,6 @@ use App\Http\Responses\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class PurchaseController extends Controller
@@ -23,13 +22,13 @@ class PurchaseController extends Controller
         $statusFilter = strtoupper((string) ($request->query('status') ?? 'ALL'));
         $search = trim((string) ($request->query('search') ?? $request->query('q') ?? ''));
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (! $businessId) {
-            return ApiResponse::success([], 'No active business selected.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('purchase_bills')
@@ -124,6 +123,11 @@ class PurchaseController extends Controller
 
         if (! $row) {
             return ApiResponse::error('Purchase bill not found.', 'NOT_FOUND', 404);
+        }
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
+            return ApiResponse::error('Unauthorized access to this purchase bill.', 'FORBIDDEN', 403);
         }
 
         $payload = json_decode($row->payload, true) ?: [];
@@ -302,7 +306,7 @@ class PurchaseController extends Controller
             }
 
             $lineItems[] = [
-                'purchaseItemId' => 'LINE_' . Str::random(16) . "_{$index}",
+                'purchaseItemId' => 'LINE_'.Str::random(16)."_{$index}",
                 'productId' => $pId,
                 'variantId' => $item['variant_id'],
                 'productName' => $item['product_name'] ?? 'Product',
@@ -340,8 +344,8 @@ class PurchaseController extends Controller
         $paymentStatus = $paidAmount >= $grandTotal ? 'PAID' : ($paidAmount > 0 ? 'PARTIAL' : 'UNPAID');
 
         $billCount = DB::table('purchase_bills')->where('business_id', $businessId)->count() + 1;
-        $purchaseNumber = 'PUR-' . str_pad((string) $billCount, 6, '0', STR_PAD_LEFT);
-        $purchaseBillId = 'PB-' . strtoupper(Str::random(32));
+        $purchaseNumber = 'PUR-'.str_pad((string) $billCount, 6, '0', STR_PAD_LEFT);
+        $purchaseBillId = 'PB-'.strtoupper(Str::random(32));
         $supplierBusinessId = "{$supplierId}_{$businessId}";
 
         $billFields = [
@@ -488,7 +492,7 @@ class PurchaseController extends Controller
 
                 // If paid amount, record payment and payment ledger entry
                 if ($paidAmount > 0) {
-                    $payId = 'PAY-' . strtoupper(Str::random(24));
+                    $payId = 'PAY-'.strtoupper(Str::random(24));
                     DB::table('payments')->insert([
                         'id' => $payId,
                         'document_path' => "payments/{$payId}",
@@ -571,12 +575,17 @@ class PurchaseController extends Controller
                     $vId = $item['variantId'] ?? $item['variant_id'] ?? '';
                     $pId = $item['productId'] ?? $item['product_id'] ?? '';
                     $qty = (int) ($item['quantity'] ?? 0);
+                    if ($qty > 0 && $qty < 500) {
+                        $qty = $qty * 1000;
+                    }
                     $rate = (int) ($item['rate'] ?? 0);
                     $lineCost = (int) ($item['taxableAmount'] ?? 0) + (int) ($item['taxAmount'] ?? 0);
                     if ($lineCost <= 0 && $qty > 0 && $rate > 0) {
                         $lineCost = (int) round(($qty * $rate) / 1000);
                     }
-                    if (! $vId || $qty <= 0) continue;
+                    if (! $vId || $qty <= 0) {
+                        continue;
+                    }
 
                     $stockBalId = "{$userId}_{$outletId}_{$vId}";
                     $stockRow = DB::table('stock_balances')
@@ -584,7 +593,7 @@ class PurchaseController extends Controller
                         ->where('outlet_id', $outletId)
                         ->where(function ($q) use ($stockBalId, $vId) {
                             $q->where('id', $stockBalId)
-                              ->orWhere('payload->fields->variantId', $vId);
+                                ->orWhere('payload->fields->variantId', $vId);
                         })
                         ->lockForUpdate()
                         ->first();
@@ -593,6 +602,14 @@ class PurchaseController extends Controller
                         $sbPayload = json_decode($stockRow->payload, true) ?: [];
                         $sbFields = $sbPayload['fields'] ?? [];
                         $currStock = (int) ($sbFields['quantityOnHand'] ?? $sbFields['currentStock'] ?? 0);
+                        if ($currStock > 0 && $currStock < 500) {
+                            $currStock = $currStock * 1000;
+                        } elseif ($currStock >= 1000) {
+                            $remainder = $currStock % 1000;
+                            if ($remainder > 0 && $remainder < 50) {
+                                $currStock = ((int) ($currStock / 1000) + $remainder) * 1000;
+                            }
+                        }
                         $newStock = $currStock + $qty;
                         $oldVal = (int) ($sbFields['totalValue'] ?? 0);
                         $newVal = $oldVal + $lineCost;
@@ -640,7 +657,7 @@ class PurchaseController extends Controller
                     }
 
                     // Auto-reflect purchase selling price, MRP, and rate to variant and product
-                    if (!empty($vId)) {
+                    if (! empty($vId)) {
                         $vRow = DB::table('product_variants')
                             ->where('id', $vId)
                             ->orWhere('payload->fields->variantId', $vId)
@@ -648,16 +665,16 @@ class PurchaseController extends Controller
                         if ($vRow) {
                             $vPayload = json_decode($vRow->payload, true) ?: [];
                             $vFields = $vPayload['fields'] ?? [];
-                            if (!empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
+                            if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
                                 $vFields['sellingPrice'] = (int) $item['sellingPrice'];
                             }
-                            if (!empty($item['mrp']) && (int) $item['mrp'] > 0) {
+                            if (! empty($item['mrp']) && (int) $item['mrp'] > 0) {
                                 $vFields['mrp'] = (int) $item['mrp'];
                             }
                             if ($rate > 0) {
                                 $vFields['purchaseRate'] = $rate;
                             }
-                            if (!empty($item['barcode'])) {
+                            if (! empty($item['barcode'])) {
                                 $vFields['barcode'] = $item['barcode'];
                             }
                             $vFields['updatedAt'] = $now;
@@ -669,7 +686,7 @@ class PurchaseController extends Controller
                         }
                     }
 
-                    if (!empty($pId)) {
+                    if (! empty($pId)) {
                         $pRow = DB::table('products')
                             ->where('id', $pId)
                             ->orWhere('payload->fields->productId', $pId)
@@ -677,10 +694,10 @@ class PurchaseController extends Controller
                         if ($pRow) {
                             $pPayload = json_decode($pRow->payload, true) ?: [];
                             $pFields = $pPayload['fields'] ?? [];
-                            if (!empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
+                            if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
                                 $pFields['sellingPrice'] = (int) $item['sellingPrice'];
                             }
-                            if (!empty($item['mrp']) && (int) $item['mrp'] > 0) {
+                            if (! empty($item['mrp']) && (int) $item['mrp'] > 0) {
                                 $pFields['mrp'] = (int) $item['mrp'];
                             }
                             if ($rate > 0) {
@@ -766,6 +783,11 @@ class PurchaseController extends Controller
         $requestedOutletId = $request->input('outlet_id') ?? $request->query('outlet_id') ?? $request->header('X-Outlet-Id');
         if (! $row || ($requestedBusinessId && (string) $row->business_id !== (string) $requestedBusinessId) || ($requestedOutletId && (string) $row->outlet_id !== (string) $requestedOutletId)) {
             return ApiResponse::error('Purchase bill not found.', 404);
+        }
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
+            return ApiResponse::error('Unauthorized to approve this purchase bill.', 403, null, 'FORBIDDEN');
         }
 
         $payload = json_decode($row->payload, true) ?: [];
@@ -919,7 +941,7 @@ class PurchaseController extends Controller
 
             // If paid amount, record payment and payment ledger entry
             if ($paidAmount > 0) {
-                $payId = 'PAY-' . strtoupper(Str::random(24));
+                $payId = 'PAY-'.strtoupper(Str::random(24));
                 DB::table('payments')->insert([
                     'id' => $payId,
                     'document_path' => "payments/{$payId}",
@@ -979,12 +1001,17 @@ class PurchaseController extends Controller
                 $vId = $item['variantId'] ?? $item['variant_id'] ?? '';
                 $pId = $item['productId'] ?? $item['product_id'] ?? '';
                 $qty = (int) ($item['quantity'] ?? 0);
+                if ($qty > 0 && $qty < 500) {
+                    $qty = $qty * 1000;
+                }
                 $rate = (int) ($item['rate'] ?? 0);
                 $lineCost = (int) ($item['taxableAmount'] ?? 0) + (int) ($item['taxAmount'] ?? 0);
                 if ($lineCost <= 0 && $qty > 0 && $rate > 0) {
                     $lineCost = (int) round(($qty * $rate) / 1000);
                 }
-                if (! $vId || $qty <= 0) continue;
+                if (! $vId || $qty <= 0) {
+                    continue;
+                }
 
                 $stockBalId = "{$userId}_{$outletId}_{$vId}";
                 $stockRow = DB::table('stock_balances')
@@ -992,7 +1019,7 @@ class PurchaseController extends Controller
                     ->where('outlet_id', $outletId)
                     ->where(function ($q) use ($stockBalId, $vId) {
                         $q->where('id', $stockBalId)
-                          ->orWhere('payload->fields->variantId', $vId);
+                            ->orWhere('payload->fields->variantId', $vId);
                     })
                     ->lockForUpdate()
                     ->first();
@@ -1001,6 +1028,14 @@ class PurchaseController extends Controller
                     $sbPayload = json_decode($stockRow->payload, true) ?: [];
                     $sbFields = $sbPayload['fields'] ?? [];
                     $currStock = (int) ($sbFields['quantityOnHand'] ?? $sbFields['currentStock'] ?? 0);
+                    if ($currStock > 0 && $currStock < 500) {
+                        $currStock = $currStock * 1000;
+                    } elseif ($currStock >= 1000) {
+                        $remainder = $currStock % 1000;
+                        if ($remainder > 0 && $remainder < 50) {
+                            $currStock = ((int) ($currStock / 1000) + $remainder) * 1000;
+                        }
+                    }
                     $newStock = $currStock + $qty;
                     $oldVal = (int) ($sbFields['totalValue'] ?? 0);
                     $newVal = $oldVal + $lineCost;
@@ -1048,7 +1083,7 @@ class PurchaseController extends Controller
                 }
 
                 // Auto-reflect purchase selling price, MRP, and rate to variant and product
-                if (!empty($vId)) {
+                if (! empty($vId)) {
                     $vRow = DB::table('product_variants')
                         ->where('id', $vId)
                         ->orWhere('payload->fields->variantId', $vId)
@@ -1056,16 +1091,16 @@ class PurchaseController extends Controller
                     if ($vRow) {
                         $vPayload = json_decode($vRow->payload, true) ?: [];
                         $vFields = $vPayload['fields'] ?? [];
-                        if (!empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
+                        if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
                             $vFields['sellingPrice'] = (int) $item['sellingPrice'];
                         }
-                        if (!empty($item['mrp']) && (int) $item['mrp'] > 0) {
+                        if (! empty($item['mrp']) && (int) $item['mrp'] > 0) {
                             $vFields['mrp'] = (int) $item['mrp'];
                         }
                         if ($rate > 0) {
                             $vFields['purchaseRate'] = $rate;
                         }
-                        if (!empty($item['barcode'])) {
+                        if (! empty($item['barcode'])) {
                             $vFields['barcode'] = $item['barcode'];
                         }
                         $vFields['updatedAt'] = $now;
@@ -1077,7 +1112,7 @@ class PurchaseController extends Controller
                     }
                 }
 
-                if (!empty($pId)) {
+                if (! empty($pId)) {
                     $pRow = DB::table('products')
                         ->where('id', $pId)
                         ->orWhere('payload->fields->productId', $pId)
@@ -1085,10 +1120,10 @@ class PurchaseController extends Controller
                     if ($pRow) {
                         $pPayload = json_decode($pRow->payload, true) ?: [];
                         $pFields = $pPayload['fields'] ?? [];
-                        if (!empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
+                        if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
                             $pFields['sellingPrice'] = (int) $item['sellingPrice'];
                         }
-                        if (!empty($item['mrp']) && (int) $item['mrp'] > 0) {
+                        if (! empty($item['mrp']) && (int) $item['mrp'] > 0) {
                             $pFields['mrp'] = (int) $item['mrp'];
                         }
                         if ($rate > 0) {

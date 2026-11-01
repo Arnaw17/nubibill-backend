@@ -1,0 +1,158 @@
+{
+  "info": {
+    "name": "NubiBilling Returns & Credit Notes API",
+    "description": "GST-Compliant Sales Returns (Credit Notes) & Purchase Returns (Debit Notes) with Stock, Ledger & Tax Reversals.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Returns",
+      "item": [
+        {
+          "name": "Create Return (Credit / Debit Note)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Business-Id", "value": "{{business_id}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"sale_return\",\n  \"party_id\": \"cust_123\",\n  \"party_name\": \"Alice Sharma\",\n  \"party_phone\": \"9876543210\",\n  \"party_gstin\": \"27AAAAA0000A1Z5\",\n  \"party_state_code\": \"27\",\n  \"business_state_code\": \"27\",\n  \"original_bill_id\": \"inv_abc_001\",\n  \"original_bill_no\": \"INV-2627-0012\",\n  \"original_bill_date\": \"2026-10-15\",\n  \"reason_id\": \"reason_damaged_1\",\n  \"reason_note\": \"Defective stitch on collar\",\n  \"refund_mode\": \"adjust_to_ledger\",\n  \"idempotency_key\": \"uuid-v4-client-nonce\",\n  \"items\": [\n    {\n      \"product_id\": \"prod_shirt_1\",\n      \"original_bill_item_id\": \"item_inv_001\",\n      \"product_name\": \"Men Cotton Shirt M\",\n      \"hsn_code\": \"6205\",\n      \"unit\": \"PCS\",\n      \"qty_returned\": 2,\n      \"unit_price\": 799.00,\n      \"discount_amount\": 0.00,\n      \"tax_rate\": 5.0,\n      \"condition\": \"resalable\",\n      \"restock\": true\n    }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/v1/returns" }
+          }
+        },
+        {
+          "name": "List Returns",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "X-Business-Id", "value": "{{business_id}}" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/returns?type=sale_return&status=completed&page=1"
+            }
+          }
+        },
+        {
+          "name": "Get Return Details",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/v1/returns/:id" }
+          }
+        },
+        {
+          "name": "Cancel & Reverse Return",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Customer cancelled exchange request, retaining product.\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/v1/returns/:id/cancel" }
+          }
+        },
+        {
+          "name": "Download / Stream Return Bill PDF",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Accept", "value": "application/pdf" }
+            ],
+            "url": { "raw": "{{base_url}}/api/v1/returns/:id/pdf" }
+          }
+        },
+        {
+          "name": "Get Returnable Bill Items & Remaining Qty",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/v1/bills/:id/returnable" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Return Reasons",
+      "item": [
+        {
+          "name": "List Return Reasons",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/v1/return-reasons" }
+          }
+        },
+        {
+          "name": "Create Custom Return Reason",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Transit Packaging Defect\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/v1/return-reasons" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reports & Stock Timeline",
+      "item": [
+        {
+          "name": "Returns Analytics Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/reports/returns?startDate=2026-10-01&endDate=2026-10-31"
+            }
+          }
+        },
+        {
+          "name": "Profit & Loss (Net of Returns)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/reports/profit-loss?startDate=2026-10-01&endDate=2026-10-31"
+            }
+          }
+        },
+        {
+          "name": "Product Stock History Timeline",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/v1/products/:id/stock-history" }
+          }
+        }
+      ]
+    }
+  ]
+}

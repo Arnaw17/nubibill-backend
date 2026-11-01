@@ -52,8 +52,8 @@ class AuthController extends Controller
                 'address' => $request->address,
                 'photo_path' => $photoPath,
                 'password' => Hash::make($request->password),
-                'role' => 'USER',
             ]);
+            $user->role = 'USER';
             $user->status = 'INACTIVE'; // Explicitly enforce INACTIVE regardless of request
             $user->save();
 
@@ -126,6 +126,9 @@ class AuthController extends Controller
                 'THROTTLED'
             );
         }
+
+        // Invalidate older unconsumed OTPs for this email address
+        EmailOtp::where('email', $email)->whereNull('consumed_at')->update(['consumed_at' => now()]);
 
         // Generate fresh OTP
         $otp = (string) random_int(100000, 999999);

@@ -23,13 +23,13 @@ class CustomerController extends Controller
         $phone = trim((string) ($request->query('phone') ?? ''));
         $statusFilter = strtoupper((string) ($request->query('status') ?? 'ACTIVE'));
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (! $businessId) {
-            return ApiResponse::success([], 'No active business selected.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         // 1. Fetch customer balances for this business
@@ -155,6 +155,11 @@ class CustomerController extends Controller
         $fields = $payload['fields'] ?? [];
         $businessId = (string) ($fields['businessId'] ?? $row->business_id ?? '');
 
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness($businessId)) {
+            return ApiResponse::error('Unauthorized access to this customer.', 403, null, 'FORBIDDEN');
+        }
+
         // Fetch balance
         $balRow = DB::table('customer_balances')
             ->where('payload->fields->customerId', $id)
@@ -248,7 +253,7 @@ class CustomerController extends Controller
             ]);
         }
 
-        $customerId = 'CUS-' . strtoupper(Str::random(12));
+        $customerId = 'CUS-'.strtoupper(Str::random(12));
         $duePaise = $openingBalance > 0 ? $openingBalance : 0;
         $advancePaise = $openingBalance < 0 ? abs($openingBalance) : 0;
         $now = now()->toISOString();
@@ -336,7 +341,7 @@ class CustomerController extends Controller
 
             // 3. If opening balance != 0, insert opening ledger entry
             if ($openingBalance !== 0) {
-                $ledgerId = 'LED-' . strtoupper(Str::random(16));
+                $ledgerId = 'LED-'.strtoupper(Str::random(16));
                 $debitPaise = $openingBalance > 0 ? $openingBalance : 0;
                 $creditPaise = $openingBalance < 0 ? abs($openingBalance) : 0;
 
@@ -398,6 +403,11 @@ class CustomerController extends Controller
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? [];
         $businessId = (string) ($fields['businessId'] ?? $row->business_id ?? '');
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness($businessId)) {
+            return ApiResponse::error('Unauthorized access to this customer.', 403, null, 'FORBIDDEN');
+        }
 
         $request->validate([
             'name' => ['sometimes', 'required', 'string', 'min:2', 'max:255'],
@@ -478,6 +488,16 @@ class CustomerController extends Controller
      */
     public function destroy(Request $request, string $id): JsonResponse
     {
+        $row = DB::table('customers')->where('id', $id)->where('is_deleted', 0)->first();
+        if (! $row) {
+            return ApiResponse::error('Customer not found.', 404);
+        }
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
+            return ApiResponse::error('Unauthorized to delete this customer.', 403, null, 'FORBIDDEN');
+        }
+
         $nowDb = now();
 
         DB::table('customers')
@@ -496,6 +516,16 @@ class CustomerController extends Controller
      */
     public function ledger(Request $request, string $id): JsonResponse
     {
+        $customer = DB::table('customers')->where('id', $id)->where('is_deleted', 0)->first();
+        if (! $customer) {
+            return ApiResponse::error('Customer not found.', 404);
+        }
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $customer->business_id)) {
+            return ApiResponse::error('Unauthorized access to this customer ledger.', 403, null, 'FORBIDDEN');
+        }
+
         $rows = DB::table('customer_ledger_entries')
             ->where('payload->fields->customerId', $id)
             ->orderBy('created_at', 'desc')
@@ -549,6 +579,10 @@ class CustomerController extends Controller
 
         if (! $customerRow) {
             return ApiResponse::error('Customer not found.', 404);
+        }
+
+        if ($user && ! $user->canAccessBusiness((string) $customerRow->business_id)) {
+            return ApiResponse::error('Unauthorized access to this customer.', 403, null, 'FORBIDDEN');
         }
 
         $cPayload = json_decode($customerRow->payload, true) ?: [];
@@ -627,7 +661,7 @@ class CustomerController extends Controller
             );
 
             // 3. Create payment record
-            $paymentId = 'PAY-' . strtoupper(Str::random(12));
+            $paymentId = 'PAY-'.strtoupper(Str::random(12));
             DB::table('payments')->insert([
                 'id' => $paymentId,
                 'document_path' => "payments/$paymentId",
@@ -658,7 +692,7 @@ class CustomerController extends Controller
             ]);
 
             // 4. Create ledger entry
-            $ledgerId = 'LED-' . strtoupper(Str::random(16));
+            $ledgerId = 'LED-'.strtoupper(Str::random(16));
             DB::table('customer_ledger_entries')->insert([
                 'id' => $ledgerId,
                 'document_path' => "customer_ledger_entries/$ledgerId",

@@ -14,6 +14,19 @@ class AppConfigController extends Controller
      */
     public function show(): JsonResponse
     {
+        if (! \Illuminate\Support\Facades\Schema::hasTable('app_config')) {
+            return response()->json([
+                'status' => 'success',
+                'data' => [
+                    'isActive' => true,
+                    'maintenanceTitle' => 'System Maintenance',
+                    'maintenanceMessage' => null,
+                    'maintenanceImageUrl' => null,
+                    'updatedAt' => now()->toIso8601String(),
+                ],
+            ]);
+        }
+
         $row = DB::table('app_config')
             ->where('id', 'system')
             ->where('is_deleted', 0)

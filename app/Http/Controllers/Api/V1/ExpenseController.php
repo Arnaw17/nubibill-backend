@@ -39,13 +39,13 @@ class ExpenseController extends Controller
         $startDate = $request->query('start_date') ?? $request->query('startDate');
         $endDate = $request->query('end_date') ?? $request->query('endDate');
 
-        if (!$businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+        $user = $request->user();
+        if (! $businessId) {
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (!$businessId) {
-            return ApiResponse::success([], 'No active business selected.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('expenses')
@@ -81,9 +81,9 @@ class ExpenseController extends Controller
         if ($search !== '') {
             $query->where(function ($q) use ($search) {
                 $q->where('title', 'LIKE', "%{$search}%")
-                  ->orWhere('payee_name', 'LIKE', "%{$search}%")
-                  ->orWhere('reference_number', 'LIKE', "%{$search}%")
-                  ->orWhere('notes', 'LIKE', "%{$search}%");
+                    ->orWhere('payee_name', 'LIKE', "%{$search}%")
+                    ->orWhere('reference_number', 'LIKE', "%{$search}%")
+                    ->orWhere('notes', 'LIKE', "%{$search}%");
             });
         }
 
@@ -99,11 +99,16 @@ class ExpenseController extends Controller
     /**
      * Get single expense.
      */
-    public function show(string $id): JsonResponse
+    public function show(Request $request, string $id): JsonResponse
     {
         $row = DB::table('expenses')->where('id', $id)->first();
-        if (!$row) {
+        if (! $row) {
             return ApiResponse::error('Expense not found.', 404);
+        }
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
+            return ApiResponse::error('Unauthorized access to this expense.', 403, null, 'FORBIDDEN');
         }
 
         return ApiResponse::success($this->formatExpense($row), 'Expense retrieved successfully.');
@@ -139,10 +144,14 @@ class ExpenseController extends Controller
             'createdBy' => 'nullable|string',
         ]);
 
+        $user = $request->user();
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
-        if (!$businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : 'BUS-001';
+        if (! $businessId) {
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('A valid, authorized business context is required to create an expense.', 403, null, 'FORBIDDEN');
         }
 
         $outletId = $validated['outlet_id'] ?? $validated['outletId'] ?? null;
@@ -155,7 +164,7 @@ class ExpenseController extends Controller
         $notes = $validated['notes'] ?? null;
         $createdBy = $validated['created_by'] ?? $validated['createdBy'] ?? null;
 
-        $id = 'EXP-' . strtoupper(Str::random(10));
+        $id = 'EXP-'.strtoupper(Str::random(10));
         $now = now();
 
         $payload = [
@@ -200,7 +209,7 @@ class ExpenseController extends Controller
 
         // Record in financial_transactions as EXPENSE
         DB::table('financial_transactions')->insert([
-            'id' => 'FIN-' . $id,
+            'id' => 'FIN-'.$id,
             'business_id' => $businessId,
             'outlet_id' => $outletId,
             'tenant_id' => $tenantId,
@@ -210,7 +219,7 @@ class ExpenseController extends Controller
             'payment_mode' => $paymentMode,
             'reference_id' => $id,
             'reference_type' => 'EXPENSE',
-            'description' => $validated['title'] . ($payeeName ? " (Payee: {$payeeName})" : ''),
+            'description' => $validated['title'].($payeeName ? " (Payee: {$payeeName})" : ''),
             'transaction_date' => date('Y-m-d H:i:s', strtotime($expenseDate)),
             'recorded_by' => $createdBy,
             'status' => 'COMPLETED',
@@ -230,8 +239,13 @@ class ExpenseController extends Controller
     public function update(Request $request, string $id): JsonResponse
     {
         $row = DB::table('expenses')->where('id', $id)->first();
-        if (!$row) {
+        if (! $row) {
             return ApiResponse::error('Expense not found.', 404);
+        }
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
+            return ApiResponse::error('Unauthorized access to this expense.', 403, null, 'FORBIDDEN');
         }
 
         $validated = $request->validate([
@@ -253,8 +267,12 @@ class ExpenseController extends Controller
 
         $updates = ['updated_at' => now()];
 
-        if (isset($validated['title'])) $updates['title'] = $validated['title'];
-        if (isset($validated['category'])) $updates['category'] = $validated['category'];
+        if (isset($validated['title'])) {
+            $updates['title'] = $validated['title'];
+        }
+        if (isset($validated['category'])) {
+            $updates['category'] = $validated['category'];
+        }
         if (isset($validated['amount_paise']) || isset($validated['amountPaise'])) {
             $updates['amount_paise'] = (int) ($validated['amount_paise'] ?? $validated['amountPaise']);
         }
@@ -271,23 +289,33 @@ class ExpenseController extends Controller
         if (isset($validated['reference_number']) || isset($validated['referenceNumber'])) {
             $updates['reference_number'] = $validated['reference_number'] ?? $validated['referenceNumber'];
         }
-        if (isset($validated['notes'])) $updates['notes'] = $validated['notes'];
-        if (isset($validated['status'])) $updates['status'] = strtoupper((string) $validated['status']);
+        if (isset($validated['notes'])) {
+            $updates['notes'] = $validated['notes'];
+        }
+        if (isset($validated['status'])) {
+            $updates['status'] = strtoupper((string) $validated['status']);
+        }
 
         DB::table('expenses')->where('id', $id)->update($updates);
 
         $fresh = DB::table('expenses')->where('id', $id)->first();
+
         return ApiResponse::success($this->formatExpense($fresh), 'Expense updated successfully.');
     }
 
     /**
      * Void or delete expense.
      */
-    public function destroy(string $id): JsonResponse
+    public function destroy(Request $request, string $id): JsonResponse
     {
         $row = DB::table('expenses')->where('id', $id)->first();
-        if (!$row) {
+        if (! $row) {
             return ApiResponse::error('Expense not found.', 404);
+        }
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
+            return ApiResponse::error('Unauthorized to void this expense.', 403, null, 'FORBIDDEN');
         }
 
         DB::table('expenses')->where('id', $id)->update([
@@ -323,6 +351,7 @@ class ExpenseController extends Controller
         }
 
         $all = array_values(array_unique(array_merge($this->defaultCategories, $custom)));
+
         return ApiResponse::success($all, 'Expense categories retrieved.');
     }
 

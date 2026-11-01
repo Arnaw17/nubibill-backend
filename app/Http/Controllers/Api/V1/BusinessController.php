@@ -52,7 +52,8 @@ class BusinessController extends Controller
                 continue;
             }
 
-            $isActive = $fields['isActive'] ?? (($fields['status'] ?? $row->status ?? 'active') === 'active');
+            $statusVal = strtolower((string) ($fields['status'] ?? $row->status ?? 'active'));
+            $isActive = $fields['isActive'] ?? ($statusVal === 'active');
             if (! $isActive) {
                 continue;
             }
@@ -286,6 +287,10 @@ class BusinessController extends Controller
         }
         $businessOwnerUid = (string) ($bPayload['fields']['ownerUid'] ?? $businessRow->owner_uid ?? $userId);
 
+        if (! \Illuminate\Support\Facades\Schema::hasTable('outlets')) {
+            return ApiResponse::success([], 'Outlets retrieved successfully.');
+        }
+
         $rows = DB::table('outlets')
             ->where('business_id', $businessId)
             ->where('is_deleted', 0)
@@ -298,7 +303,8 @@ class BusinessController extends Controller
             if ($employee !== null && ! in_array((string) ($f['outletId'] ?? $row->outlet_id ?? $row->id), $employee['outletIds'] ?? [], true)) {
                 continue;
             }
-            $isActive = $f['isActive'] ?? (($f['status'] ?? $row->status ?? 'active') === 'active');
+            $statusVal = strtolower((string) ($f['status'] ?? $row->status ?? 'active'));
+            $isActive = $f['isActive'] ?? ($statusVal === 'active');
             if ($isActive) {
                 $outlets[] = [
                     'outletId' => (string) ($f['outletId'] ?? $row->outlet_id ?? $row->id),

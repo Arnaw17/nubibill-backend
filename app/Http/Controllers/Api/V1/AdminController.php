@@ -98,7 +98,7 @@ class AdminController extends Controller
                 // Rule: Do NOT store the full Aadhaar number; at most the last 4 digits
                 $clean = preg_replace('/\D/', '', $number);
                 $last4 = substr($clean, -4);
-                $document->number_encrypted = 'XXXX-XXXX-' . $last4;
+                $document->number_encrypted = 'XXXX-XXXX-'.$last4;
             } else {
                 // Rule: Encrypt PAN number if stored (handled by encrypted cast on model)
                 $document->number_encrypted = trim($number);

@@ -266,6 +266,7 @@ class EmployeePermissionService
 
             $fields['businessIds'] = $businessIds;
             $fields['outletIds'] = $outletIds;
+
             return ['fields' => $fields];
         }
 

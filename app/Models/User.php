@@ -3,6 +3,8 @@
 namespace App\Models;
 
 use Database\Factories\UserFactory;
+use Filament\Models\Contracts\FilamentUser;
+use Filament\Panel;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -10,9 +12,10 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\HasApiTokens;
 
-class User extends Authenticatable
+class User extends Authenticatable implements FilamentUser
 {
     /** @use HasFactory<UserFactory> */
     use HasApiTokens, HasFactory, HasUuids, Notifiable, SoftDeletes;
@@ -23,7 +26,8 @@ class User extends Authenticatable
 
     /**
      * The attributes that are mass assignable.
-     * Note: 'status' is deliberately omitted - it must NEVER be mass assigned from client input.
+     * Note: 'status', 'role', 'email_verified_at', 'activated_at' are deliberately
+     * omitted - they must NEVER be mass assigned from client input.
      *
      * @var list<string>
      */
@@ -34,13 +38,9 @@ class User extends Authenticatable
         'address',
         'photo_path',
         'password',
-        'role',
-        'email_verified_at',
-        'activated_at',
-        'activated_by',
         'business_id',
+        'email_verified_at',
         'version',
-        'is_deleted',
     ];
 
     /**
@@ -102,6 +102,89 @@ class User extends Authenticatable
     public function isSuperUser(): bool
     {
         return in_array(strtoupper((string) $this->role), ['ADMIN', 'SUPER_ADMIN', 'DEVELOPER', 'SUPER_USER'], true);
+    }
+
+    public function canAccessPanel(Panel $panel): bool
+    {
+        return $this->isAdmin() && $this->isActive();
+    }
+
+    /**
+     * Get IDs of all businesses accessible to this user.
+     *
+     * @return list<string>
+     */
+    public function accessibleBusinessIds(): array
+    {
+        if ($this->isAdmin()) {
+            return DB::table('businesses')
+                ->where('is_deleted', 0)
+                ->pluck('id')
+                ->map(fn ($id) => (string) $id)
+                ->all();
+        }
+
+        $userId = (string) $this->id;
+        $businessIds = [];
+
+        if (strtoupper((string) $this->role) === 'STAFF') {
+            $employee = DB::table('employees')
+                ->where('is_deleted', 0)
+                ->get()
+                ->first(function ($row) use ($userId): bool {
+                    $payload = json_decode((string) $row->payload, true) ?: [];
+                    $fields = $payload['fields'] ?? $payload;
+
+                    return (string) ($fields['uid'] ?? '') === $userId;
+                });
+
+            if ($employee) {
+                $payload = json_decode((string) $employee->payload, true) ?: [];
+                $fields = $payload['fields'] ?? $payload;
+                $assigned = $fields['businessIds'] ?? (isset($fields['businessId']) ? [$fields['businessId']] : []);
+                if (is_array($assigned)) {
+                    foreach ($assigned as $bId) {
+                        $businessIds[] = (string) $bId;
+                    }
+                }
+            }
+        } else {
+            // Owner or standard user: find businesses where owner_uid == userId
+            $rows = DB::table('businesses')
+                ->where('is_deleted', 0)
+                ->get();
+
+            foreach ($rows as $row) {
+                $payload = json_decode((string) $row->payload, true) ?: [];
+                $fields = $payload['fields'] ?? [];
+                $ownerUid = (string) ($fields['ownerUid'] ?? $row->owner_uid ?? '');
+                if ($ownerUid === $userId) {
+                    $businessIds[] = (string) ($fields['businessId'] ?? $row->business_id ?? $row->id);
+                }
+            }
+        }
+
+        return array_values(array_unique(array_filter($businessIds)));
+    }
+
+    public function canAccessBusiness(?string $businessId): bool
+    {
+        if ($businessId === null || $businessId === '') {
+            return false;
+        }
+
+        if ($this->isAdmin()) {
+            return true;
+        }
+
+        return in_array((string) $businessId, $this->accessibleBusinessIds(), true);
+    }
+
+    public function defaultBusinessId(): ?string
+    {
+        $ids = $this->accessibleBusinessIds();
+
+        return $ids[0] ?? null;
     }
 
     public function getPhotoUrlAttribute(): ?string

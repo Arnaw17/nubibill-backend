@@ -44,6 +44,7 @@ class BusinessTypeController extends Controller
             if ($a['displayOrder'] === $b['displayOrder']) {
                 return strcasecmp($a['name'], $b['name']);
             }
+
             return $a['displayOrder'] <=> $b['displayOrder'];
         });
 
@@ -91,6 +92,7 @@ class BusinessTypeController extends Controller
             if ($a['displayOrder'] === $b['displayOrder']) {
                 return strcasecmp($a['name'], $b['name']);
             }
+
             return $a['displayOrder'] <=> $b['displayOrder'];
         });
 

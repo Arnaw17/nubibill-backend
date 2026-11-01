@@ -28,13 +28,11 @@ class ProductController extends Controller
         $statusFilter = strtoupper((string) ($request->query('status') ?? 'ACTIVE'));
 
         if (! $businessId) {
-            // Find first active business accessible by user
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (! $businessId) {
-            return ApiResponse::success([], 'No active business selected.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         // 1. If outletId is provided, get list of product IDs placed in this outlet
@@ -94,20 +92,20 @@ class ProductController extends Controller
                     ->where('business_id', $businessId)
                     ->where(function ($q) use ($vId) {
                         $q->where('id', 'like', "%{$vId}%")
-                          ->orWhere('payload->fields->variantId', $vId);
+                            ->orWhere('payload->fields->variantId', $vId);
                     })
                     ->orderBy('created_at', 'desc')
                     ->first();
                 if ($latestPbItem) {
                     $pbiPayload = json_decode($latestPbItem->payload, true) ?: [];
                     $pbiFields = $pbiPayload['fields'] ?? [];
-                    if ($vSellingPrice === 0 && !empty($pbiFields['sellingPrice'])) {
+                    if ($vSellingPrice === 0 && ! empty($pbiFields['sellingPrice'])) {
                         $vSellingPrice = (int) $pbiFields['sellingPrice'];
                     }
-                    if ($vMrp === 0 && !empty($pbiFields['mrp'])) {
+                    if ($vMrp === 0 && ! empty($pbiFields['mrp'])) {
                         $vMrp = (int) $pbiFields['mrp'];
                     }
-                    if ($vPurchaseRate === 0 && !empty($pbiFields['rate'])) {
+                    if ($vPurchaseRate === 0 && ! empty($pbiFields['rate'])) {
                         $vPurchaseRate = (int) $pbiFields['rate'];
                     }
                 }
@@ -132,9 +130,11 @@ class ProductController extends Controller
                 'sellingPrice' => $vSellingPrice,
                 'mrp' => $vMrp,
                 'defaultGstRateBps' => (int) ($vFields['defaultGstRateBps'] ?? $vFields['defaultGstRate'] ?? 0),
+                'rackId' => $vFields['rackId'] ?? $vFields['rack'] ?? ($vFields['attributeValues']['rack'] ?? null),
                 'status' => (string) ($vFields['status'] ?? 'ACTIVE'),
                 'isActive' => (($vFields['status'] ?? 'ACTIVE') === 'ACTIVE'),
-                'attributeValues' => !empty($vFields['attributeValues']) ? $vFields['attributeValues'] : (object) [],
+                'quantitySlabs' => $vFields['quantitySlabs'] ?? $vFields['quantity_slabs'] ?? [],
+                'attributeValues' => ! empty($vFields['attributeValues']) ? $vFields['attributeValues'] : (object) [],
             ];
         }
 
@@ -206,13 +206,13 @@ class ProductController extends Controller
                 if (empty($pv['category'])) {
                     $pv['category'] = $cat;
                 }
-                if (empty($pv['hsnCode']) && !empty($parentHsn)) {
+                if (empty($pv['hsnCode']) && ! empty($parentHsn)) {
                     $pv['hsnCode'] = $parentHsn;
                 }
                 if (empty($pv['defaultGstRateBps']) && $parentGst > 0) {
                     $pv['defaultGstRateBps'] = $parentGst;
                 }
-                if ((empty($pv['baseUnitId']) || strtoupper($pv['baseUnitId']) === 'UNIT') && !empty($parentBaseUnit)) {
+                if ((empty($pv['baseUnitId']) || strtoupper($pv['baseUnitId']) === 'UNIT') && ! empty($parentBaseUnit)) {
                     $pv['baseUnitId'] = $parentBaseUnit;
                 }
                 if (empty($pv['commercialUnitName'])) {
@@ -223,7 +223,7 @@ class ProductController extends Controller
                         $vAttrs = (array) $vAttrs;
                     }
                     $attrSoldAs = $vAttrs['soldAs'] ?? ($vAttrs['commercialUnit'] ?? $parentSoldAs);
-                    if (!empty($attrSoldAs)) {
+                    if (! empty($attrSoldAs)) {
                         $pv['commercialUnitName'] = $attrSoldAs;
                     }
                 }
@@ -249,7 +249,8 @@ class ProductController extends Controller
                 'hsnCode' => $fields['hsnCode'] ?? null,
                 'status' => (string) ($fields['status'] ?? 'ACTIVE'),
                 'isActive' => (($fields['status'] ?? 'ACTIVE') === 'ACTIVE'),
-                'attributeValues' => !empty($fields['attributeValues']) ? $fields['attributeValues'] : (object) [],
+                'quantitySlabs' => $fields['quantitySlabs'] ?? $fields['quantity_slabs'] ?? [],
+                'attributeValues' => ! empty($fields['attributeValues']) ? $fields['attributeValues'] : (object) [],
                 'variants' => $prodVariants,
                 'createdAt' => $fields['createdAt'] ?? $row->created_at,
                 'updatedAt' => $fields['updatedAt'] ?? $row->updated_at,
@@ -276,6 +277,11 @@ class ProductController extends Controller
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? [];
         $businessId = (string) ($fields['businessId'] ?? $row->business_id ?? '');
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness($businessId)) {
+            return ApiResponse::error('Unauthorized access to this product.', 403, null, 'FORBIDDEN');
+        }
 
         // Fetch variants
         $variantRows = DB::table('product_variants')
@@ -305,7 +311,7 @@ class ProductController extends Controller
                 }
 
                 $vUnit = (string) ($vFields['baseUnitId'] ?? $vFields['unitId'] ?? '');
-                if ((empty($vUnit) || strtoupper($vUnit) === 'UNIT') && !empty($parentBaseUnit)) {
+                if ((empty($vUnit) || strtoupper($vUnit) === 'UNIT') && ! empty($parentBaseUnit)) {
                     $vUnit = $parentBaseUnit;
                 } elseif (empty($vUnit)) {
                     $vUnit = 'UNIT';
@@ -326,20 +332,20 @@ class ProductController extends Controller
                         ->where('business_id', $businessId)
                         ->where(function ($q) use ($singleVid) {
                             $q->where('id', 'like', "%{$singleVid}%")
-                              ->orWhere('payload->fields->variantId', $singleVid);
+                                ->orWhere('payload->fields->variantId', $singleVid);
                         })
                         ->orderBy('created_at', 'desc')
                         ->first();
                     if ($latestPbItem) {
                         $pbiPayload = json_decode($latestPbItem->payload, true) ?: [];
                         $pbiFields = $pbiPayload['fields'] ?? [];
-                        if ($vSellingPrice === 0 && !empty($pbiFields['sellingPrice'])) {
+                        if ($vSellingPrice === 0 && ! empty($pbiFields['sellingPrice'])) {
                             $vSellingPrice = (int) $pbiFields['sellingPrice'];
                         }
-                        if ($vMrp === 0 && !empty($pbiFields['mrp'])) {
+                        if ($vMrp === 0 && ! empty($pbiFields['mrp'])) {
                             $vMrp = (int) $pbiFields['mrp'];
                         }
-                        if ($vPurchaseRate === 0 && !empty($pbiFields['rate'])) {
+                        if ($vPurchaseRate === 0 && ! empty($pbiFields['rate'])) {
                             $vPurchaseRate = (int) $pbiFields['rate'];
                         }
                     }
@@ -368,7 +374,8 @@ class ProductController extends Controller
                     'defaultGstRateBps' => (int) ($vFields['defaultGstRateBps'] ?? $fields['defaultGstRateBps'] ?? 0),
                     'status' => (string) ($vFields['status'] ?? 'ACTIVE'),
                     'isActive' => (($vFields['status'] ?? 'ACTIVE') === 'ACTIVE'),
-                    'attributeValues' => !empty($vAttrs) ? $vAttrs : (object) [],
+                    'quantitySlabs' => $vFields['quantitySlabs'] ?? $vFields['quantity_slabs'] ?? ($fields['quantitySlabs'] ?? $fields['quantity_slabs'] ?? []),
+                    'attributeValues' => ! empty($vAttrs) ? $vAttrs : (object) [],
                 ];
             }
         }
@@ -392,7 +399,8 @@ class ProductController extends Controller
             'hsnCode' => $fields['hsnCode'] ?? null,
             'status' => (string) ($fields['status'] ?? 'ACTIVE'),
             'isActive' => (($fields['status'] ?? 'ACTIVE') === 'ACTIVE'),
-            'attributeValues' => !empty($fields['attributeValues']) ? $fields['attributeValues'] : (object) [],
+            'quantitySlabs' => $fields['quantitySlabs'] ?? $fields['quantity_slabs'] ?? [],
+            'attributeValues' => ! empty($fields['attributeValues']) ? $fields['attributeValues'] : (object) [],
             'variants' => $variants,
             'createdAt' => $fields['createdAt'] ?? $row->created_at,
             'updatedAt' => $fields['updatedAt'] ?? $row->updated_at,
@@ -442,7 +450,7 @@ class ProductController extends Controller
             }
         }
 
-        $generated = DB::transaction(function () use ($businessId, $outletId, $ownerUid, $user): int {
+        $generated = DB::transaction(function () use ($businessId, $outletId, $ownerUid): int {
             $products = DB::table('products')
                 ->where('business_id', $businessId)
                 ->where('is_deleted', 0)
@@ -586,12 +594,14 @@ class ProductController extends Controller
             'hsn_code' => ['nullable', 'string'],
             'hsnCode' => ['nullable', 'string'],
             'variants' => ['nullable', 'array'],
+            'quantity_slabs' => ['nullable', 'array'],
+            'quantitySlabs' => ['nullable', 'array'],
         ]);
 
         $businessId = trim((string) ($request->input('business_id') ?? $request->input('businessId') ?? ''));
         $outletId = $request->input('outlet_id') ?? $request->input('outletId');
         $name = trim((string) ($request->input('name') ?? $request->input('productName') ?? ''));
-        $productCode = trim((string) ($request->input('product_code') ?? $request->input('productCode') ?? 'PRD-' . strtoupper(Str::random(6))));
+        $productCode = trim((string) ($request->input('product_code') ?? $request->input('productCode') ?? 'PRD-'.strtoupper(Str::random(6))));
         $brand = $request->input('brand');
         $brandId = $request->input('brand_id') ?? $request->input('brandId');
         $category = $request->input('category');
@@ -603,8 +613,9 @@ class ProductController extends Controller
         $defaultGstRateBps = (int) ($request->input('default_gst_rate_bps') ?? $request->input('defaultGstRateBps') ?? 0);
         $hsnCode = $request->input('hsn_code') ?? $request->input('hsnCode');
         $attributeValues = (array) ($request->input('attribute_values') ?? $request->input('attributeValues') ?? []);
+        $quantitySlabs = (array) ($request->input('quantity_slabs') ?? $request->input('quantitySlabs') ?? []);
 
-        $productId = 'PROD-' . strtoupper(Str::random(24));
+        $productId = 'PROD-'.strtoupper(Str::random(24));
         $now = now()->toISOString();
         $nowDb = now();
 
@@ -627,6 +638,7 @@ class ProductController extends Controller
             'defaultGstRateBps' => $defaultGstRateBps,
             'hsnCode' => $hsnCode,
             'attributeValues' => $attributeValues,
+            'quantitySlabs' => $quantitySlabs,
             'status' => 'ACTIVE',
             'createdAt' => $now,
             'updatedAt' => $now,
@@ -660,7 +672,7 @@ class ProductController extends Controller
         }
 
         foreach ($inputVariants as $v) {
-            $variantId = 'VAR-' . strtoupper(Str::random(24));
+            $variantId = 'VAR-'.strtoupper(Str::random(24));
             $vName = trim((string) ($v['name'] ?? $v['variantName'] ?? $v['displayName'] ?? 'Standard'));
             $vSelling = (int) ($v['selling_price'] ?? $v['sellingPrice'] ?? 0);
             $vMrp = (int) ($v['mrp'] ?? 0);
@@ -671,7 +683,7 @@ class ProductController extends Controller
             }
             $vCommUnitName = $v['commercial_unit_name'] ?? $v['commercialUnitName'] ?? $defaultCommUnitName;
             $vBarcode = $v['barcode'] ?? null;
-            $vSku = $v['sku'] ?? 'SKU-' . strtoupper(Str::random(6));
+            $vSku = $v['sku'] ?? 'SKU-'.strtoupper(Str::random(6));
 
             $vFields = [
                 'variantId' => $variantId,
@@ -690,6 +702,7 @@ class ProductController extends Controller
                 'sellingPrice' => $vSelling,
                 'mrp' => $vMrp,
                 'defaultGstRateBps' => $defaultGstRateBps,
+                'quantitySlabs' => $v['quantitySlabs'] ?? $v['quantity_slabs'] ?? $quantitySlabs,
                 'status' => 'ACTIVE',
                 'createdAt' => $now,
                 'updatedAt' => $now,
@@ -758,7 +771,7 @@ class ProductController extends Controller
 
             // 3. Insert outlet placement if outlet is specified
             if ($outletId) {
-                $opId = 'OP_' . strtolower(Str::random(16));
+                $opId = 'OP_'.strtolower(Str::random(16));
                 DB::table('outlet_products')->insert([
                     'id' => $opId,
                     'document_path' => "outlet_products/$opId",
@@ -788,7 +801,7 @@ class ProductController extends Controller
             }
         });
 
-        Log::info("Product created: {$productId} ('{$name}') with " . count($variantRecords) . " variant(s)");
+        Log::info("Product created: {$productId} ('{$name}') with ".count($variantRecords).' variant(s)');
 
         $productFields['variants'] = array_map(fn ($r) => $r['raw_fields'], $variantRecords);
 
@@ -798,10 +811,123 @@ class ProductController extends Controller
     }
 
     /**
+     * Update an existing product.
+     */
+    public function update(Request $request, string $id): JsonResponse
+    {
+        $user = $request->user();
+        $prodRow = DB::table('products')->where('id', $id)->where('is_deleted', 0)->first();
+        if (! $prodRow) {
+            return ApiResponse::error('Product not found.', 404);
+        }
+
+        if ($user && ! $user->canAccessBusiness((string) $prodRow->business_id)) {
+            return ApiResponse::error('Unauthorized access to this product.', 403, null, 'FORBIDDEN');
+        }
+
+        $request->validate([
+            'name' => ['sometimes', 'required', 'string', 'min:2', 'max:255'],
+            'productName' => ['sometimes', 'required', 'string', 'min:2', 'max:255'],
+            'product_code' => ['nullable', 'string', 'max:64'],
+            'productCode' => ['nullable', 'string', 'max:64'],
+            'brand' => ['nullable', 'string'],
+            'brandId' => ['nullable', 'string'],
+            'category' => ['nullable', 'string'],
+            'categoryId' => ['nullable', 'string'],
+            'subcategoryId' => ['nullable', 'string'],
+            'description' => ['nullable', 'string', 'max:1000'],
+            'status' => ['nullable', 'string', 'in:ACTIVE,INACTIVE,active,inactive'],
+            'default_gst_rate_bps' => ['nullable', 'integer'],
+            'hsn_code' => ['nullable', 'string'],
+            'quantity_slabs' => ['nullable', 'array'],
+            'quantitySlabs' => ['nullable', 'array'],
+        ]);
+
+        $payload = json_decode($prodRow->payload, true) ?: [];
+        $fields = $payload['fields'] ?? [];
+        $now = now();
+        $nowIso = $now->toISOString();
+
+        if ($request->has('name') || $request->has('productName')) {
+            $fields['productName'] = trim((string) ($request->input('name') ?? $request->input('productName')));
+            $fields['name'] = $fields['productName'];
+        }
+        if ($request->has('product_code') || $request->has('productCode')) {
+            $fields['productCode'] = trim((string) ($request->input('product_code') ?? $request->input('productCode')));
+        }
+        if ($request->has('brand') || $request->has('brandId')) {
+            $fields['brand'] = $request->input('brand') ?? ($fields['brand'] ?? null);
+            $fields['brandId'] = $request->input('brandId') ?? ($fields['brandId'] ?? null);
+        }
+        if ($request->has('category') || $request->has('categoryId')) {
+            $fields['category'] = $request->input('category') ?? ($fields['category'] ?? null);
+            $fields['categoryId'] = $request->input('categoryId') ?? ($fields['categoryId'] ?? null);
+        }
+        if ($request->has('description')) {
+            $fields['description'] = $request->input('description');
+        }
+        if ($request->has('default_gst_rate_bps')) {
+            $fields['defaultGstRateBps'] = (int) $request->input('default_gst_rate_bps');
+        }
+        if ($request->has('hsn_code')) {
+            $fields['hsnCode'] = $request->input('hsn_code');
+        }
+        if ($request->has('quantitySlabs') || $request->has('quantity_slabs')) {
+            $fields['quantitySlabs'] = (array) ($request->input('quantitySlabs') ?? $request->input('quantity_slabs') ?? []);
+        }
+        if ($request->has('status')) {
+            $status = strtoupper((string) $request->input('status'));
+            $fields['status'] = $status;
+            $fields['isActive'] = ($status === 'ACTIVE');
+        }
+        $fields['updatedAt'] = $nowIso;
+        $payload['fields'] = $fields;
+
+        DB::transaction(function () use ($id, $payload, $now, $fields, $request): void {
+            DB::table('products')->where('id', $id)->update([
+                'status' => $fields['status'] ?? 'ACTIVE',
+                'updated_at' => $now,
+                'payload' => json_encode($payload),
+            ]);
+
+            if ($request->has('quantitySlabs') || $request->has('quantity_slabs')) {
+                $slabs = (array) ($request->input('quantitySlabs') ?? $request->input('quantity_slabs') ?? []);
+                $vRows = DB::table('product_variants')
+                    ->where(function ($q) use ($id) {
+                        $q->where('payload->fields->productId', $id)
+                            ->orWhere('id', 'like', "%{$id}%");
+                    })
+                    ->where('is_deleted', 0)
+                    ->get();
+                foreach ($vRows as $vRow) {
+                    $vPayload = json_decode($vRow->payload, true) ?: [];
+                    $vPayload['fields']['quantitySlabs'] = $slabs;
+                    DB::table('product_variants')->where('id', $vRow->id)->update([
+                        'payload' => json_encode($vPayload),
+                        'updated_at' => $now,
+                    ]);
+                }
+            }
+        });
+
+        return ApiResponse::success($fields, 'Product updated successfully.');
+    }
+
+    /**
      * Soft delete product and its variants.
      */
     public function destroy(Request $request, string $id): JsonResponse
     {
+        $user = $request->user();
+        $prodRow = DB::table('products')->where('id', $id)->where('is_deleted', 0)->first();
+        if (! $prodRow) {
+            return ApiResponse::error('Product not found.', 404);
+        }
+
+        if ($user && ! $user->canAccessBusiness((string) $prodRow->business_id)) {
+            return ApiResponse::error('Unauthorized to delete this product.', 403, null, 'FORBIDDEN');
+        }
+
         $nowDb = now();
 
         DB::transaction(function () use ($id, $nowDb) {
@@ -940,7 +1066,7 @@ class ProductController extends Controller
                         ]);
                     $updated++;
                 } else {
-                    $opId = 'OP_' . strtolower(Str::random(16));
+                    $opId = 'OP_'.strtolower(Str::random(16));
                     DB::table('outlet_products')->insert([
                         'id' => $opId,
                         'document_path' => "outlet_products/$opId",
@@ -994,11 +1120,23 @@ class ProductController extends Controller
             return ApiResponse::error('Invalid product status.', 422);
         }
 
+        $user = $request->user();
+        if ($user && ! $user->isAdmin()) {
+            $accessibleBusinessIds = $user->accessibleBusinessIds();
+            $invalidCount = DB::table('products')
+                ->whereIn('id', $productIds)
+                ->whereNotIn('business_id', $accessibleBusinessIds)
+                ->count();
+            if ($invalidCount > 0) {
+                return ApiResponse::error('Unauthorized access to one or more selected products.', 403, null, 'FORBIDDEN');
+            }
+        }
+
         $nowDb = now();
         $isDeleted = ($status === 'DELETED') ? 1 : 0;
         $activeStatus = ($status === 'DELETED') ? 'INACTIVE' : $status;
 
-        DB::transaction(function () use ($productIds, $status, $activeStatus, $isDeleted, $nowDb) {
+        DB::transaction(function () use ($productIds, $activeStatus, $isDeleted, $nowDb) {
             foreach ($productIds as $prodId) {
                 // Update product row
                 $prodRow = DB::table('products')->where('id', $prodId)->first();
@@ -1185,7 +1323,7 @@ class ProductController extends Controller
             ->where(function ($sub) use ($q) {
                 $sub->where('payload->fields->productName', 'LIKE', "%{$q}%")
                     ->orWhere('payload->fields->brandName', 'LIKE', "%{$q}%")
-                    ->orWhere('payload->fields->normalizedProductName', 'LIKE', '%' . strtolower($q) . '%');
+                    ->orWhere('payload->fields->normalizedProductName', 'LIKE', '%'.strtolower($q).'%');
             })
             ->limit(30)
             ->get();
@@ -1252,23 +1390,33 @@ class ProductController extends Controller
         $code = trim((string) ($request->input('code') ?? ''));
         $categoryId = $request->input('category_id') ?? $request->input('categoryId');
         $businessId = $request->input('business_id') ?? $request->input('businessId');
+        $user = $request->user();
+        $isAdmin = $user && $user->isAdmin();
+        $scopeType = $isAdmin ? 'SYSTEM' : 'BUSINESS';
+        if (! $isAdmin) {
+            $businessId = $businessId ?? ($user ? $user->defaultBusinessId() : null);
+            if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+                return ApiResponse::error('A valid business context is required to create a master item.', 403, null, 'FORBIDDEN');
+            }
+        }
+
         $now = now();
         $isoNow = $now->toISOString();
 
         $slug = strtoupper(preg_replace('/[^A-Za-z0-9]+/', '_', $name));
         $slug = trim($slug, '_');
         if (empty($slug)) {
-            $slug = 'ITEM_' . strtoupper(Str::random(6));
+            $slug = 'ITEM_'.strtoupper(Str::random(6));
         }
 
         switch ($type) {
             case 'BRAND':
-                $id = 'SYS_BRAND_' . substr($slug, 0, 40) . '_' . strtoupper(Str::random(6));
+                $id = ($scopeType === 'SYSTEM' ? 'SYS_BRAND_' : 'BUS_BRAND_').substr($slug, 0, 40).'_'.strtoupper(Str::random(6));
                 $fields = [
                     'brandId' => $id,
                     'name' => $name,
                     'status' => 'ACTIVE',
-                    'scopeType' => 'SYSTEM',
+                    'scopeType' => $scopeType,
                     'businessId' => $businessId,
                     'createdAt' => $isoNow,
                     'updatedAt' => $isoNow,
@@ -1287,6 +1435,7 @@ class ProductController extends Controller
                         'fields' => $fields,
                     ]),
                 ]);
+
                 return ApiResponse::success([
                     'id' => $id,
                     'name' => $name,
@@ -1295,13 +1444,13 @@ class ProductController extends Controller
                 ], 'Brand created successfully.', 201);
 
             case 'CATEGORY':
-                $id = 'SYS_CATEGORY_' . substr($slug, 0, 40) . '_' . strtoupper(Str::random(6));
+                $id = ($scopeType === 'SYSTEM' ? 'SYS_CATEGORY_' : 'BUS_CATEGORY_').substr($slug, 0, 40).'_'.strtoupper(Str::random(6));
                 $fields = [
                     'categoryId' => $id,
                     'name' => $name,
                     'code' => $code ?: null,
                     'status' => 'ACTIVE',
-                    'scopeType' => 'SYSTEM',
+                    'scopeType' => $scopeType,
                     'businessId' => $businessId,
                     'createdAt' => $isoNow,
                     'updatedAt' => $isoNow,
@@ -1320,6 +1469,7 @@ class ProductController extends Controller
                         'fields' => $fields,
                     ]),
                 ]);
+
                 return ApiResponse::success([
                     'id' => $id,
                     'name' => $name,
@@ -1332,13 +1482,13 @@ class ProductController extends Controller
                 if (empty($categoryId)) {
                     return ApiResponse::error('Category ID is required for subcategory.', 422);
                 }
-                $id = 'SYS_SUBCATEGORY_' . substr($categoryId, 0, 20) . '_' . substr($slug, 0, 30) . '_' . strtoupper(Str::random(6));
+                $id = ($scopeType === 'SYSTEM' ? 'SYS_SUBCATEGORY_' : 'BUS_SUBCATEGORY_').substr($categoryId, 0, 20).'_'.substr($slug, 0, 30).'_'.strtoupper(Str::random(6));
                 $fields = [
                     'subcategoryId' => $id,
                     'categoryId' => $categoryId,
                     'name' => $name,
                     'status' => 'ACTIVE',
-                    'scopeType' => 'SYSTEM',
+                    'scopeType' => $scopeType,
                     'businessId' => $businessId,
                     'createdAt' => $isoNow,
                     'updatedAt' => $isoNow,
@@ -1359,7 +1509,7 @@ class ProductController extends Controller
                 ]);
 
                 // Also create default template entry in subcategory_attribute_templates so template is ready!
-                $templateId = 'TMPL_' . $id;
+                $templateId = 'TMPL_'.$id;
                 DB::table('subcategory_attribute_templates')->insert([
                     'id' => $templateId,
                     'document_path' => "subcategory_attribute_templates/$templateId",
@@ -1382,7 +1532,7 @@ class ProductController extends Controller
                             'dataType' => 'SELECT',
                             'required' => true,
                             'status' => 'ACTIVE',
-                            'scopeType' => 'SYSTEM',
+                            'scopeType' => $scopeType,
                         ],
                     ]),
                 ]);
@@ -1396,14 +1546,14 @@ class ProductController extends Controller
                 ], 'Subcategory created successfully.', 201);
 
             case 'UNIT':
-                $id = 'UNIT_' . substr($slug, 0, 20) . '_' . strtoupper(Str::random(4));
+                $id = ($scopeType === 'SYSTEM' ? 'UNIT_' : 'BUS_UNIT_').substr($slug, 0, 20).'_'.strtoupper(Str::random(4));
                 $fields = [
                     'unitId' => $id,
                     'name' => $name,
                     'symbol' => $code ?: $name,
                     'precision' => 0,
                     'status' => 'ACTIVE',
-                    'scopeType' => 'SYSTEM',
+                    'scopeType' => $scopeType,
                     'businessId' => $businessId,
                     'createdAt' => $isoNow,
                     'updatedAt' => $isoNow,
@@ -1422,6 +1572,7 @@ class ProductController extends Controller
                         'fields' => $fields,
                     ]),
                 ]);
+
                 return ApiResponse::success([
                     'id' => $id,
                     'name' => $name,
@@ -1433,5 +1584,66 @@ class ProductController extends Controller
             default:
                 return ApiResponse::error("Unsupported master type: {$type}", 422);
         }
+    }
+
+    /**
+     * Get stock movement history timeline for a product.
+     */
+    public function stockHistory(Request $request, string $id): JsonResponse
+    {
+        $user = $request->user();
+        $businessId = $request->query('business_id') ?? $request->header('X-Business-Id') ?? $user->defaultBusinessId();
+
+        if ($businessId && ! $user->canAccessBusiness($businessId)) {
+            return ApiResponse::error('Unauthorized access to product stock history.', 403, null, 'FORBIDDEN');
+        }
+
+        $movements = [];
+        if (DB::getSchemaBuilder()->hasTable('stock_movements')) {
+            $query = DB::table('stock_movements')
+                ->where('product_id', $id);
+
+            if ($businessId) {
+                $query->where('business_id', $businessId);
+            }
+
+            $movements = $query->orderBy('created_at', 'desc')
+                ->limit(100)
+                ->get()
+                ->map(fn ($m) => [
+                    'id' => $m->id,
+                    'type' => $m->type,
+                    'qty_change' => (float) $m->qty_change,
+                    'balance_after' => isset($m->balance_after) ? (float) $m->balance_after : null,
+                    'reference_type' => $m->reference_type,
+                    'reference_id' => $m->reference_id,
+                    'condition' => $m->condition ?? null,
+                    'note' => $m->note ?? null,
+                    'created_at' => $m->created_at,
+                ]);
+        }
+
+        // Current stock balance
+        $currentStock = 0.0;
+        if (DB::getSchemaBuilder()->hasTable('stock_balances')) {
+            $bal = DB::table('stock_balances')
+                ->where('business_id', $businessId)
+                ->where(function ($q) use ($id) {
+                    $q->where('id', 'like', "%_{$id}")
+                        ->orWhere('payload->fields->productId', $id);
+                })
+                ->first();
+
+            if ($bal && ! empty($bal->payload)) {
+                $p = json_decode($bal->payload, true) ?: [];
+                $currentStock = (float) ($p['fields']['quantityOnHand'] ?? $p['fields']['currentStock'] ?? 0.0);
+            }
+        }
+
+        return ApiResponse::success([
+            'productId' => $id,
+            'currentStock' => $currentStock,
+            'movements' => $movements,
+        ], 'Stock history timeline retrieved.');
     }
 }

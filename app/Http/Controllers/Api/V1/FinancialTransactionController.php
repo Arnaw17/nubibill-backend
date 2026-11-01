@@ -24,13 +24,13 @@ class FinancialTransactionController extends Controller
         $endDate = $request->query('end_date') ?? $request->query('endDate');
         $limit = min((int) ($request->query('limit', 100)), 500);
 
-        if (!$businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+        $user = $request->user();
+        if (! $businessId) {
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (!$businessId) {
-            return ApiResponse::success([], 'No active business selected.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('financial_transactions')
@@ -108,13 +108,17 @@ class FinancialTransactionController extends Controller
             'recorded_by' => 'nullable|string',
         ]);
 
+        $user = $request->user();
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
-        if (!$businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : 'BUS-001';
+        if (! $businessId) {
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        $id = 'FT-' . strtoupper(Str::random(10));
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('A valid, authorized business context is required to create a transaction.', 403, null, 'FORBIDDEN');
+        }
+
+        $id = 'FT-'.strtoupper(Str::random(10));
         $now = now();
         $date = $validated['transaction_date'] ?? now()->toIso8601String();
         $paymentMode = strtoupper((string) ($validated['payment_mode'] ?? $validated['paymentMode'] ?? 'CASH'));
@@ -167,13 +171,13 @@ class FinancialTransactionController extends Controller
         $businessId = $request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id');
         $outletId = $request->query('outlet_id') ?? $request->query('outletId') ?? $request->header('X-Outlet-Id');
 
-        if (!$businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+        $user = $request->user();
+        if (! $businessId) {
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (!$businessId) {
-            return ApiResponse::success([], 'No active business selected.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         // Aggregate transactions by payment mode and type
@@ -202,11 +206,19 @@ class FinancialTransactionController extends Controller
             $isExpense = in_array(strtoupper((string) $tx->transaction_type), ['EXPENSE', 'SUPPLIER_PAYMENT', 'STAFF_ADVANCE']);
 
             if ($isCash) {
-                if ($isIncome) $cashInPaise += $amt;
-                if ($isExpense) $cashOutPaise += $amt;
+                if ($isIncome) {
+                    $cashInPaise += $amt;
+                }
+                if ($isExpense) {
+                    $cashOutPaise += $amt;
+                }
             } else {
-                if ($isIncome) $onlineInPaise += $amt;
-                if ($isExpense) $onlineOutPaise += $amt;
+                if ($isIncome) {
+                    $onlineInPaise += $amt;
+                }
+                if ($isExpense) {
+                    $onlineOutPaise += $amt;
+                }
             }
         }
 

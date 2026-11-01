@@ -4,11 +4,11 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Services\EmployeePermissionService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 
 class AttendanceController extends Controller
 {
@@ -25,9 +25,13 @@ class AttendanceController extends Controller
         $endDate = $request->query('end_date') ?? $request->query('endDate');
         $status = $request->query('status');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('staff_attendance')
@@ -68,6 +72,9 @@ class AttendanceController extends Controller
                 continue;
             }
 
+            $rawApp = strtoupper((string) ($fields['approvalStatus'] ?? $row->status ?? 'PENDING'));
+            $approvalStatus = ($rawApp === 'APPROVED') ? 'APPROVED' : 'PENDING';
+
             $records[] = [
                 'recordId' => (string) $row->id,
                 'id' => (string) $row->id,
@@ -83,7 +90,8 @@ class AttendanceController extends Controller
                 'approvedOvertimeMinutes' => (int) ($fields['approvedOvertimeMinutes'] ?? 0),
                 'overtimePaise' => (int) ($fields['overtimePaise'] ?? 0),
                 'attendanceStatus' => $attStatus,
-                'approvalStatus' => strtoupper((string) ($fields['approvalStatus'] ?? 'PENDING_APPROVAL')),
+                'approvalStatus' => $approvalStatus,
+                'status' => $approvalStatus,
                 'approvedBy' => $fields['approvedBy'] ?? null,
                 'approvedAt' => $fields['approvedAt'] ?? null,
                 'notes' => $fields['notes'] ?? null,
@@ -120,8 +128,11 @@ class AttendanceController extends Controller
 
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('A valid, authorized business context is required to punch attendance.', 403, null, 'FORBIDDEN');
         }
 
         $outletId = $validated['outlet_id'] ?? $validated['outletId'];
@@ -133,7 +144,7 @@ class AttendanceController extends Controller
         $todayDate = $punchTime->clone()->startOfDay()->toIso8601String();
         $dateKey = $punchTime->format('Ymd');
         $tenantId = $this->tenantIdForBusiness((string) $businessId, $userId);
-        $attendanceId = 'ATT-' . substr(hash('sha256', "{$tenantId}|{$businessId}|{$employeeId}|{$outletId}|{$dateKey}"), 0, 40);
+        $attendanceId = 'ATT-'.substr(hash('sha256', "{$tenantId}|{$businessId}|{$employeeId}|{$outletId}|{$dateKey}"), 0, 40);
 
         return DB::transaction(function () use ($businessId, $outletId, $employeeId, $type, $punchTime, $punchTimeIso, $todayDate, $attendanceId, $validated, $userId, $tenantId) {
             $existing = DB::table('staff_attendance')
@@ -304,8 +315,11 @@ class AttendanceController extends Controller
 
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('A valid, authorized business context is required to record attendance.', 403, null, 'FORBIDDEN');
         }
 
         $outletId = $validated['outlet_id'] ?? $validated['outletId'];
@@ -313,7 +327,7 @@ class AttendanceController extends Controller
         $wDate = Carbon::parse($validated['workDate']);
         $dateKey = $wDate->format('Ymd');
         $tenantId = $this->tenantIdForBusiness((string) $businessId, $userId);
-        $attendanceId = 'ATT-' . substr(hash('sha256', "{$tenantId}|{$businessId}|{$employeeId}|{$outletId}|{$dateKey}"), 0, 40);
+        $attendanceId = 'ATT-'.substr(hash('sha256', "{$tenantId}|{$businessId}|{$employeeId}|{$outletId}|{$dateKey}"), 0, 40);
 
         $nowDateTime = now();
         $nowIso = now()->toIso8601String();
@@ -384,16 +398,27 @@ class AttendanceController extends Controller
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? $payload;
         $businessId = (string) ($request->input('business_id') ?? $request->input('businessId') ?? $request->query('business_id') ?? $request->header('X-Business-Id') ?? '');
-        if ($businessId === '' || (string) $row->business_id !== $businessId) {
-            return ApiResponse::error('Attendance record not found.', 404, null, 'NOT_FOUND');
+        if ($businessId === '') {
+            $businessId = (string) $row->business_id;
+        } elseif ((string) $row->business_id !== $businessId) {
+            return ApiResponse::error('Attendance record not found in this business.', 404, null, 'NOT_FOUND');
         }
-        if (! app(\App\Services\EmployeePermissionService::class)->isWithinAssignedScope(
+        if (! app(EmployeePermissionService::class)->isWithinAssignedScope(
             $user,
             $businessId,
             (string) $row->outlet_id,
             true,
         )) {
             return ApiResponse::error('Attendance record not found.', 404, null, 'NOT_FOUND');
+        }
+
+        if (strtoupper((string) ($fields['approvalStatus'] ?? $row->status ?? '')) === 'APPROVED') {
+            return ApiResponse::success([
+                'recordId' => $id,
+                'approvalStatus' => 'APPROVED',
+                'approvedBy' => $fields['approvedBy'] ?? $userId,
+                'approvedAt' => $fields['approvedAt'] ?? now()->toIso8601String(),
+            ], 'Attendance is already approved.');
         }
 
         $nowIso = now()->toIso8601String();

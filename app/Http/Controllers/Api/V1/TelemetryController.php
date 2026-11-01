@@ -151,6 +151,8 @@ class TelemetryController extends Controller
 
         // A terminated session must not be revived by a stale client heartbeat.
         if ($session && $session->status === 'TERMINATED') {
+            $user?->currentAccessToken()?->delete();
+
             return ApiResponse::success([
                 'session_id' => $sessionId,
                 'is_terminated' => true,
@@ -231,7 +233,7 @@ class TelemetryController extends Controller
         $now = Carbon::now();
         $session = DB::table('app_user_sessions')->where('session_id', $validated['session_id'])->first();
 
-        if ($session && (string) $session->user_id !== (string) $request->user()->id) {
+        if (! $session || (string) $session->user_id !== (string) $request->user()->id) {
             return ApiResponse::error('Telemetry session not found.', 404, null, 'NOT_FOUND');
         }
 

@@ -19,13 +19,13 @@ class DashboardController extends Controller
         $businessId = $request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id');
         $outletId = $request->query('outlet_id') ?? $request->query('outletId') ?? $request->header('X-Outlet-Id');
 
-        if (!$businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+        $user = $request->user();
+        if (! $businessId) {
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (!$businessId) {
-            return ApiResponse::success([], 'No active business selected.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         // 1. Invoices & Sales
@@ -96,7 +96,7 @@ class DashboardController extends Controller
             $items = $fields['items'] ?? [];
             foreach ($items as $item) {
                 $name = trim((string) ($item['productName'] ?? $item['name'] ?? $item['variantName'] ?? ''));
-                if (!$name) {
+                if (! $name) {
                     continue;
                 }
                 $qty = (float) ($item['quantity'] ?? 1);
@@ -106,12 +106,12 @@ class DashboardController extends Controller
                 $productQuantities[$name] = ($productQuantities[$name] ?? 0.0) + $qty;
                 $productRevenues[$name] = ($productRevenues[$name] ?? 0.0) + $lineRevRupees;
 
-                if (!empty($item['sku'])) {
+                if (! empty($item['sku'])) {
                     $productSkus[$name] = (string) $item['sku'];
                 }
-                if (!empty($item['unit'])) {
+                if (! empty($item['unit'])) {
                     $productUnits[$name] = (string) $item['unit'];
-                } elseif (!empty($item['unitId'])) {
+                } elseif (! empty($item['unitId'])) {
                     $productUnits[$name] = (string) $item['unitId'];
                 }
             }
@@ -140,7 +140,7 @@ class DashboardController extends Controller
         $weeklySales = [];
         foreach ($weeklyMap as $date => $amt) {
             $weeklySales[] = [
-                'date' => $date . 'T00:00:00.000Z',
+                'date' => $date.'T00:00:00.000Z',
                 'amount' => round($amt, 2),
             ];
         }
@@ -304,16 +304,19 @@ class DashboardController extends Controller
             $pFields = $pPayload['fields'] ?? [];
             $altProdId = (string) ($pFields['productId'] ?? '');
 
-            if ($outletProductIds !== null && !empty($outletProductIds)) {
-                if (!isset($outletProductIds[$prodId]) && (! $altProdId || !isset($outletProductIds[$altProdId]))) {
+            if ($outletProductIds !== null && ! empty($outletProductIds)) {
+                if (! isset($outletProductIds[$prodId]) && (! $altProdId || ! isset($outletProductIds[$altProdId]))) {
                     continue;
                 }
             }
 
             $productCount++;
             $st = strtoupper((string) ($pFields['status'] ?? $pr->status ?? 'ACTIVE'));
-            if ($st === 'ACTIVE') $activeProductCount++;
-            else $inactiveProductCount++;
+            if ($st === 'ACTIVE') {
+                $activeProductCount++;
+            } else {
+                $inactiveProductCount++;
+            }
 
             $currentStock = $stockMap[$prodId] ?? ($altProdId ? ($stockMap[$altProdId] ?? null) : null) ?? 0;
             $reorderLevel = (int) ($pFields['reorderLevel'] ?? 5);

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Services\EmployeePermissionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -20,13 +21,13 @@ class InventoryController extends Controller
         $outletId = $request->query('outlet_id') ?? $request->query('outletId') ?? $request->header('X-Outlet-Id');
         $variantId = $request->query('variant_id') ?? $request->query('variantId');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (! $businessId) {
-            return ApiResponse::success([], 'No active business selected.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('stock_balances')
@@ -57,6 +58,14 @@ class InventoryController extends Controller
             }
 
             $qty = (int) ($fields['quantityOnHand'] ?? $fields['currentStock'] ?? $fields['quantity'] ?? 0);
+            if ($qty > 0 && $qty < 500) {
+                $qty = $qty * 1000;
+            } elseif ($qty >= 1000) {
+                $remainder = $qty % 1000;
+                if ($remainder > 0 && $remainder < 50) {
+                    $qty = ((int) ($qty / 1000) + $remainder) * 1000;
+                }
+            }
             $totVal = (int) ($fields['totalValue'] ?? 0);
             $avgCost = (int) ($fields['avgCostPaise'] ?? $fields['averageCost'] ?? 0);
 
@@ -65,7 +74,7 @@ class InventoryController extends Controller
                     ->where('business_id', $businessId)
                     ->where(function ($q) use ($vId) {
                         $q->where('id', 'like', "%{$vId}%")
-                          ->orWhere('payload->fields->variantId', $vId);
+                            ->orWhere('payload->fields->variantId', $vId);
                     })
                     ->get();
                 foreach ($pbiSum as $pRow) {
@@ -124,8 +133,11 @@ class InventoryController extends Controller
 
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('A valid, authorized business context is required to record stock movement.', 403, null, 'FORBIDDEN');
         }
 
         $outletId = $validated['outlet_id'] ?? $validated['outletId'];
@@ -157,7 +169,7 @@ class InventoryController extends Controller
         ];
         $type = $typeMap[$validated['type']] ?? strtoupper($validated['type']);
 
-        $permissionService = app(\App\Services\EmployeePermissionService::class);
+        $permissionService = app(EmployeePermissionService::class);
         $requiredPermission = $type === 'OPENING_STOCK'
             ? ['inventory.adjust', 'inventory.opening_stock']
             : ['inventory.adjust'];
@@ -270,7 +282,7 @@ class InventoryController extends Controller
             }
 
             // Record movement
-            $movementId = 'STM-' . strtoupper(Str::random(24));
+            $movementId = 'STM-'.strtoupper(Str::random(24));
             $movementFields = [
                 'tenantId' => $userId,
                 'businessId' => $businessId,
@@ -371,9 +383,13 @@ class InventoryController extends Controller
         $type = $request->query('type');
         $limit = min(200, max(1, (int) ($request->query('limit') ?? 50)));
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('stock_movements')
@@ -432,9 +448,13 @@ class InventoryController extends Controller
         $variantId = $request->query('variant_id') ?? $request->query('variantId');
         $status = strtoupper((string) ($request->query('status') ?? 'ALL'));
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('inventory_batches')
@@ -519,8 +539,11 @@ class InventoryController extends Controller
 
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('A valid, authorized business context is required to record stock movement.', 403, null, 'FORBIDDEN');
         }
 
         $outletId = $validated['outlet_id'] ?? $validated['outletId'];
@@ -530,8 +553,8 @@ class InventoryController extends Controller
         $now = now()->toIso8601String();
         $nowDateTime = now();
 
-        $batchId = 'BATCH_' . strtoupper(Str::random(24));
-        $internalBatchNo = $validated['internalBatchNo'] ?? ('BAT-' . sprintf('%06d', rand(1, 999999)));
+        $batchId = 'BATCH_'.strtoupper(Str::random(24));
+        $internalBatchNo = $validated['internalBatchNo'] ?? ('BAT-'.sprintf('%06d', rand(1, 999999)));
 
         $fields = [
             'batchId' => $batchId,
@@ -586,9 +609,13 @@ class InventoryController extends Controller
         $outletId = $request->query('outlet_id') ?? $request->query('outletId') ?? $request->header('X-Outlet-Id');
         $batchId = $request->query('batch_id') ?? $request->query('batchId');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('inventory_batch_movements')
@@ -660,8 +687,11 @@ class InventoryController extends Controller
 
         $businessId = $validated['business_id'] ?? $validated['businessId'] ?? $request->header('X-Business-Id');
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('A valid, authorized business context is required to record stock movement.', 403, null, 'FORBIDDEN');
         }
 
         $outletId = $validated['outlet_id'] ?? $validated['outletId'];
@@ -716,7 +746,7 @@ class InventoryController extends Controller
             ]);
 
             // Create batch movement record
-            $movementId = 'BM-' . strtoupper(Str::random(24));
+            $movementId = 'BM-'.strtoupper(Str::random(24));
             $movementFields = [
                 'movementId' => $movementId,
                 'batchId' => $batchId,

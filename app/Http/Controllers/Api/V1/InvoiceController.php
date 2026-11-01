@@ -7,7 +7,6 @@ use App\Http\Responses\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class InvoiceController extends Controller
@@ -20,6 +19,7 @@ class InvoiceController extends Controller
         $m = (int) $date->format('n');
         $y = (int) $date->format('Y');
         $fyYear = $m >= 4 ? $y : $y - 1;
+
         return str_pad((string) ($fyYear % 100), 2, '0', STR_PAD_LEFT);
     }
 
@@ -38,13 +38,13 @@ class InvoiceController extends Controller
         $startDate = $request->query('start_date');
         $endDate = $request->query('end_date');
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (! $businessId) {
-            return ApiResponse::success([], 'No active business selected.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
         $query = DB::table('invoices')
@@ -98,7 +98,7 @@ class InvoiceController extends Controller
             $query->where('created_at', '>=', $startDate);
         }
         if ($endDate) {
-            $query->where('created_at', '<=', $endDate . ' 23:59:59');
+            $query->where('created_at', '<=', $endDate.' 23:59:59');
         }
 
         $rows = $query->orderBy('created_at', 'desc')->get();
@@ -189,6 +189,11 @@ class InvoiceController extends Controller
 
         if (! $row) {
             return ApiResponse::error('Invoice not found.', 'NOT_FOUND', 404);
+        }
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
+            return ApiResponse::error('Unauthorized access to this invoice.', 'FORBIDDEN', 403);
         }
 
         $payload = json_decode($row->payload, true) ?: [];
@@ -285,7 +290,7 @@ class InvoiceController extends Controller
         ]);
 
         $requestId = $validated['request_id'] ?? null;
-        $invoiceId = $requestId ? "REQ_{$requestId}" : ('INV-' . strtoupper(Str::random(24)));
+        $invoiceId = $requestId ? "REQ_{$requestId}" : ('INV-'.strtoupper(Str::random(24)));
         $businessId = $validated['business_id'];
         $outletId = $validated['outlet_id'];
         $shortCode = strtoupper($validated['business_short_code'] ?? 'INV');
@@ -294,7 +299,7 @@ class InvoiceController extends Controller
         }
 
         $userId = $request->user()?->id ?? 'SYSTEM';
-        $nowDt = new \DateTimeImmutable();
+        $nowDt = new \DateTimeImmutable;
         $nowStr = $nowDt->format(\DateTimeInterface::ATOM);
         $dbNow = now();
         $fy = $this->financialYearLabel($nowDt);
@@ -305,6 +310,7 @@ class InvoiceController extends Controller
             if ($existing) {
                 $payload = json_decode($existing->payload, true) ?: [];
                 $fields = $payload['fields'] ?? [];
+
                 return ApiResponse::success([
                     'invoiceId' => $invoiceId,
                     'invoiceNumber' => $fields['invoiceNumber'] ?? $existing->id,
@@ -408,8 +414,8 @@ class InvoiceController extends Controller
             $calculatedLines,
             $nowStr,
             $dbNow,
-            $userId,
-            $nowDt
+            $userId
+
         ) {
             // Sequence update with lock
             $sequenceId = "{$businessId}_{$fy}_SALES_INVOICE";
@@ -551,7 +557,7 @@ class InvoiceController extends Controller
 
                 // If duePaise > 0, post CREDIT_SALE (+Dr)
                 if ($duePaise > 0) {
-                    $ledgerId = 'LED-' . strtoupper(Str::random(24));
+                    $ledgerId = 'LED-'.strtoupper(Str::random(24));
                     DB::table('customer_ledger_entries')->insert([
                         'id' => $ledgerId,
                         'document_path' => "customer_ledger_entries/{$ledgerId}",
@@ -585,7 +591,7 @@ class InvoiceController extends Controller
                 // If cash or upi paid, post PAYMENT (-Cr)
                 $paidNow = $cashPaise + $upiPaise;
                 if ($paidNow > 0) {
-                    $ledgerPayId = 'LED-' . strtoupper(Str::random(24));
+                    $ledgerPayId = 'LED-'.strtoupper(Str::random(24));
                     DB::table('customer_ledger_entries')->insert([
                         'id' => $ledgerPayId,
                         'document_path' => "customer_ledger_entries/{$ledgerPayId}",
@@ -620,7 +626,7 @@ class InvoiceController extends Controller
             // 4. Record payment voucher
             $paidTotal = $cashPaise + $upiPaise;
             if ($paidTotal > 0) {
-                $payId = 'PAY-' . strtoupper(Str::random(24));
+                $payId = 'PAY-'.strtoupper(Str::random(24));
                 DB::table('payments')->insert([
                     'id' => $payId,
                     'document_path' => "payments/{$payId}",
@@ -653,7 +659,9 @@ class InvoiceController extends Controller
                 $vId = $line['variantId'] ?? '';
                 $pId = $line['productId'] ?? '';
                 $qty = (int) ($line['quantity'] ?? 0);
-                if ($qty <= 0) continue;
+                if ($qty <= 0) {
+                    continue;
+                }
 
                 $stockRow = DB::table('stock_balances')
                     ->where('business_id', $businessId)
@@ -661,7 +669,7 @@ class InvoiceController extends Controller
                     ->where(function ($q) use ($vId, $pId) {
                         if ($vId) {
                             $q->where('id', 'LIKE', "%_{$vId}")
-                              ->orWhere('payload->fields->variantId', $vId);
+                                ->orWhere('payload->fields->variantId', $vId);
                         }
                         if ($pId) {
                             $q->orWhere('payload->fields->productId', $pId);
@@ -733,6 +741,11 @@ class InvoiceController extends Controller
             return ApiResponse::error('Invoice not found.', 'NOT_FOUND', 404);
         }
 
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $invoice->business_id)) {
+            return ApiResponse::error('Unauthorized access to this invoice.', 'FORBIDDEN', 403);
+        }
+
         return DB::transaction(function () use (
             $id,
             $invoice,
@@ -800,7 +813,7 @@ class InvoiceController extends Controller
                 }
 
                 // Add payment to customer_ledger_entries
-                $ledgerId = 'LED-' . strtoupper(Str::random(24));
+                $ledgerId = 'LED-'.strtoupper(Str::random(24));
                 DB::table('customer_ledger_entries')->insert([
                     'id' => $ledgerId,
                     'document_path' => "customer_ledger_entries/{$ledgerId}",
@@ -831,7 +844,7 @@ class InvoiceController extends Controller
             }
 
             // Create payment voucher
-            $payId = 'PAY-' . strtoupper(Str::random(24));
+            $payId = 'PAY-'.strtoupper(Str::random(24));
             DB::table('payments')->insert([
                 'id' => $payId,
                 'document_path' => "payments/{$payId}",
@@ -882,6 +895,11 @@ class InvoiceController extends Controller
         $invoice = DB::table('invoices')->where('id', $id)->first();
         if (! $invoice) {
             return ApiResponse::error('Invoice not found.', 'NOT_FOUND', 404);
+        }
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $invoice->business_id)) {
+            return ApiResponse::error('Unauthorized access to this invoice.', 'FORBIDDEN', 403);
         }
 
         return DB::transaction(function () use (
@@ -940,7 +958,7 @@ class InvoiceController extends Controller
                 }
 
                 // Add cancellation ledger entry
-                $ledgerId = 'LED-' . strtoupper(Str::random(24));
+                $ledgerId = 'LED-'.strtoupper(Str::random(24));
                 DB::table('customer_ledger_entries')->insert([
                     'id' => $ledgerId,
                     'document_path' => "customer_ledger_entries/{$ledgerId}",
@@ -987,6 +1005,11 @@ class InvoiceController extends Controller
         $invoice = DB::table('invoices')->where('id', $id)->first();
         if (! $invoice) {
             return ApiResponse::error('Invoice not found.', 'NOT_FOUND', 404);
+        }
+
+        $user = $request->user();
+        if ($user && ! $user->canAccessBusiness((string) $invoice->business_id)) {
+            return ApiResponse::error('Unauthorized access to this invoice.', 'FORBIDDEN', 403);
         }
 
         $payload = json_decode($invoice->payload, true) ?: [];

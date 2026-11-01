@@ -32,6 +32,7 @@ class ApproveUserCommand extends Command
 
         if (! $user) {
             $this->error("User with email [{$email}] not found.");
+
             return Command::FAILURE;
         }
 
@@ -46,13 +47,13 @@ class ApproveUserCommand extends Command
         $user->activated_at = now();
         $user->save();
 
-        $this->info("--------------------------------------------------");
-        $this->info(" SUCCESS: User activated!");
+        $this->info('--------------------------------------------------');
+        $this->info(' SUCCESS: User activated!');
         $this->info(" - Name:      {$user->name}");
         $this->info(" - Email:     {$user->email}");
         $this->info(" - Status:    {$user->status}");
         $this->info(" - Documents: {$docsCount} document(s) marked APPROVED");
-        $this->info("--------------------------------------------------");
+        $this->info('--------------------------------------------------');
 
         return Command::SUCCESS;
     }

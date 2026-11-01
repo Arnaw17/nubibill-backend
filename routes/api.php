@@ -18,6 +18,8 @@ use App\Http\Controllers\Api\V1\PayrollController;
 use App\Http\Controllers\Api\V1\ProductController;
 use App\Http\Controllers\Api\V1\PurchaseController;
 use App\Http\Controllers\Api\V1\ReportController;
+use App\Http\Controllers\Api\V1\ReturnController;
+use App\Http\Controllers\Api\V1\ReturnReasonController;
 use App\Http\Controllers\Api\V1\StorageController;
 use App\Http\Controllers\Api\V1\SuperUserController;
 use App\Http\Controllers\Api\V1\SupplierController;
@@ -31,8 +33,8 @@ Route::prefix('v1')->group(function () {
     Route::get('/business-types', [BusinessTypeController::class, 'types']);
     Route::get('/business-sub-types', [BusinessTypeController::class, 'subTypes']);
     Route::get('/product-masters', [ProductController::class, 'masters']);
-        Route::post('/product-masters', [ProductController::class, 'storeMaster'])
-            ->middleware(['auth:sanctum', 'active', 'permission:product.create,products.create']);
+    Route::post('/product-masters', [ProductController::class, 'storeMaster'])
+        ->middleware(['auth:sanctum', 'active', 'permission:product.create,products.create']);
     Route::get('/products/central/search', [ProductController::class, 'searchCentral']);
     // Public Authentication & Registration Routes
     Route::prefix('auth')->group(function () {
@@ -258,6 +260,30 @@ Route::prefix('v1')->group(function () {
         // Dashboard Analytics Routes
         Route::get('/dashboard/metrics', [DashboardController::class, 'metrics'])
             ->middleware('permission:dashboard,sales,sales.view,billing,purchase,purchase.view,inventory,inventory.view,products,products.view,product.read,customers,customers.view,CUSTOMER_VIEW,expenses,expenses.view,reports,staff_salary,attendance');
+
+        // Returns & Credit / Debit Notes Routes
+        Route::post('/returns', [ReturnController::class, 'store'])
+            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+        Route::get('/returns', [ReturnController::class, 'index'])
+            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+        Route::get('/returns/{id}', [ReturnController::class, 'show'])
+            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+        Route::put('/returns/{id}', [ReturnController::class, 'update'])
+            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+        Route::post('/returns/{id}/cancel', [ReturnController::class, 'cancel'])
+            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+        Route::get('/returns/{id}/pdf', [ReturnController::class, 'pdf'])
+            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+        Route::get('/bills/{id}/returnable', [ReturnController::class, 'returnableBill'])
+            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+
+        // Return Reasons
+        Route::get('/return-reasons', [ReturnReasonController::class, 'index']);
+        Route::post('/return-reasons', [ReturnReasonController::class, 'store']);
+
+        // Stock History Timeline
+        Route::get('/products/{id}/stock-history', [ProductController::class, 'stockHistory'])
+            ->middleware('permission:inventory,inventory.view,products,products.view,product.read');
     });
 
     // Super User / Developer Portal (Live Screening, approvals & remote controls).
@@ -286,14 +312,17 @@ Route::prefix('v1')->group(function () {
             ->middleware('permission:reports.view,reports,inventory.view,inventory');
         Route::get('/reports/profit-loss', [ReportController::class, 'profitLoss'])
             ->middleware('permission:reports.view,reports,expenses.view,expenses,sales.view,sales,purchase.view,purchase');
+        Route::get('/reports/returns', [ReportController::class, 'returnsSummary'])
+            ->middleware('permission:reports.view,reports,sales,purchase');
         Route::get('/reports/tax', [ReportController::class, 'tax'])
             ->middleware('permission:reports.view,reports,sales.view,sales,purchase.view,purchase');
         Route::get('/reports/reconciliation', [ReportController::class, 'reconciliation'])
             ->middleware('permission:reports.view,reports');
     });
 
-    // Public Media Access (Profile photos & Business logos)
+    // Authenticated Media Access
     Route::get('/users/{id}/photo', [UserController::class, 'photo'])
+        ->middleware(['auth:sanctum', 'active'])
         ->name('api.v1.users.photo');
     Route::get('/businesses/{id}/logo', [BusinessController::class, 'logo'])
         ->name('api.v1.businesses.logo');

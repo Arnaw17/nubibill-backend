@@ -8,7 +8,7 @@ return new class extends Migration
 {
     public function up(): void
     {
-        if (!Schema::hasTable('expenses')) {
+        if (! Schema::hasTable('expenses')) {
             Schema::create('expenses', function (Blueprint $table) {
                 $table->string('id', 100)->primary();
                 $table->string('business_id', 100)->index();
@@ -31,7 +31,7 @@ return new class extends Migration
             });
         }
 
-        if (!Schema::hasTable('financial_transactions')) {
+        if (! Schema::hasTable('financial_transactions')) {
             Schema::create('financial_transactions', function (Blueprint $table) {
                 $table->string('id', 100)->primary();
                 $table->string('business_id', 100)->index();

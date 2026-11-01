@@ -29,6 +29,8 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->api(prepend: [
             CheckAppMaintenance::class,
+        ], append: [
+            'throttle:api',
         ]);
 
         $middleware->alias([
@@ -42,7 +44,7 @@ return Application::configure(basePath: dirname(__DIR__))
             fn (Request $request) => $request->is('api/*') || $request->expectsJson(),
         );
 
-        $exceptions->render(function (\Throwable $e, Request $request) {
+        $exceptions->render(function (Throwable $e, Request $request) {
             if (! $request->is('api/*') && ! $request->expectsJson()) {
                 return null;
             }

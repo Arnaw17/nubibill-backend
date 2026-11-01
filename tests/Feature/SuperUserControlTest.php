@@ -116,15 +116,17 @@ class SuperUserControlTest extends TestCase
 
     private function createUser(string $email, string $role, string $status = 'ACTIVE'): User
     {
-        $user = new User([
+        $user = new User;
+        $user->forceFill([
             'name' => ucfirst(strtok($email, '@')),
             'email' => $email,
             'phone' => (string) random_int(9000000000, 9999999999),
             'password' => Hash::make('Password123!'),
             'role' => $role,
+            'status' => $status,
             'email_verified_at' => now(),
+            'activated_at' => now(),
         ]);
-        $user->status = $status;
         $user->save();
 
         return $user;

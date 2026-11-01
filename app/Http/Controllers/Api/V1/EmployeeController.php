@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
 use App\Models\User;
+use App\Services\EmployeePermissionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -30,6 +31,16 @@ class EmployeeController extends Controller
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? $payload;
 
+        $actor = $request->user();
+        if ($actor && ! $actor->isAdmin()) {
+            $empBusinessIds = (array) ($fields['businessIds'] ?? (isset($fields['businessId']) ? [$fields['businessId']] : []));
+            $isOwner = (string) ($fields['ownerUid'] ?? '') === (string) $actor->id;
+            $hasCommonBusiness = array_intersect($empBusinessIds, $actor->accessibleBusinessIds()) !== [];
+            if (! $isOwner && ! $hasCommonBusiness) {
+                return ApiResponse::error('Unauthorized access to this employee.', 403, null, 'FORBIDDEN');
+            }
+        }
+
         return ApiResponse::success([
             ...$fields,
             'employeeId' => (string) $row->id,
@@ -52,13 +63,13 @@ class EmployeeController extends Controller
         $status = strtolower((string) ($request->query('status') ?? 'all'));
         $search = trim((string) ($request->query('search') ?? $request->query('q') ?? ''));
 
+        $user = $request->user();
         if (! $businessId) {
-            $firstBus = DB::table('businesses')->where('is_deleted', 0)->first();
-            $businessId = $firstBus ? (string) ($firstBus->business_id ?? $firstBus->id) : null;
+            $businessId = $user ? $user->defaultBusinessId() : null;
         }
 
-        if (! $businessId) {
-            return ApiResponse::success([], 'No active business found.');
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::success([], 'No active business found or unauthorized.');
         }
 
         $query = DB::table('employees')->where('is_deleted', 0);
@@ -148,6 +159,16 @@ class EmployeeController extends Controller
 
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? $payload;
+
+        $actor = $request->user();
+        if ($actor && ! $actor->isAdmin()) {
+            $empBusinessIds = (array) ($fields['businessIds'] ?? (isset($fields['businessId']) ? [$fields['businessId']] : []));
+            $isOwner = (string) ($fields['ownerUid'] ?? '') === (string) $actor->id;
+            $hasCommonBusiness = array_intersect($empBusinessIds, $actor->accessibleBusinessIds()) !== [];
+            if (! $isOwner && ! $hasCommonBusiness) {
+                return ApiResponse::error('Unauthorized access to this employee.', 403, null, 'FORBIDDEN');
+            }
+        }
 
         if (strtoupper((string) $request->user()->role) === 'STAFF') {
             $businessId = (string) ($request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id') ?? '');
@@ -277,7 +298,7 @@ class EmployeeController extends Controller
                 return ApiResponse::error('Employees can only be assigned within your business and outlet.', 403, null, 'FORBIDDEN');
             }
 
-            $creatorPermissions = app(\App\Services\EmployeePermissionService::class)->permissionsFor($user);
+            $creatorPermissions = app(EmployeePermissionService::class)->permissionsFor($user);
             if (! $this->staffMayAssignRoles($roleIds)) {
                 return ApiResponse::error('One or more selected roles are reserved for owners or administrators.', 403, null, 'FORBIDDEN');
             }
@@ -421,6 +442,16 @@ class EmployeeController extends Controller
 
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? $payload;
+
+        $actor = $request->user();
+        if ($actor && ! $actor->isAdmin()) {
+            $empBusinessIds = (array) ($fields['businessIds'] ?? (isset($fields['businessId']) ? [$fields['businessId']] : []));
+            $isOwner = (string) ($fields['ownerUid'] ?? '') === (string) $actor->id;
+            $hasCommonBusiness = array_intersect($empBusinessIds, $actor->accessibleBusinessIds()) !== [];
+            if (! $isOwner && ! $hasCommonBusiness) {
+                return ApiResponse::error('Unauthorized access to this employee.', 403, null, 'FORBIDDEN');
+            }
+        }
         $actor = $request->user();
         if ((string) ($fields['ownerUid'] ?? '') !== (string) $actor->id) {
             return ApiResponse::error('You are not authorized to update this employee.', 403, null, 'FORBIDDEN');
@@ -552,6 +583,16 @@ class EmployeeController extends Controller
 
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? $payload;
+
+        $actor = $request->user();
+        if ($actor && ! $actor->isAdmin()) {
+            $empBusinessIds = (array) ($fields['businessIds'] ?? (isset($fields['businessId']) ? [$fields['businessId']] : []));
+            $isOwner = (string) ($fields['ownerUid'] ?? '') === (string) $actor->id;
+            $hasCommonBusiness = array_intersect($empBusinessIds, $actor->accessibleBusinessIds()) !== [];
+            if (! $isOwner && ! $hasCommonBusiness) {
+                return ApiResponse::error('Unauthorized access to this employee.', 403, null, 'FORBIDDEN');
+            }
+        }
         $actor = $request->user();
         $isOwner = (string) ($fields['ownerUid'] ?? '') === (string) $actor->id;
         if (! $isOwner) {
@@ -833,6 +874,7 @@ class EmployeeController extends Controller
                 $knownAliases = [...$knownAliases, ...$aliases];
             }
         }
+
         return array_values(array_unique([...$canonical, ...array_diff($ids, $knownAliases)]));
     }
 
@@ -851,6 +893,7 @@ class EmployeeController extends Controller
                 $knownAliases = [...$knownAliases, ...$aliases];
             }
         }
+
         return array_values(array_unique([...$canonical, ...array_diff($ids, $knownAliases)]));
     }
 }
