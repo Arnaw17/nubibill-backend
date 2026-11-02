@@ -12,6 +12,7 @@ use App\Mail\SendOtpMail;
 use App\Models\EmailOtp;
 use App\Models\User;
 use App\Models\UserDocument;
+use App\Services\EmployeePermissionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -261,7 +262,10 @@ class AuthController extends Controller
 
         return ApiResponse::success([
             'token' => $token,
-            'user' => $user->toApiArray(),
+            'user' => [
+                ...$user->toApiArray(),
+                'permissions' => app(EmployeePermissionService::class)->permissionsFor($user) ?? [],
+            ],
         ], 'Login successful.');
     }
 

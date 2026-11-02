@@ -80,6 +80,8 @@ Route::prefix('v1')->group(function () {
             ->middleware('permission:products.create,product.create');
         Route::post('/products/status', [ProductController::class, 'updateStatus'])
             ->middleware('permission:products.update,product.update');
+        Route::get('/outlets/{outletId}/products/assigned-ids', [ProductController::class, 'outletProductIds'])
+            ->middleware('permission:products.view,product.read,products.update,product.update');
         Route::post('/outlets/{outletId}/products/remove', [ProductController::class, 'removeFromOutlet'])
             ->middleware('permission:products.update,product.update');
         Route::post('/outlets/{outletId}/products/assign', [ProductController::class, 'assignToOutlet'])

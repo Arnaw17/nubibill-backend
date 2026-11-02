@@ -222,7 +222,7 @@ class SupplierController extends Controller
         }
 
         if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
-            return ApiResponse::error('Unauthorized access to this supplier or invalid business.', 'FORBIDDEN', 403);
+            return ApiResponse::error('Unauthorized access to this supplier or invalid business.', 403, null, 'FORBIDDEN');
         }
 
         $row = DB::table('suppliers')
@@ -231,7 +231,7 @@ class SupplierController extends Controller
             ->first();
 
         if (! $row) {
-            return ApiResponse::error('Supplier not found.', 'NOT_FOUND', 404);
+            return ApiResponse::error('Supplier not found.', 404, null, 'NOT_FOUND');
         }
 
         $payload = json_decode($row->payload, true) ?: [];
@@ -317,7 +317,7 @@ class SupplierController extends Controller
         $businessId = $validated['business_id'];
         $user = $request->user();
         if ($user && ! $user->canAccessBusiness($businessId)) {
-            return ApiResponse::error('Unauthorized access to this business.', 'FORBIDDEN', 403);
+            return ApiResponse::error('Unauthorized access to this business.', 403, null, 'FORBIDDEN');
         }
         $name = trim($validated['name']);
         $mobile = ! empty($validated['mobile']) ? preg_replace('/\D/', '', $validated['mobile']) : (! empty($validated['phone']) ? preg_replace('/\D/', '', $validated['phone']) : null);
@@ -347,9 +347,9 @@ class SupplierController extends Controller
         if ($existing) {
             return ApiResponse::error(
                 'A supplier with this name, GSTIN, or contact number already exists.',
-                'VALIDATION_FAILED',
                 422,
-                ['name' => ['A supplier with this name, GSTIN, or contact number already exists.']]
+                ['name' => ['A supplier with this name, GSTIN, or contact number already exists.']],
+                'VALIDATION_FAILED'
             );
         }
 
@@ -549,7 +549,7 @@ class SupplierController extends Controller
 
         $row = DB::table('suppliers')->where('id', $id)->first();
         if (! $row) {
-            return ApiResponse::error('Supplier not found.', 'NOT_FOUND', 404);
+            return ApiResponse::error('Supplier not found.', 404, null, 'NOT_FOUND');
         }
 
         $businessId = $validated['business_id'] ?? $row->business_id;
@@ -573,9 +573,9 @@ class SupplierController extends Controller
         if ($conflict) {
             return ApiResponse::error(
                 'Another supplier with this name or GSTIN already exists.',
-                'VALIDATION_FAILED',
                 422,
-                ['name' => ['Another supplier with this name or GSTIN already exists.']]
+                ['name' => ['Another supplier with this name or GSTIN already exists.']],
+                'VALIDATION_FAILED'
             );
         }
 
@@ -677,7 +677,7 @@ class SupplierController extends Controller
         $businessId = $validated['business_id'];
         $user = $request->user();
         if ($user && ! $user->canAccessBusiness($businessId)) {
-            return ApiResponse::error('Unauthorized access to this business.', 'FORBIDDEN', 403);
+            return ApiResponse::error('Unauthorized access to this business.', 403, null, 'FORBIDDEN');
         }
         $relation = DB::table('supplier_businesses')
             ->where('business_id', $businessId)
@@ -689,7 +689,7 @@ class SupplierController extends Controller
             ->first();
 
         if (! $relation) {
-            return ApiResponse::error('Supplier is not linked to this business.', 'NOT_FOUND', 404);
+            return ApiResponse::error('Supplier is not linked to this business.', 404, null, 'NOT_FOUND');
         }
 
         $status = $validated['is_active'] ? 'ACTIVE' : 'INACTIVE';
@@ -711,7 +711,7 @@ class SupplierController extends Controller
     {
         $supplier = DB::table('suppliers')->where('id', $id)->first();
         if (! $supplier) {
-            return ApiResponse::error('Supplier not found.', 'NOT_FOUND', 404);
+            return ApiResponse::error('Supplier not found.', 404, null, 'NOT_FOUND');
         }
 
         $user = $request->user();
@@ -725,7 +725,7 @@ class SupplierController extends Controller
                 })
                 ->exists();
             if (! $linkedAccessible) {
-                return ApiResponse::error('Unauthorized to delete this supplier.', 'FORBIDDEN', 403);
+                return ApiResponse::error('Unauthorized to delete this supplier.', 403, null, 'FORBIDDEN');
             }
         }
 
@@ -762,7 +762,7 @@ class SupplierController extends Controller
         }
 
         if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
-            return ApiResponse::error('Unauthorized access to this supplier ledger or invalid business.', 'FORBIDDEN', 403);
+            return ApiResponse::error('Unauthorized access to this supplier ledger or invalid business.', 403, null, 'FORBIDDEN');
         }
 
         // Auto-backfill any purchase_bills for this supplier that might be missing from supplier_ledger_entries
@@ -966,7 +966,7 @@ class SupplierController extends Controller
         $businessId = (string) ($request->query('business_id') ?? $request->input('business_id', ''));
         $outletId = (string) ($request->query('outlet_id') ?? $request->input('outlet_id', ''));
         if ($businessId === '' || $outletId === '') {
-            return ApiResponse::error('A business and outlet context are required.', 'WORKSPACE_REQUIRED', 422);
+            return ApiResponse::error('A business and outlet context are required.', 422, null, 'WORKSPACE_REQUIRED');
         }
         $supplierBusinessId = "{$id}_{$businessId}";
         $query = DB::table('purchase_bills')
@@ -1019,7 +1019,7 @@ class SupplierController extends Controller
         $businessId = $validated['business_id'];
         $user = $request->user();
         if ($user && ! $user->canAccessBusiness($businessId)) {
-            return ApiResponse::error('Unauthorized access to this business.', 'FORBIDDEN', 403);
+            return ApiResponse::error('Unauthorized access to this business.', 403, null, 'FORBIDDEN');
         }
         $outletId = $validated['outlet_id'] ?? '';
         $purchaseBillId = $request->input('purchase_bill_id') ?? $request->input('purchaseBillId');
@@ -1108,7 +1108,7 @@ class SupplierController extends Controller
             }
             $paymentDue = $isStaff ? $billDueTotal : $currentPayable;
             if (! $purchaseBillId && $paymentDue <= 0 && ! $allowAdvance) {
-                return ApiResponse::error('There is no outstanding supplier due to pay.', 'NO_SUPPLIER_DUE', 422);
+                return ApiResponse::error('There is no outstanding supplier due to pay.', 422, null, 'NO_SUPPLIER_DUE');
             }
             $previousDue = $paymentDue;
             foreach ($billRows as $pbRow) {

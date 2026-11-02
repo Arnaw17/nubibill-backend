@@ -57,6 +57,23 @@ class ReturnSystemTest extends TestCase
         $productId = 'prod_shirt_1';
         $customerId = 'cust_alice_1';
 
+        DB::table('products')->insert([
+            'id' => $productId,
+            'document_path' => "products/$productId",
+            'business_id' => $this->businessId,
+            'status' => 'ACTIVE',
+            'is_deleted' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
+            'payload' => json_encode([
+                'fields' => [
+                    'productId' => $productId,
+                    'productName' => 'Cotton Shirt Blue M',
+                    'hsnCode' => '6205',
+                ],
+            ]),
+        ]);
+
         // Seed existing stock balance of 10 (10000 milli-units)
         DB::table('stock_balances')->insert([
             'id' => "stock_{$this->businessId}_{$productId}",
@@ -104,8 +121,8 @@ class ReturnSystemTest extends TestCase
             'items' => [
                 [
                     'product_id' => $productId,
-                    'product_name' => 'Cotton Shirt Blue M',
-                    'hsn_code' => '6205',
+                    'product_name' => 'Item',
+                    'hsn_code' => null,
                     'unit' => 'PCS',
                     'qty_returned' => 2,
                     'unit_price' => 500.00,
@@ -127,7 +144,9 @@ class ReturnSystemTest extends TestCase
             ->assertJsonPath('data.return_no', 'SR-0001')
             ->assertJsonPath('data.subtotal', 1000)
             ->assertJsonPath('data.tax_total', 50)
-            ->assertJsonPath('data.grand_total', 1050);
+            ->assertJsonPath('data.grand_total', 1050)
+            ->assertJsonPath('data.items.0.product_name', 'Cotton Shirt Blue M')
+            ->assertJsonPath('data.items.0.hsn_code', '6205');
 
         // Verify Stock was restocked: 10000 + 2000 = 12000 milli-units
         $stockRow = DB::table('stock_balances')->where('id', "stock_{$this->businessId}_{$productId}")->first();

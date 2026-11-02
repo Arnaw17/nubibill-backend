@@ -242,6 +242,10 @@ class EmployeeController extends Controller
             'roleId' => 'nullable|string',
             'permissionIds' => 'nullable|array',
             'permissionIds.*' => 'string',
+            'revoked_permission_ids' => 'sometimes|array',
+            'revoked_permission_ids.*' => 'string',
+            'revokedPermissionIds' => 'sometimes|array',
+            'revokedPermissionIds.*' => 'string',
             'businessIds' => 'nullable|array',
             'businessIds.*' => 'string',
             'business_id' => 'nullable|string',
@@ -282,6 +286,7 @@ class EmployeeController extends Controller
 
         $roleIds = $validated['roleIds'] ?? (! empty($validated['roleId']) ? [$validated['roleId']] : ['ROLE_STAFF']);
         $permissionIds = $validated['permissionIds'] ?? [];
+        $revokedPermissionIds = $validated['revoked_permission_ids'] ?? $validated['revokedPermissionIds'] ?? [];
 
         if ($isStaffCreator) {
             $assignedBusinesses = $this->canonicalBusinessIds(array_merge(
@@ -304,7 +309,7 @@ class EmployeeController extends Controller
             }
             $candidatePermissions = array_map(
                 fn (string $permission): string => $this->normalizePermissionIdentifier($permission),
-                $permissionIds,
+                [...$permissionIds, ...$revokedPermissionIds],
             );
             if ($creatorPermissions === null || array_diff(
                 array_unique(array_map(fn (string $permission): string => $this->normalizePermissionIdentifier($permission), $candidatePermissions)),
@@ -315,7 +320,7 @@ class EmployeeController extends Controller
         } elseif (! $user->isAdmin() && ! $this->ownsBusinesses($user, $businessIds)) {
             return ApiResponse::error('You may assign employees only to your own businesses.', 403, null, 'FORBIDDEN');
         }
-        if (! $this->hasActiveAssignments($roleIds, $permissionIds)
+        if (! $this->hasActiveAssignments($roleIds, $permissionIds, $revokedPermissionIds)
             || ! $this->outletsBelongToBusinesses($outletIds, $businessIds)) {
             return ApiResponse::error('The selected roles, permissions, or outlets are unavailable.', 422, null, 'INVALID_ASSIGNMENT');
         }
@@ -324,7 +329,7 @@ class EmployeeController extends Controller
         if ($email) {
             $existingEmail = DB::table('employees')
                 ->where('is_deleted', 0)
-                ->whereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.email'))) = ?", [$email])
+                ->where('payload->fields->email', $email)
                 ->exists();
 
             if ($existingEmail) {
@@ -336,7 +341,10 @@ class EmployeeController extends Controller
         if ($mobile) {
             $existingMobile = DB::table('employees')
                 ->where('is_deleted', 0)
-                ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.mobile')) = ? OR JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.phone')) = ?", [$mobile, $mobile])
+                ->where(function ($query) use ($mobile): void {
+                    $query->where('payload->fields->mobile', $mobile)
+                        ->orWhere('payload->fields->phone', $mobile);
+                })
                 ->exists();
 
             if ($existingMobile) {
@@ -367,6 +375,7 @@ class EmployeeController extends Controller
             'status' => $status,
             'roleIds' => $roleIds,
             'permissionIds' => $permissionIds,
+            'revoked_permission_ids' => $revokedPermissionIds,
             'businessIds' => $businessIds,
             'outletIds' => $outletIds,
             'employeeCode' => $validated['employeeCode'] ?? null,
@@ -426,6 +435,10 @@ class EmployeeController extends Controller
             'roleIds.*' => 'string',
             'permissionIds' => 'nullable|array',
             'permissionIds.*' => 'string',
+            'revoked_permission_ids' => 'sometimes|array',
+            'revoked_permission_ids.*' => 'string',
+            'revokedPermissionIds' => 'sometimes|array',
+            'revokedPermissionIds.*' => 'string',
             'businessIds' => 'nullable|array',
             'businessIds.*' => 'string',
             'outletIds' => 'nullable|array',
@@ -459,6 +472,11 @@ class EmployeeController extends Controller
 
         $candidateRoleIds = $validated['roleIds'] ?? ($fields['roleIds'] ?? []);
         $candidatePermissionIds = $validated['permissionIds'] ?? ($fields['permissionIds'] ?? []);
+        $candidateRevokedPermissionIds = $validated['revoked_permission_ids']
+            ?? $validated['revokedPermissionIds']
+            ?? $fields['revoked_permission_ids']
+            ?? $fields['revokedPermissionIds']
+            ?? [];
         $storedRoleIds = $fields['roleIds'] ?? (isset($fields['roleId']) ? [$fields['roleId']] : []);
         $candidateRoleIds = is_array($candidateRoleIds) ? $candidateRoleIds : [$candidateRoleIds];
         $storedRoleIds = is_array($storedRoleIds) ? $storedRoleIds : [$storedRoleIds];
@@ -476,7 +494,7 @@ class EmployeeController extends Controller
         }
         $candidateBusinessIds = $validated['businessIds'] ?? ($fields['businessIds'] ?? []);
         $candidateOutletIds = $validated['outletIds'] ?? ($fields['outletIds'] ?? []);
-        if (! $this->hasActiveAssignments($candidateRoleIds, $candidatePermissionIds)
+        if (! $this->hasActiveAssignments($candidateRoleIds, $candidatePermissionIds, $candidateRevokedPermissionIds)
             || ! $this->ownsBusinesses($request->user(), $candidateBusinessIds)
             || ! $this->outletsBelongToBusinesses($candidateOutletIds, $candidateBusinessIds)) {
             return ApiResponse::error('The selected roles, permissions, businesses, or outlets are unavailable.', 422, null, 'INVALID_ASSIGNMENT');
@@ -499,6 +517,9 @@ class EmployeeController extends Controller
         }
         if (isset($validated['permissionIds']) || $roleAssignmentsChanged) {
             $fields['permissionIds'] = $candidatePermissionIds;
+        }
+        if (array_key_exists('revoked_permission_ids', $validated) || array_key_exists('revokedPermissionIds', $validated)) {
+            $fields['revoked_permission_ids'] = $candidateRevokedPermissionIds;
         }
         if (isset($validated['businessIds'])) {
             $fields['businessIds'] = $validated['businessIds'];
@@ -717,7 +738,7 @@ class EmployeeController extends Controller
     }
 
     /** @param list<string> $roleIds @param list<string> $permissionIds */
-    private function hasActiveAssignments(array $roleIds, array $permissionIds): bool
+    private function hasActiveAssignments(array $roleIds, array $permissionIds, array $revokedPermissionIds = []): bool
     {
         if ($roleIds === []) {
             return false;
@@ -752,7 +773,7 @@ class EmployeeController extends Controller
             'expenses.view', 'expenses.create', 'expenses.edit', 'expenses.delete',
         ];
 
-        return array_diff($permissionIds, $activePermissions) === [];
+        return array_diff([...$permissionIds, ...$revokedPermissionIds], $activePermissions) === [];
     }
 
     /** @param list<string> $roleIds @return list<string> */

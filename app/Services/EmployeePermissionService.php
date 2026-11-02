@@ -34,6 +34,10 @@ class EmployeePermissionService
         }
 
         $permissions = $this->stringList($employee['fields']['permissionIds'] ?? []);
+        $revokedPermissions = array_map(
+            fn (string $permission): string => $this->normalize($permission),
+            $this->stringList($employee['fields']['revoked_permission_ids'] ?? []),
+        );
         $roleIds = $this->stringList(
             $employee['fields']['roleIds'] ?? (isset($employee['fields']['roleId']) ? [$employee['fields']['roleId']] : [])
         );
@@ -94,6 +98,7 @@ class EmployeePermissionService
         return array_values(array_unique(array_filter(
             $permissions,
             fn (string $permission): bool => in_array($this->normalize($permission), $activePermissionIds, true)
+                && ! in_array($this->normalize($permission), $revokedPermissions, true)
         )));
     }
 

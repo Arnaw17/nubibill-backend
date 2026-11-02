@@ -57,7 +57,7 @@ class ReturnController extends Controller
             return ApiResponse::error('Unauthorized access to specified business.', 403, null, 'FORBIDDEN');
         }
 
-        $query = ReturnModel::with(['items', 'reason']);
+        $query = ReturnModel::with(['items.product', 'reason']);
 
         if (! $user->isAdmin()) {
             $accessible = $user->accessibleBusinessIds();
@@ -129,7 +129,7 @@ class ReturnController extends Controller
     {
         $user = $request->user();
 
-        $return = ReturnModel::with(['items', 'reason', 'stockMovements', 'ledgerEntries', 'audits'])
+        $return = ReturnModel::with(['items.product', 'reason', 'stockMovements', 'ledgerEntries', 'audits'])
             ->where('id', $id)
             ->first();
 
@@ -175,7 +175,7 @@ class ReturnController extends Controller
         $return->update($validated);
 
         return ApiResponse::success(
-            new ReturnResource($return->load(['items', 'reason', 'stockMovements', 'ledgerEntries'])),
+            new ReturnResource($return->load(['items.product', 'reason', 'stockMovements', 'ledgerEntries'])),
             'Return updated successfully.'
         );
     }

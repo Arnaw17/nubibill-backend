@@ -8,10 +8,48 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class ProductController extends Controller
 {
+    /**
+     * List product IDs that have ever been placed at an outlet.
+     */
+    public function outletProductIds(Request $request, string $outletId): JsonResponse
+    {
+        $businessId = $request->query('business_id')
+            ?? $request->query('businessId')
+            ?? $request->header('X-Business-Id');
+        $user = $request->user();
+
+        if (! $businessId) {
+            $outlet = DB::table('outlets')->where('id', $outletId)->first();
+            $businessId = $outlet?->business_id;
+        }
+
+        if (! $businessId || ($user && ! $user->canAccessBusiness((string) $businessId))) {
+            return ApiResponse::success(['productIds' => []], 'No active business selected or unauthorized.');
+        }
+
+        $rows = DB::table('outlet_products')
+            ->where('business_id', $businessId)
+            ->where('outlet_id', $outletId)
+            ->get(['payload']);
+
+        $productIds = [];
+        foreach ($rows as $row) {
+            $payload = json_decode($row->payload, true) ?: [];
+            $productId = $payload['fields']['productId'] ?? null;
+            if (is_string($productId) && $productId !== '') {
+                $productIds[$productId] = true;
+            }
+        }
+
+        return ApiResponse::success(['productIds' => array_keys($productIds)]);
+    }
+
     /**
      * List products with their variants for a business / outlet.
      */
@@ -566,6 +604,7 @@ class ProductController extends Controller
 
     public function store(Request $request): JsonResponse
     {
+        $this->mergeMultipartPayload($request);
         $user = $request->user();
         $userId = $user ? (string) $user->id : (string) ($request->header('X-User-Id') ?? 'USR-OWNER-001');
 
@@ -589,6 +628,7 @@ class ProductController extends Controller
             'description' => ['nullable', 'string', 'max:1000'],
             'product_image' => ['nullable', 'string'],
             'productImage' => ['nullable', 'string'],
+            'product_image_file' => ['nullable', 'image', 'mimes:jpg,jpeg,png', 'max:5120'],
             'default_gst_rate_bps' => ['nullable', 'integer'],
             'defaultGstRateBps' => ['nullable', 'integer'],
             'hsn_code' => ['nullable', 'string'],
@@ -610,6 +650,10 @@ class ProductController extends Controller
         $subcategoryId = $request->input('subcategoryId');
         $description = $request->input('description');
         $productImage = $request->input('product_image') ?? $request->input('productImage');
+        if ($request->hasFile('product_image_file')) {
+            $imagePath = $request->file('product_image_file')->storePublicly('products', 'public');
+            $productImage = Storage::disk('public')->url($imagePath);
+        }
         $defaultGstRateBps = (int) ($request->input('default_gst_rate_bps') ?? $request->input('defaultGstRateBps') ?? 0);
         $hsnCode = $request->input('hsn_code') ?? $request->input('hsnCode');
         $attributeValues = (array) ($request->input('attribute_values') ?? $request->input('attributeValues') ?? []);
@@ -635,6 +679,7 @@ class ProductController extends Controller
             'subcategoryId' => $subcategoryId,
             'description' => $description,
             'productImage' => $productImage,
+            'imageUrl' => $productImage,
             'defaultGstRateBps' => $defaultGstRateBps,
             'hsnCode' => $hsnCode,
             'attributeValues' => $attributeValues,
@@ -815,6 +860,7 @@ class ProductController extends Controller
      */
     public function update(Request $request, string $id): JsonResponse
     {
+        $this->mergeMultipartPayload($request);
         $user = $request->user();
         $prodRow = DB::table('products')->where('id', $id)->where('is_deleted', 0)->first();
         if (! $prodRow) {
@@ -836,6 +882,9 @@ class ProductController extends Controller
             'categoryId' => ['nullable', 'string'],
             'subcategoryId' => ['nullable', 'string'],
             'description' => ['nullable', 'string', 'max:1000'],
+            'product_image' => ['nullable', 'string'],
+            'productImage' => ['nullable', 'string'],
+            'product_image_file' => ['nullable', 'image', 'mimes:jpg,jpeg,png', 'max:5120'],
             'status' => ['nullable', 'string', 'in:ACTIVE,INACTIVE,active,inactive'],
             'default_gst_rate_bps' => ['nullable', 'integer'],
             'hsn_code' => ['nullable', 'string'],
@@ -865,6 +914,17 @@ class ProductController extends Controller
         }
         if ($request->has('description')) {
             $fields['description'] = $request->input('description');
+        }
+        if ($request->has('product_image') || $request->has('productImage')) {
+            $imageUrl = $request->input('product_image') ?? $request->input('productImage');
+            $fields['productImage'] = $imageUrl;
+            $fields['imageUrl'] = $imageUrl;
+        }
+        if ($request->hasFile('product_image_file')) {
+            $imagePath = $request->file('product_image_file')->storePublicly('products', 'public');
+            $imageUrl = Storage::disk('public')->url($imagePath);
+            $fields['productImage'] = $imageUrl;
+            $fields['imageUrl'] = $imageUrl;
         }
         if ($request->has('default_gst_rate_bps')) {
             $fields['defaultGstRateBps'] = (int) $request->input('default_gst_rate_bps');
@@ -1645,5 +1705,21 @@ class ProductController extends Controller
             'currentStock' => $currentStock,
             'movements' => $movements,
         ], 'Stock history timeline retrieved.');
+    }
+
+    private function mergeMultipartPayload(Request $request): void
+    {
+        if (! $request->has('payload')) {
+            return;
+        }
+
+        $payload = json_decode((string) $request->input('payload'), true);
+        if (! is_array($payload)) {
+            throw ValidationException::withMessages([
+                'payload' => 'The product payload must be valid JSON.',
+            ]);
+        }
+
+        $request->merge($payload);
     }
 }

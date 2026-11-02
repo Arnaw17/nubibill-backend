@@ -14,14 +14,20 @@ class ReturnItemResource extends JsonResource
      */
     public function toArray(Request $request): array
     {
+        $productFields = $this->product?->payload['fields'] ?? [];
+        $productName = trim((string) $this->product_name);
+        if ($productName === '' || strcasecmp($productName, 'Item') === 0) {
+            $productName = (string) ($productFields['productName'] ?? $productFields['name'] ?? $productName);
+        }
+
         return [
             'id' => $this->id,
             'return_id' => $this->return_id,
             'product_id' => $this->product_id,
             'variant_id' => $this->variant_id,
             'original_bill_item_id' => $this->original_bill_item_id,
-            'product_name' => $this->product_name,
-            'hsn_code' => $this->hsn_code,
+            'product_name' => $productName !== '' ? $productName : 'Item',
+            'hsn_code' => $this->hsn_code ?: ($productFields['hsnCode'] ?? $productFields['hsn_code'] ?? null),
             'unit' => $this->unit,
             'qty_returned' => (float) $this->qty_returned,
             'unit_price' => (float) $this->unit_price,

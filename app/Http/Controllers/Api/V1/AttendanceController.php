@@ -445,7 +445,7 @@ class AttendanceController extends Controller
 
     private function tenantIdForBusiness(string $businessId, string $fallback): string
     {
-        $row = DB::table('businesses')->where('business_id', $businessId)->where('is_deleted', 0)->first();
+        $row = DB::table('businesses')->where('id', $businessId)->where('is_deleted', 0)->first();
         if (! $row) {
             return $fallback;
         }
