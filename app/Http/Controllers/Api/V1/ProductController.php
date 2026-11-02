@@ -95,8 +95,26 @@ class ProductController extends Controller
 
         // 2. Fetch products for this business
         $query = DB::table('products')
-            ->where('business_id', $businessId)
+            ->where(function ($businessQuery) use ($businessId, $search) {
+                $businessQuery->where('business_id', $businessId);
+                if ($search !== '') {
+                    $businessQuery->orWhereNotNull('master_product_id');
+                }
+            })
             ->where('is_deleted', 0);
+
+        if ($search !== '') {
+            $searchPattern = '%'.$search.'%';
+            $query->where(function ($searchQuery) use ($searchPattern) {
+                foreach (['product_name', 'brand_name', 'category_name', 'master_product_id'] as $column) {
+                    $searchQuery->orWhere($column, 'like', $searchPattern);
+                }
+
+                foreach (['productName', 'name', 'productCode', 'brand', 'categoryName', 'category', 'subcategory'] as $field) {
+                    $searchQuery->orWhere('payload->fields->'.$field, 'like', $searchPattern);
+                }
+            });
+        }
 
         if ($statusFilter !== 'ALL') {
             $query->where('status', $statusFilter);
@@ -193,11 +211,11 @@ class ProductController extends Controller
                 }
             }
 
-            $name = (string) ($fields['productName'] ?? $fields['name'] ?? '');
+            $name = (string) ($fields['productName'] ?? $fields['name'] ?? $row->product_name ?? '');
             $code = (string) ($fields['productCode'] ?? '');
-            $brand = (string) ($fields['brand'] ?? '');
-            $cat = (string) ($fields['categoryName'] ?? $fields['category'] ?? '');
-            $subcat = (string) ($fields['subcategory'] ?? '');
+            $brand = (string) ($fields['brand'] ?? $row->brand_name ?? '');
+            $cat = (string) ($fields['categoryName'] ?? $fields['category'] ?? $row->category_name ?? '');
+            $subcat = (string) ($fields['subcategory'] ?? $row->subcategory_name ?? '');
 
             // Apply category filter
             if ($categoryId && ($fields['categoryId'] ?? '') !== $categoryId) {
@@ -215,7 +233,8 @@ class ProductController extends Controller
                     || str_contains(strtolower($code), $searchLower)
                     || str_contains(strtolower($brand), $searchLower)
                     || str_contains(strtolower($cat), $searchLower)
-                    || str_contains(strtolower($subcat), $searchLower);
+                    || str_contains(strtolower($subcat), $searchLower)
+                    || str_contains(strtolower((string) ($row->master_product_id ?? '')), $searchLower);
 
                 if (! $matches) {
                     continue;
@@ -270,6 +289,7 @@ class ProductController extends Controller
 
             $products[] = [
                 'productId' => $prodId,
+                'masterProductId' => $row->master_product_id ?? null,
                 'businessId' => $businessId,
                 'tenantId' => (string) ($fields['tenantId'] ?? ''),
                 'name' => $name,
@@ -281,8 +301,8 @@ class ProductController extends Controller
                 'categoryId' => $fields['categoryId'] ?? null,
                 'subcategory' => $subcat,
                 'subcategoryId' => $fields['subcategoryId'] ?? null,
-                'description' => $fields['description'] ?? null,
-                'productImage' => $fields['productImage'] ?? $fields['imageUrl'] ?? null,
+                'description' => $fields['description'] ?? $row->description ?? null,
+                'productImage' => $fields['productImage'] ?? $fields['imageUrl'] ?? $row->image_url ?? null,
                 'defaultGstRateBps' => (int) ($fields['defaultGstRateBps'] ?? 0),
                 'hsnCode' => $fields['hsnCode'] ?? null,
                 'status' => (string) ($fields['status'] ?? 'ACTIVE'),

@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\V1\CustomerController;
 use App\Http\Controllers\Api\V1\DashboardController;
 use App\Http\Controllers\Api\V1\EmployeeActivityController;
 use App\Http\Controllers\Api\V1\EmployeeController;
+use App\Http\Controllers\Api\V1\EmployeeOutletAllocationController;
 use App\Http\Controllers\Api\V1\ExpenseController;
 use App\Http\Controllers\Api\V1\FinancialTransactionController;
 use App\Http\Controllers\Api\V1\InventoryController;
@@ -23,6 +24,7 @@ use App\Http\Controllers\Api\V1\ReturnReasonController;
 use App\Http\Controllers\Api\V1\StorageController;
 use App\Http\Controllers\Api\V1\SuperUserController;
 use App\Http\Controllers\Api\V1\SupplierController;
+use App\Http\Controllers\Api\V1\SupplierRefundController;
 use App\Http\Controllers\Api\V1\TelemetryController;
 use App\Http\Controllers\Api\V1\UserController;
 use Illuminate\Support\Facades\Route;
@@ -128,6 +130,10 @@ Route::prefix('v1')->group(function () {
             ->middleware('permission:supplier.payment,suppliers,purchase.view,purchase');
         Route::post('/suppliers/{id}/payments', [SupplierController::class, 'recordPayment'])
             ->middleware('permission:supplier.payment,suppliers,purchase.pay,purchase.create,purchase.approve,purchase.manage,purchase');
+        Route::get('/supplier-refunds', [SupplierRefundController::class, 'index'])
+            ->middleware('permission:supplier.ledger.view,supplier.read,suppliers.read,suppliers');
+        Route::post('/supplier-refunds', [SupplierRefundController::class, 'store'])
+            ->middleware('permission:supplier.payment,suppliers,purchase.pay,purchase.create,purchase.approve,purchase.manage,purchase');
 
         // Purchase Bills & Procurement Routes
         Route::get('/purchases', [PurchaseController::class, 'index'])
@@ -212,6 +218,8 @@ Route::prefix('v1')->group(function () {
         // Staff Attendance & Biometric Face Verification Routes
         Route::get('/attendance', [AttendanceController::class, 'index'])
             ->middleware('permission:ATTENDANCE_VIEW,ATTENDANCE_MANAGE,ATTENDANCE_APPROVE,attendance');
+        Route::get('/attendance/events', [AttendanceController::class, 'events'])
+            ->middleware('permission:ATTENDANCE_VIEW,ATTENDANCE_MANAGE,ATTENDANCE_APPROVE,attendance');
         Route::post('/attendance/punch', [AttendanceController::class, 'punch'])
             ->middleware('permission:ATTENDANCE_MANAGE');
         Route::post('/attendance/manual', [AttendanceController::class, 'manual'])
@@ -223,6 +231,10 @@ Route::prefix('v1')->group(function () {
         Route::get('/payroll/profiles', [PayrollController::class, 'profiles'])
             ->middleware('permission:SALARY_VIEW,SALARY_MANAGE,SALARY_APPROVE,SALARY_PAY,SALARY_REPORT,staff_salary');
         Route::post('/payroll/profiles', [PayrollController::class, 'storeProfile'])
+            ->middleware('permission:SALARY_MANAGE,staff_salary.manage');
+        Route::get('/payroll/outlet-allocations', [EmployeeOutletAllocationController::class, 'index'])
+            ->middleware('permission:SALARY_VIEW,SALARY_MANAGE,SALARY_APPROVE,SALARY_PAY,SALARY_REPORT,staff_salary');
+        Route::post('/payroll/outlet-allocations', [EmployeeOutletAllocationController::class, 'store'])
             ->middleware('permission:SALARY_MANAGE,staff_salary.manage');
         Route::get('/payroll/periods', [PayrollController::class, 'periods'])
             ->middleware('permission:SALARY_VIEW,SALARY_MANAGE,SALARY_APPROVE,SALARY_PAY,SALARY_REPORT,staff_salary');

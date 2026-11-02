@@ -10,6 +10,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class PayrollController extends Controller
 {
@@ -95,6 +96,12 @@ class PayrollController extends Controller
             'paymentFrequency' => 'nullable|string',
             'effectiveFrom' => 'nullable|string',
             'effectiveTo' => 'nullable|string',
+            'initial_allocation' => 'nullable|array',
+            'initial_allocation.effectiveFrom' => 'nullable|date',
+            'initial_allocation.effectiveTo' => 'nullable|date',
+            'initial_allocation.outletBasisPoints' => 'required_with:initial_allocation|array|min:1',
+            'initial_allocation.outletBasisPoints.*' => 'required|integer|min:1|max:10000',
+            'initial_allocation.allocationTotalBasisPoints' => 'nullable|integer|in:10000',
         ]);
 
         $user = $request->user();
@@ -162,24 +169,147 @@ class PayrollController extends Controller
             'updatedAt' => $nowIso,
         ];
 
-        DB::table('salary_profiles')->updateOrInsert(
-            ['id' => $profileId],
-            [
-                'document_path' => "salary_profiles/{$profileId}",
+        $initialAllocation = $validated['initial_allocation'] ?? null;
+        if ($initialAllocation !== null && array_sum($initialAllocation['outletBasisPoints']) !== 10000) {
+            throw ValidationException::withMessages([
+                'initial_allocation.outletBasisPoints' => ['Outlet allocations must total exactly 10000 basis points.'],
+            ]);
+        }
+
+        $allocation = null;
+        if ($initialAllocation !== null) {
+            $effectiveFrom = Carbon::parse($initialAllocation['effectiveFrom'] ?? $fields['effectiveFrom'])->utc();
+            $effectiveTo = isset($initialAllocation['effectiveTo'])
+                ? Carbon::parse($initialAllocation['effectiveTo'])->utc()
+                : (isset($fields['effectiveTo']) ? Carbon::parse($fields['effectiveTo'])->utc() : null);
+            if ($effectiveTo && ! $effectiveTo->gt($effectiveFrom)) {
+                throw ValidationException::withMessages([
+                    'initial_allocation.effectiveTo' => ['The allocation end date must be after its start date.'],
+                ]);
+            }
+
+            foreach (array_keys($initialAllocation['outletBasisPoints']) as $allocationOutletId) {
+                $outlet = DB::table('outlets')->where('id', $allocationOutletId)
+                    ->where('business_id', $businessId)->where('is_deleted', 0)->first();
+                if (! $outlet || ! in_array((string) $allocationOutletId, array_map('strval', $employeeOutlets), true)) {
+                    return ApiResponse::error('Every allocated outlet must be assigned to the employee and business.', 422, null, 'OUTLET_EMPLOYEE_MISMATCH');
+                }
+            }
+
+            $businessRow = DB::table('businesses')->where('id', $businessId)->first();
+            $businessPayload = json_decode((string) ($businessRow->payload ?? ''), true) ?: [];
+            $businessFields = $businessPayload['fields'] ?? $businessPayload;
+            $tenantId = (string) ($businessFields['ownerUid'] ?? $businessFields['tenantId'] ?? ($businessRow->tenant_id ?? null) ?? $userId);
+            $allocationId = 'SALA-'.substr(hash('sha256', implode('|', [
+                $tenantId,
+                $businessId,
+                $employeeId,
+                $effectiveFrom->format('Ymd'),
+            ])), 0, 40);
+            $allocation = compact('allocationId', 'tenantId', 'effectiveFrom', 'effectiveTo');
+        }
+
+        DB::transaction(function () use ($profileId, $businessId, $outletId, $employeeId, $fields, $nowDateTime, $initialAllocation, $allocation, $userId): void {
+            DB::table('salary_profiles')->updateOrInsert(
+                ['id' => $profileId],
+                [
+                    'document_path' => "salary_profiles/{$profileId}",
+                    'business_id' => $businessId,
+                    'outlet_id' => $outletId,
+                    'employee_id' => $employeeId,
+                    'status' => 'ACTIVE',
+                    'created_at' => $nowDateTime,
+                    'updated_at' => $nowDateTime,
+                    'is_deleted' => 0,
+                    'payload' => json_encode([
+                        '_documentId' => $profileId,
+                        '_documentPath' => "salary_profiles/{$profileId}",
+                        'fields' => $fields,
+                    ]),
+                ]
+            );
+
+            if ($initialAllocation === null || $allocation === null) {
+                return;
+            }
+
+            DB::table('employees')->where('id', $employeeId)->lockForUpdate()->first();
+            $existingAllocation = DB::table('employee_outlet_allocations')->where('id', $allocation['allocationId'])->first();
+            if ($existingAllocation) {
+                $existingPayload = json_decode((string) $existingAllocation->payload, true) ?: [];
+                $existingFields = $existingPayload['fields'] ?? $existingPayload;
+                if (($existingFields['outletBasisPoints'] ?? []) !== $initialAllocation['outletBasisPoints'] ||
+                    Carbon::parse($existingAllocation->effective_from)->ne($allocation['effectiveFrom']) ||
+                    (($existingAllocation->effective_to === null) !== ($allocation['effectiveTo'] === null)) ||
+                    ($existingAllocation->effective_to && Carbon::parse($existingAllocation->effective_to)->ne($allocation['effectiveTo']))) {
+                    throw ValidationException::withMessages([
+                        'initial_allocation' => ['This allocation effective date already exists with different details.'],
+                    ]);
+                }
+
+                return;
+            }
+            $priorRows = DB::table('employee_outlet_allocations')
+                ->where('business_id', $businessId)->where('employee_id', $employeeId)
+                ->where('is_deleted', 0)->lockForUpdate()->get();
+            foreach ($priorRows as $prior) {
+                $priorStart = Carbon::parse($prior->effective_from);
+                $priorEnd = $prior->effective_to ? Carbon::parse($prior->effective_to) : null;
+                $overlaps = (! $allocation['effectiveTo'] || $priorStart->lt($allocation['effectiveTo']))
+                    && (! $priorEnd || $priorEnd->gt($allocation['effectiveFrom']));
+                if (! $overlaps) {
+                    continue;
+                }
+                if ($priorStart->lt($allocation['effectiveFrom']) && (! $priorEnd || $priorEnd->gt($allocation['effectiveFrom']))) {
+                    $priorPayload = json_decode((string) $prior->payload, true) ?: [];
+                    $priorFields = $priorPayload['fields'] ?? $priorPayload;
+                    $priorFields['effectiveTo'] = $allocation['effectiveFrom']->toIso8601String();
+                    $priorPayload['fields'] = $priorFields;
+                    DB::table('employee_outlet_allocations')->where('id', $prior->id)->update([
+                        'effective_to' => $allocation['effectiveFrom'],
+                        'payload' => json_encode($priorPayload),
+                        'updated_at' => now(),
+                    ]);
+
+                    continue;
+                }
+                throw ValidationException::withMessages([
+                    'initial_allocation.effectiveFrom' => ['Outlet allocation effective dates cannot overlap.'],
+                ]);
+            }
+
+            $allocationFields = [
+                'allocationId' => $allocation['allocationId'],
+                'tenantId' => $allocation['tenantId'],
+                'businessId' => (string) $businessId,
+                'employeeId' => $employeeId,
+                'effectiveFrom' => $allocation['effectiveFrom']->toIso8601String(),
+                'effectiveTo' => $allocation['effectiveTo']?->toIso8601String(),
+                'outletBasisPoints' => $initialAllocation['outletBasisPoints'],
+                'allocationTotalBasisPoints' => 10000,
+                'status' => 'ACTIVE',
+                'createdBy' => $userId,
+                'createdAt' => now()->utc()->toIso8601String(),
+            ];
+            $documentPath = "employee_outlet_allocations/{$allocation['allocationId']}";
+            $now = now();
+            DB::table('employee_outlet_allocations')->insert([
+                'id' => $allocation['allocationId'],
+                'document_path' => $documentPath,
                 'business_id' => $businessId,
-                'outlet_id' => $outletId,
                 'employee_id' => $employeeId,
                 'status' => 'ACTIVE',
-                'created_at' => $nowDateTime,
-                'updated_at' => $nowDateTime,
+                'effective_from' => $allocation['effectiveFrom'],
+                'effective_to' => $allocation['effectiveTo'],
+                'outlet_basis_points' => json_encode($initialAllocation['outletBasisPoints']),
+                'allocation_total_basis_points' => 10000,
+                'created_by' => $userId,
                 'is_deleted' => 0,
-                'payload' => json_encode([
-                    '_documentId' => $profileId,
-                    '_documentPath' => "salary_profiles/{$profileId}",
-                    'fields' => $fields,
-                ]),
-            ]
-        );
+                'payload' => json_encode(['_documentId' => $allocation['allocationId'], '_documentPath' => $documentPath, 'fields' => $allocationFields]),
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+        });
 
         return ApiResponse::success($fields, 'Salary profile saved successfully.', 201);
     }

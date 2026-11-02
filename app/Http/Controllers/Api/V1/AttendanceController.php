@@ -103,6 +103,51 @@ class AttendanceController extends Controller
         return ApiResponse::success($records, 'Attendance records retrieved.');
     }
 
+    public function events(Request $request): JsonResponse
+    {
+        $businessId = $request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id');
+        $outletId = $request->query('outlet_id') ?? $request->query('outletId') ?? $request->header('X-Outlet-Id');
+        $employeeId = $request->query('employee_id') ?? $request->query('employeeId');
+        $attendanceId = $request->query('attendance_id') ?? $request->query('attendanceId');
+        $user = $request->user();
+        if (! $businessId || ! $user->canAccessBusiness((string) $businessId)) {
+            return ApiResponse::error('A valid, authorized business context is required.', 403, null, 'FORBIDDEN');
+        }
+
+        $query = DB::table('staff_attendance_events')
+            ->where('business_id', $businessId)
+            ->where('is_deleted', 0);
+        if ($outletId) {
+            $query->where('outlet_id', $outletId);
+        }
+        if ($employeeId) {
+            $query->where('employee_id', $employeeId);
+        }
+        if ($attendanceId) {
+            $query->where('attendance_id', $attendanceId);
+        }
+
+        $events = $query->orderBy('occurred_at')->get()->map(function (object $row): array {
+            $payload = json_decode((string) $row->payload, true) ?: [];
+            $fields = $payload['fields'] ?? $payload;
+
+            return array_merge($fields, [
+                'eventId' => (string) $row->id,
+                'recordId' => (string) $row->attendance_id,
+                'tenantId' => (string) $row->tenant_id,
+                'businessId' => (string) $row->business_id,
+                'outletId' => (string) $row->outlet_id,
+                'employeeId' => (string) $row->employee_id,
+                'eventType' => (string) $row->event_type,
+                'occurredAt' => $fields['occurredAt'] ?? $row->occurred_at,
+                'workDate' => $fields['workDate'] ?? $row->work_date,
+                'immutable' => true,
+            ]);
+        });
+
+        return ApiResponse::success($events, 'Attendance audit events retrieved.');
+    }
+
     /**
      * Biometric / Kiosk Face Attendance punch (Check-in or Check-out).
      */
@@ -121,6 +166,18 @@ class AttendanceController extends Controller
             'longitude' => 'nullable|numeric',
             'livenessScore' => 'nullable|numeric',
             'notes' => 'nullable|string',
+            'workTimeZoneId' => 'nullable|string|max:100',
+            'attendanceMethod' => 'nullable|string|max:50',
+            'kioskDeviceId' => 'nullable|string|max:255',
+            'recognitionModelVersion' => 'nullable|string|max:100',
+            'livenessCheckVersion' => 'nullable|string|max:100',
+            'gpsAccuracy' => 'nullable|numeric|min:0',
+            'isMockLocation' => 'nullable|boolean',
+            'geofenceDistanceMeters' => 'nullable|numeric|min:0',
+            'geofenceRadiusMeters' => 'nullable|numeric|min:0',
+            'livenessChallenges' => 'nullable|array',
+            'flaggedReasons' => 'nullable|array',
+            'verificationStatus' => 'nullable|string|max:50',
         ]);
 
         $user = $request->user();
@@ -146,6 +203,17 @@ class AttendanceController extends Controller
         $tenantId = $this->tenantIdForBusiness((string) $businessId, $userId);
         $attendanceId = 'ATT-'.substr(hash('sha256', "{$tenantId}|{$businessId}|{$employeeId}|{$outletId}|{$dateKey}"), 0, 40);
 
+        $outlet = DB::table('outlets')->where('id', $outletId)->where('business_id', $businessId)->where('is_deleted', 0)->exists();
+        $employee = DB::table('employees')->where('id', $employeeId)->where('is_deleted', 0)->first();
+        $employeePayload = json_decode((string) ($employee->payload ?? null), true) ?: [];
+        $employeeFields = $employeePayload['fields'] ?? $employeePayload;
+        if (! $outlet || ! $employee ||
+            (isset($employeeFields['businessIds']) && ! in_array($businessId, $employeeFields['businessIds'], true)) ||
+            (isset($employeeFields['outletIds']) && ! in_array($outletId, $employeeFields['outletIds'], true)) ||
+            (isset($employeeFields['ownerUid']) && $employeeFields['ownerUid'] !== $tenantId)) {
+            return ApiResponse::error('The employee and outlet must be assigned to the authorized business.', 422, null, 'ATTENDANCE_SCOPE_MISMATCH');
+        }
+
         return DB::transaction(function () use ($businessId, $outletId, $employeeId, $type, $punchTime, $punchTimeIso, $todayDate, $attendanceId, $validated, $userId, $tenantId) {
             $existing = DB::table('staff_attendance')
                 ->where('business_id', $businessId)
@@ -157,6 +225,71 @@ class AttendanceController extends Controller
 
             $nowDateTime = now();
             $nowIso = now()->toIso8601String();
+            $eventType = $type === 'CHECKIN' ? 'CHECK_IN' : 'CHECK_OUT';
+            $eventId = 'ATTEVT-'.substr(hash('sha256', "{$attendanceId}|{$eventType}"), 0, 40);
+            $recordAuditEvent = function () use ($attendanceId, $businessId, $outletId, $employeeId, $eventType, $eventId, $punchTime, $punchTimeIso, $validated, $userId, $tenantId, $nowDateTime, $nowIso): void {
+                $eventFields = [
+                    'eventId' => $eventId,
+                    'recordId' => $attendanceId,
+                    'tenantId' => $tenantId,
+                    'businessId' => $businessId,
+                    'outletId' => $outletId,
+                    'employeeId' => $employeeId,
+                    'eventType' => $eventType,
+                    'occurredAt' => $punchTimeIso,
+                    'workDate' => $punchTime->toDateString(),
+                    'workTimeZoneId' => $validated['workTimeZoneId'] ?? null,
+                    'attendanceMethod' => $validated['attendanceMethod'] ?? 'FACE_KIOSK',
+                    'kioskDeviceId' => $validated['kioskDeviceId'] ?? null,
+                    'recognitionModelVersion' => $validated['recognitionModelVersion'] ?? null,
+                    'livenessCheckVersion' => $validated['livenessCheckVersion'] ?? null,
+                    'gpsLatitude' => $validated['latitude'] ?? null,
+                    'gpsLongitude' => $validated['longitude'] ?? null,
+                    'gpsAccuracy' => $validated['gpsAccuracy'] ?? null,
+                    'isMockLocation' => (bool) ($validated['isMockLocation'] ?? false),
+                    'geofenceDistanceMeters' => $validated['geofenceDistanceMeters'] ?? null,
+                    'geofenceRadiusMeters' => $validated['geofenceRadiusMeters'] ?? null,
+                    'livenessChallenges' => $validated['livenessChallenges'] ?? [],
+                    'verificationStatus' => $validated['verificationStatus'] ?? 'RECORDED',
+                    'flaggedReasons' => $validated['flaggedReasons'] ?? [],
+                    'recordedBy' => $userId,
+                    'createdAt' => $nowIso,
+                    'immutable' => true,
+                ];
+                DB::table('staff_attendance_events')->insertOrIgnore([
+                    'id' => $eventId,
+                    'document_path' => "staff_attendance_events/{$eventId}",
+                    'attendance_id' => $attendanceId,
+                    'tenant_id' => $tenantId,
+                    'business_id' => $businessId,
+                    'outlet_id' => $outletId,
+                    'employee_id' => $employeeId,
+                    'event_type' => $eventType,
+                    'occurred_at' => $punchTime,
+                    'work_date' => $punchTime->toDateString(),
+                    'work_timezone_id' => $validated['workTimeZoneId'] ?? null,
+                    'attendance_method' => $validated['attendanceMethod'] ?? 'FACE_KIOSK',
+                    'kiosk_device_id' => $validated['kioskDeviceId'] ?? null,
+                    'recognition_model_version' => $validated['recognitionModelVersion'] ?? null,
+                    'liveness_check_version' => $validated['livenessCheckVersion'] ?? null,
+                    'gps_latitude' => $validated['latitude'] ?? null,
+                    'gps_longitude' => $validated['longitude'] ?? null,
+                    'gps_accuracy' => $validated['gpsAccuracy'] ?? null,
+                    'is_mock_location' => (bool) ($validated['isMockLocation'] ?? false),
+                    'geofence_distance_meters' => $validated['geofenceDistanceMeters'] ?? null,
+                    'geofence_radius_meters' => $validated['geofenceRadiusMeters'] ?? null,
+                    'liveness_challenges' => json_encode($validated['livenessChallenges'] ?? []),
+                    'verification_status' => $validated['verificationStatus'] ?? 'RECORDED',
+                    'flagged_reasons' => json_encode($validated['flaggedReasons'] ?? []),
+                    'recorded_by' => $userId,
+                    'immutable' => 1,
+                    'status' => 'RECORDED',
+                    'is_deleted' => 0,
+                    'payload' => json_encode(['_documentId' => $eventId, '_documentPath' => "staff_attendance_events/{$eventId}", 'fields' => $eventFields]),
+                    'created_at' => $nowDateTime,
+                    'updated_at' => $nowDateTime,
+                ]);
+            };
 
             if ($type === 'CHECKIN') {
                 if ($existing) {
@@ -174,6 +307,8 @@ class AttendanceController extends Controller
                             'fields' => $fields,
                         ]),
                     ]);
+
+                    $recordAuditEvent();
 
                     return ApiResponse::success($fields, 'Check-in updated successfully.');
                 }
@@ -215,6 +350,8 @@ class AttendanceController extends Controller
                         'fields' => $fields,
                     ]),
                 ]);
+
+                $recordAuditEvent();
 
                 return ApiResponse::success($fields, 'Check-in recorded successfully.', 201);
             } else {
@@ -259,6 +396,8 @@ class AttendanceController extends Controller
                         ]),
                     ]);
 
+                    $recordAuditEvent();
+
                     return ApiResponse::success($fields, 'Check-out recorded.', 201);
                 }
 
@@ -284,6 +423,8 @@ class AttendanceController extends Controller
                         'fields' => $fields,
                     ]),
                 ]);
+
+                $recordAuditEvent();
 
                 return ApiResponse::success($fields, "Check-out recorded. Total worked: {$workedMinutes} minutes.");
             }
