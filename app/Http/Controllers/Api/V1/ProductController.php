@@ -1403,6 +1403,10 @@ class ProductController extends Controller
             ->where(function ($sub) use ($q) {
                 $sub->where('payload->fields->productName', 'LIKE', "%{$q}%")
                     ->orWhere('payload->fields->brandName', 'LIKE', "%{$q}%")
+                    ->orWhere('payload->fields->categoryName', 'LIKE', "%{$q}%")
+                    ->orWhere('payload->fields->subcategoryName', 'LIKE', "%{$q}%")
+                    ->orWhere('payload->fields->masterProductId', 'LIKE', "%{$q}%")
+                    ->orWhere('id', 'LIKE', "%{$q}%")
                     ->orWhere('payload->fields->normalizedProductName', 'LIKE', '%'.strtolower($q).'%');
             })
             ->limit(30)

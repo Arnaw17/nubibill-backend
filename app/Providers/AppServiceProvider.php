@@ -23,6 +23,9 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         RateLimiter::for('api', function (Request $request) {
+            if ($request->is('api/v1/sync/*')) {
+                return Limit::none();
+            }
             return Limit::perMinute(120)->by($request->user()?->id ?: $request->ip());
         });
     }

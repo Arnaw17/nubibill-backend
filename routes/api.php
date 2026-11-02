@@ -25,6 +25,7 @@ use App\Http\Controllers\Api\V1\StorageController;
 use App\Http\Controllers\Api\V1\SuperUserController;
 use App\Http\Controllers\Api\V1\SupplierController;
 use App\Http\Controllers\Api\V1\SupplierRefundController;
+use App\Http\Controllers\Api\V1\SyncController;
 use App\Http\Controllers\Api\V1\TelemetryController;
 use App\Http\Controllers\Api\V1\UserController;
 use Illuminate\Support\Facades\Route;
@@ -38,6 +39,15 @@ Route::prefix('v1')->group(function () {
     Route::post('/product-masters', [ProductController::class, 'storeMaster'])
         ->middleware(['auth:sanctum', 'active', 'permission:product.create,products.create']);
     Route::get('/products/central/search', [ProductController::class, 'searchCentral']);
+
+    // SQLite Outbox / Document Synchronization to Central MySQL
+    Route::withoutMiddleware(['throttle:api'])->group(function () {
+        Route::post('/sync/documents:commit', [SyncController::class, 'commit']);
+        Route::post('/sync/commit', [SyncController::class, 'commit']);
+        Route::get('/sync/documents/{collection}/{id}', [SyncController::class, 'getDocument']);
+        Route::post('/sync/documents:runQuery', [SyncController::class, 'runQuery']);
+        Route::post('/sync/runQuery', [SyncController::class, 'runQuery']);
+    });
     // Public Authentication & Registration Routes
     Route::prefix('auth')->group(function () {
         Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:30,1');
