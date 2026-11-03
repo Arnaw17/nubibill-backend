@@ -34,7 +34,11 @@ class ReturnController extends Controller
         }
 
         $validated['business_id'] = $businessId;
-        $validated['outlet_id'] = $request->input('outlet_id') ?? $request->header('X-Outlet-Id');
+        $outletId = $request->input('outlet_id') ?? $request->input('outletId') ?? $request->header('X-Outlet-Id');
+        if (strtoupper((string) $user->role) === 'STAFF' && empty($outletId)) {
+            $outletId = app(\App\Services\EmployeePermissionService::class)->defaultOutletFor($user, $businessId);
+        }
+        $validated['outlet_id'] = $outletId;
 
         $return = $this->returnService->createReturn($validated, $user);
 

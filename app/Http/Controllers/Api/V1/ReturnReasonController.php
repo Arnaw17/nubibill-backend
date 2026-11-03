@@ -19,10 +19,26 @@ class ReturnReasonController extends Controller
     {
         $user = $request->user();
 
+        if (ReturnReason::count() === 0) {
+            $defaultReasons = [
+                ['name' => 'Damaged / Defective', 'code' => 'DAMAGED', 'is_system' => true, 'is_active' => true],
+                ['name' => 'Wrong Item Delivered', 'code' => 'WRONG_ITEM', 'is_system' => true, 'is_active' => true],
+                ['name' => 'Expired Product', 'code' => 'EXPIRED', 'is_system' => true, 'is_active' => true],
+                ['name' => 'Customer Changed Mind', 'code' => 'CUSTOMER_CHANGED_MIND', 'is_system' => true, 'is_active' => true],
+                ['name' => 'Quality Not as Expected', 'code' => 'QUALITY_ISSUE', 'is_system' => true, 'is_active' => true],
+                ['name' => 'Other', 'code' => 'OTHER', 'is_system' => true, 'is_active' => true],
+            ];
+            foreach ($defaultReasons as $r) {
+                ReturnReason::firstOrCreate(['code' => $r['code']], $r);
+            }
+        }
+
         $reasons = ReturnReason::where('is_active', true)
             ->where(function ($q) use ($user) {
-                $q->where('is_system', true)
-                    ->orWhere('user_id', $user->id);
+                $q->where('is_system', true);
+                if ($user) {
+                    $q->orWhere('user_id', $user->id);
+                }
             })
             ->orderBy('is_system', 'desc')
             ->orderBy('name', 'asc')

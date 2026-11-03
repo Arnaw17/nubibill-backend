@@ -51,6 +51,14 @@ class InvoiceController extends Controller
             ->where('business_id', $businessId)
             ->where('is_deleted', 0);
 
+        if ($user && app(\App\Services\EmployeePermissionService::class)->isBillingStaff($user)) {
+            $query->where(function ($q) use ($user) {
+                $q->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.createdByUid')) = ?", [$user->id])
+                    ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.creatorUid')) = ?", [$user->id])
+                    ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.created_by')) = ?", [$user->id]);
+            });
+        }
+
         if ($outletId) {
             $query->where(function ($q) use ($outletId) {
                 $q->where('outlet_id', $outletId)
@@ -198,6 +206,13 @@ class InvoiceController extends Controller
 
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? [];
+
+        if ($user && app(\App\Services\EmployeePermissionService::class)->isBillingStaff($user)) {
+            $createdByUid = (string) ($fields['createdByUid'] ?? $fields['creatorUid'] ?? $fields['created_by'] ?? '');
+            if ($createdByUid !== '' && $createdByUid !== (string) $user->id) {
+                return ApiResponse::error('You are not authorized to view sales from other counters/staff.', 403, null, 'PERMISSION_DENIED');
+            }
+        }
 
         // Check if items are in items table or embedded in payload
         $items = $fields['items'] ?? [];
@@ -364,8 +379,8 @@ class InvoiceController extends Controller
 
             $calculatedLines[] = [
                 'itemId' => "REQ_{$invoiceId}_{$index}",
-                'productId' => $item['product_id'],
-                'variantId' => $item['variant_id'],
+                'productId' => $item['product_id'] ?? null,
+                'variantId' => $item['variant_id'] ?? null,
                 'name' => $item['product_name'] ?? 'Product',
                 'variantName' => $item['variant_name'] ?? 'Variant',
                 'quantity' => $qty,
@@ -513,6 +528,10 @@ class InvoiceController extends Controller
                     'document_path' => "invoice_items/{$line['itemId']}",
                     'business_id' => $businessId,
                     'outlet_id' => $outletId,
+                    'invoice_id' => $invoiceId,
+                    'product_id' => $line['productId'] ?? null,
+                    'quantity' => $line['quantity'] ?? 0,
+                    'returned_qty' => 0,
                     'status' => 'ACTIVE',
                     'created_at' => $dbNow,
                     'updated_at' => $dbNow,

@@ -122,12 +122,12 @@ class PurchaseController extends Controller
             ->first();
 
         if (! $row) {
-            return ApiResponse::error('Purchase bill not found.', 'NOT_FOUND', 404);
+            return ApiResponse::error('Purchase bill not found.', 404, 'NOT_FOUND');
         }
 
         $user = $request->user();
         if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
-            return ApiResponse::error('Unauthorized access to this purchase bill.', 'FORBIDDEN', 403);
+            return ApiResponse::error('Unauthorized access to this purchase bill.', 403, 'FORBIDDEN');
         }
 
         $payload = json_decode($row->payload, true) ?: [];
@@ -272,7 +272,7 @@ class PurchaseController extends Controller
         // Fetch supplier
         $supplierRow = DB::table('suppliers')->where('id', $supplierId)->first();
         if (! $supplierRow) {
-            return ApiResponse::error('Supplier not found.', 'NOT_FOUND', 404);
+            return ApiResponse::error('Supplier not found.', 404, 'NOT_FOUND');
         }
         $sPayload = json_decode($supplierRow->payload, true) ?: [];
         $supplierName = $sPayload['fields']['name'] ?? 'Supplier';

@@ -13,6 +13,21 @@ abstract class TestCase extends BaseTestCase
         $app['config']->set('database.connections.sqlite.database', ':memory:');
         $app['config']->set('session.driver', 'array');
 
+        \Illuminate\Support\Facades\Event::listen(\Illuminate\Database\Events\ConnectionEstablished::class, function ($event) {
+            if ($event->connection->getDriverName() === 'sqlite') {
+                $event->connection->getPdo()->sqliteCreateFunction('JSON_UNQUOTE', fn ($val) => is_string($val) ? trim($val, '"') : $val);
+            }
+        });
+
         return $app;
+    }
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        if (\Illuminate\Support\Facades\DB::getDriverName() === 'sqlite') {
+            \Illuminate\Support\Facades\DB::connection()->getPdo()->sqliteCreateFunction('JSON_UNQUOTE', fn ($val) => is_string($val) ? trim($val, '"') : $val);
+        }
     }
 }

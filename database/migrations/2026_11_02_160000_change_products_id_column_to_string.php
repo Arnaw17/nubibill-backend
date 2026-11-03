@@ -10,7 +10,9 @@ return new class extends Migration
      */
     public function up(): void
     {
-        DB::statement('ALTER TABLE products MODIFY id VARCHAR(255) NOT NULL');
+        if (DB::getDriverName() === 'mysql') {
+            DB::statement('ALTER TABLE products MODIFY id VARCHAR(255) NOT NULL');
+        }
     }
 
     /**
@@ -18,6 +20,8 @@ return new class extends Migration
      */
     public function down(): void
     {
-        DB::statement('ALTER TABLE products MODIFY id BIGINT UNSIGNED AUTO_INCREMENT NOT NULL');
+        if (DB::getDriverName() === 'mysql') {
+            DB::statement('ALTER TABLE products MODIFY id BIGINT UNSIGNED AUTO_INCREMENT NOT NULL');
+        }
     }
 };

@@ -101,8 +101,14 @@ class ReturnService
                 $taxTotal += $taxAmount;
                 $grandTotal += $lineTotal;
 
-                $calculatedItems[] = array_merge($item, [
+                $calculatedItems[] = [
                     'id' => (string) Str::uuid(),
+                    'original_bill_item_id' => $item['original_bill_item_id'] ?? null,
+                    'product_id' => ! empty($item['product_id']) ? (string) $item['product_id'] : ($item['original_bill_item_id'] ?? 'item'),
+                    'variant_id' => ! empty($item['variant_id']) ? (string) $item['variant_id'] : null,
+                    'product_name' => (string) ($item['product_name'] ?? 'Item'),
+                    'hsn_code' => ! empty($item['hsn_code']) ? (string) $item['hsn_code'] : null,
+                    'unit' => ! empty($item['unit']) ? (string) $item['unit'] : null,
                     'qty_returned' => $qty,
                     'unit_price' => $unitPrice,
                     'discount_amount' => $discount,
@@ -115,7 +121,9 @@ class ReturnService
                     'line_total' => $lineTotal,
                     'condition' => $condition,
                     'restock' => $restock,
-                ]);
+                    'batch_number' => ! empty($item['batch_number']) ? (string) $item['batch_number'] : null,
+                    'expiry_date' => ! empty($item['expiry_date']) ? Carbon::parse($item['expiry_date'])->toDateString() : null,
+                ];
             }
 
             // 5. Create Return Header Record
@@ -131,15 +139,15 @@ class ReturnService
                 'type' => $type,
                 'original_bill_id' => $data['original_bill_id'] ?? null,
                 'original_bill_no' => $data['original_bill_no'] ?? null,
-                'original_bill_date' => $data['original_bill_date'] ?? null,
-                'party_id' => $data['party_id'],
+                'original_bill_date' => ! empty($data['original_bill_date']) ? Carbon::parse($data['original_bill_date'])->toDateString() : null,
+                'party_id' => ! empty($data['party_id']) ? $data['party_id'] : 'walk_in',
                 'party_name' => $data['party_name'] ?? null,
                 'party_phone' => $data['party_phone'] ?? null,
                 'party_gstin' => $data['party_gstin'] ?? null,
                 'party_state_code' => $partyStateCode,
                 'business_state_code' => $businessStateCode,
-                'return_date' => $data['return_date'] ?? $now->toDateString(),
-                'reason_id' => $data['reason_id'] ?? null,
+                'return_date' => ! empty($data['return_date']) ? Carbon::parse($data['return_date'])->toDateString() : $now->toDateString(),
+                'reason_id' => ! empty($data['reason_id']) ? $data['reason_id'] : null,
                 'reason_note' => $data['reason_note'] ?? null,
                 'refund_mode' => $refundMode,
                 'idempotency_key' => $idempotencyKey,
@@ -299,6 +307,29 @@ class ReturnService
                             'items' => "Return quantity for '{$productName}' exceeds returnable quantity. Available: {$remainingReturnable}, Requested: {$qtyToReturn}.",
                         ]);
                     }
+                } elseif (! empty($originalBillId) && $type === 'sale_return' && DB::getSchemaBuilder()->hasTable('invoices')) {
+                    $inv = DB::table('invoices')->where('id', $originalBillId)->first();
+                    if ($inv && ! empty($inv->payload)) {
+                        $invPayload = json_decode($inv->payload, true) ?: [];
+                        $invItems = $invPayload['fields']['items'] ?? [];
+                        $soldQty = 0.0;
+                        $alreadyReturned = 0.0;
+                        foreach ($invItems as $invItem) {
+                            if (($invItem['itemId'] ?? null) === $originalItemId || ($invItem['id'] ?? null) === $originalItemId) {
+                                $soldQty = (float) ($invItem['quantity'] ?? 0);
+                                $alreadyReturned = (float) ($invItem['returnedQty'] ?? 0);
+                                break;
+                            }
+                        }
+                        if ($soldQty > 0) {
+                            $remainingReturnable = max(0.0, $soldQty - $alreadyReturned);
+                            if ($qtyToReturn > ($remainingReturnable + 0.0001)) {
+                                throw ValidationException::withMessages([
+                                    'items' => "Return quantity for '{$productName}' exceeds returnable quantity. Available: {$remainingReturnable}, Requested: {$qtyToReturn}.",
+                                ]);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -440,7 +471,9 @@ class ReturnService
         if ($return->isSaleReturn()) {
             if (in_array($refundMode, ['adjust_to_ledger', 'credit_note'], true)) {
                 // Credit Note: reduces customer's pending Udhaar / receivable balance (Credit)
-                $balAfter = $this->updateCustomerBalance($businessId, $partyId, -$grandTotal);
+                $balAfter = in_array(strtolower((string) $partyId), ['walk_in', 'walk_in_customer', 'walk-in', ''], true)
+                    ? null
+                    : $this->updateCustomerBalance($businessId, $partyId, -$grandTotal);
 
                 LedgerEntry::create([
                     'id' => (string) Str::uuid(),

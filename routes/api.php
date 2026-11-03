@@ -85,93 +85,93 @@ Route::prefix('v1')->group(function () {
 
         // Product Catalog & Master Data Routes
         Route::get('/products', [ProductController::class, 'index'])
-            ->middleware('permission:products.view,product.read,inventory.view,sales,billing,barcode');
+            ->middleware('permission:product.read,products.view,inventory.view,sales,billing,barcode');
         Route::post('/products/barcodes/generate-missing', [ProductController::class, 'generateMissingBarcodes'])
             ->middleware('permission:barcode,products.view,product.read,products.update,product.update');
         Route::post('/products', [ProductController::class, 'store'])
-            ->middleware('permission:products.create,product.create');
+            ->middleware('permission:product.create,products.create');
         Route::post('/products/status', [ProductController::class, 'updateStatus'])
-            ->middleware('permission:products.update,product.update');
+            ->middleware('permission:product.update,products.update');
         Route::get('/outlets/{outletId}/products/assigned-ids', [ProductController::class, 'outletProductIds'])
-            ->middleware('permission:products.view,product.read,products.update,product.update');
+            ->middleware('permission:product.read,product.update,products.view,products.update');
         Route::post('/outlets/{outletId}/products/remove', [ProductController::class, 'removeFromOutlet'])
-            ->middleware('permission:products.update,product.update');
+            ->middleware('permission:product.update,products.update');
         Route::post('/outlets/{outletId}/products/assign', [ProductController::class, 'assignToOutlet'])
-            ->middleware('permission:products.update,product.update');
+            ->middleware('permission:product.update,products.update');
         Route::get('/products/{id}', [ProductController::class, 'show'])
-            ->middleware('permission:products.view,product.read,inventory.view,sales,billing,barcode');
+            ->middleware('permission:product.read,products.view,inventory.view,sales,billing,barcode');
         Route::put('/products/{id}', [ProductController::class, 'update'])
-            ->middleware('permission:products.update,product.update');
+            ->middleware('permission:product.update,products.update');
         Route::delete('/products/{id}', [ProductController::class, 'destroy'])
-            ->middleware('permission:products.delete,product.delete');
+            ->middleware('permission:product.delete,products.delete');
 
         // Customer Management & Khata (Credit Ledger) Routes
         Route::get('/customers', [CustomerController::class, 'index'])
-            ->middleware('permission:CUSTOMER_VIEW,CUSTOMER_EDIT,customers,billing');
+            ->middleware('permission:customer.read,CUSTOMER_VIEW,CUSTOMER_EDIT,customers,billing');
         Route::post('/customers', [CustomerController::class, 'store'])
-            ->middleware('permission:CUSTOMER_CREATE,customer.create,customers.create,CUSTOMER_EDIT,customers');
+            ->middleware('permission:customer.create,CUSTOMER_CREATE,customers.create,CUSTOMER_EDIT,customers');
         Route::get('/customers/{id}', [CustomerController::class, 'show'])
-            ->middleware('permission:CUSTOMER_VIEW,CUSTOMER_EDIT,customers,billing');
+            ->middleware('permission:customer.read,CUSTOMER_VIEW,CUSTOMER_EDIT,customers,billing');
         Route::put('/customers/{id}', [CustomerController::class, 'update'])
-            ->middleware('permission:CUSTOMER_EDIT,customers');
+            ->middleware('permission:customer.update,CUSTOMER_EDIT,customers');
         Route::delete('/customers/{id}', [CustomerController::class, 'destroy'])
-            ->middleware('permission:CUSTOMER_EDIT,customers');
+            ->middleware('permission:customer.delete,CUSTOMER_EDIT,customers');
         Route::get('/customers/{id}/ledger', [CustomerController::class, 'ledger'])
-            ->middleware('permission:CUSTOMER_LEDGER_VIEW,CUSTOMER_EDIT,customers');
+            ->middleware('permission:customer.read,CUSTOMER_LEDGER_VIEW,CUSTOMER_EDIT,customers');
         Route::post('/customers/{id}/payments', [CustomerController::class, 'recordPayment'])
-            ->middleware('permission:DUE_COLLECT,billing');
+            ->middleware('permission:payment.create,DUE_COLLECT,billing');
 
         // Supplier Management & Supplier Khata Routes
         Route::get('/suppliers', [SupplierController::class, 'index'])
-            ->middleware('permission:suppliers.view,suppliers');
+            ->middleware('permission:supplier.read,suppliers.view,suppliers');
         Route::post('/suppliers', [SupplierController::class, 'store'])
             ->middleware('permission:supplier.create,suppliers.create,suppliers');
         Route::get('/suppliers/{id}', [SupplierController::class, 'show'])
-            ->middleware('permission:suppliers.view,suppliers');
+            ->middleware('permission:supplier.read,suppliers.view,suppliers');
         Route::put('/suppliers/{id}', [SupplierController::class, 'update'])
             ->middleware('permission:supplier.update,suppliers.update,suppliers.edit,suppliers');
         Route::patch('/suppliers/{id}/status', [SupplierController::class, 'setStatus'])
             ->middleware('permission:supplier.update,suppliers.update,suppliers');
         Route::delete('/suppliers/{id}', [SupplierController::class, 'destroy'])
-            ->middleware('permission:suppliers.delete,suppliers');
+            ->middleware('permission:supplier.delete,suppliers.delete,suppliers');
         Route::get('/suppliers/{id}/ledger', [SupplierController::class, 'ledger'])
-            ->middleware('permission:supplier.ledger.view,supplier.read,suppliers.read,suppliers');
+            ->middleware('permission:supplier.read,supplier.ledger.view,suppliers.read,suppliers');
         Route::get('/suppliers/{id}/outstanding-bills', [SupplierController::class, 'outstandingBills'])
-            ->middleware('permission:supplier.payment,suppliers,purchase.view,purchase');
+            ->middleware('permission:supplier.read,supplier.payment,suppliers,purchase.view,purchase');
         Route::post('/suppliers/{id}/payments', [SupplierController::class, 'recordPayment'])
             ->middleware('permission:supplier.payment,suppliers,purchase.pay,purchase.create,purchase.approve,purchase.manage,purchase');
         Route::get('/supplier-refunds', [SupplierRefundController::class, 'index'])
-            ->middleware('permission:supplier.ledger.view,supplier.read,suppliers.read,suppliers');
+            ->middleware('permission:supplier.read,supplier.ledger.view,suppliers.read,suppliers');
         Route::post('/supplier-refunds', [SupplierRefundController::class, 'store'])
             ->middleware('permission:supplier.payment,suppliers,purchase.pay,purchase.create,purchase.approve,purchase.manage,purchase');
 
         // Purchase Bills & Procurement Routes
         Route::get('/purchases', [PurchaseController::class, 'index'])
-            ->middleware('permission:purchase.view,purchase');
+            ->middleware('permission:purchase.read,purchase.view,purchase');
         Route::post('/purchases', [PurchaseController::class, 'store'])
             ->middleware('permission:purchase.create,purchase');
         Route::get('/purchases/{id}', [PurchaseController::class, 'show'])
-            ->middleware('permission:purchase.view,purchase');
+            ->middleware('permission:purchase.read,purchase.view,purchase');
         Route::post('/purchases/{id}/approve', [PurchaseController::class, 'approve'])
             ->middleware('permission:purchase.approve');
 
         // Billing, Point of Sale (POS) & Invoicing Routes
         Route::get('/invoices', [InvoiceController::class, 'index'])
-            ->middleware('permission:sales.view,sales,billing');
+            ->middleware('permission:sales.read,sales.view,sales,billing');
         Route::post('/invoices', [InvoiceController::class, 'store'])
-            ->middleware('permission:sales,billing');
+            ->middleware('permission:sales.create,sales,billing');
         Route::get('/invoices/{id}', [InvoiceController::class, 'show'])
-            ->middleware('permission:sales.view,sales,billing');
+            ->middleware('permission:sales.read,sales.view,sales,billing');
         Route::post('/invoices/{id}/settle', [InvoiceController::class, 'settle'])
-            ->middleware('permission:DUE_COLLECT,billing');
+            ->middleware('permission:payment.create,DUE_COLLECT,billing');
         Route::post('/invoices/{id}/cancel', [InvoiceController::class, 'cancel'])
-            ->middleware('permission:sales.cancel,sales');
+            ->middleware('permission:sales.delete,sales.cancel,sales');
         Route::patch('/invoices/{id}/due-date', [InvoiceController::class, 'updateDueDate'])
-            ->middleware('permission:sales.edit,sales');
+            ->middleware('permission:sales.update,sales.edit,sales');
 
         // Storage Management (Godowns, Racks, Shelves) Routes
         Route::get('/storage/locations', [StorageController::class, 'index'])
-            ->middleware('permission:godown.view,godown.read,storage,rack.read');
+            ->middleware('permission:godown.read,godown.view,storage,rack.read');
         Route::post('/storage/locations', [StorageController::class, 'store'])
             ->middleware('permission:godown.create,storage.create');
         Route::post('/storage/racks/batch', [StorageController::class, 'batchCreateRacks'])
@@ -181,32 +181,32 @@ Route::prefix('v1')->group(function () {
         Route::get('/storage/locations/{id}', [StorageController::class, 'show'])
             ->middleware('permission:godown.view,godown.read,storage,rack.read');
         Route::put('/storage/locations/{id}', [StorageController::class, 'update'])
-            ->middleware('permission:rack.update,rack.manage,godown.edit,godown.update,godown.manage,storage.edit');
+            ->middleware('permission:godown.update,rack.update,rack.manage,godown.edit,godown.manage,storage.edit');
         Route::patch('/storage/locations/{id}/status', [StorageController::class, 'updateStatus'])
-            ->middleware('permission:rack.delete,godown.delete,godown.manage');
+            ->middleware('permission:godown.delete,rack.delete,godown.manage');
 
         // Inventory, Stock Balances & Batch Movement Routes
         Route::get('/inventory/stock', [InventoryController::class, 'stock'])
-            ->middleware('permission:inventory.view,inventory,products,billing');
+            ->middleware('permission:inventory.read,inventory.view,inventory,products,billing');
         Route::post('/inventory/movements', [InventoryController::class, 'recordMovement'])
-            ->middleware('permission:inventory.adjust,inventory.opening_stock');
+            ->middleware('permission:inventory.adjust,inventory.transfer,stock_movement.create,inventory.opening_stock');
         Route::get('/inventory/movements', [InventoryController::class, 'movements'])
-            ->middleware('permission:inventory.view,inventory');
+            ->middleware('permission:stock_movement.read,inventory.read,inventory.view,inventory');
         Route::get('/inventory/batches', [InventoryController::class, 'batches'])
-            ->middleware('permission:inventory.view,inventory');
+            ->middleware('permission:inventory.read,inventory.view,inventory');
         Route::post('/inventory/batches', [InventoryController::class, 'storeBatch'])
-            ->middleware('permission:inventory.adjust');
+            ->middleware('permission:inventory.update,inventory.adjust');
         Route::get('/inventory/batch-movements', [InventoryController::class, 'batchMovements'])
-            ->middleware('permission:inventory.view,inventory');
+            ->middleware('permission:stock_movement.read,inventory.read,inventory.view,inventory');
         Route::post('/inventory/batch-movements', [InventoryController::class, 'recordBatchMovement'])
-            ->middleware('permission:inventory.adjust');
+            ->middleware('permission:inventory.transfer,inventory.adjust,stock_movement.create');
 
         // Employees, Roles & Permissions Routes
         Route::get('/employees', [EmployeeController::class, 'index'])
-            ->middleware('permission:staff.view,staff');
+            ->middleware('permission:employee.read,staff.view,staff');
         Route::get('/employees/by-uid/{uid}', [EmployeeController::class, 'showByUid']);
         Route::post('/employees', [EmployeeController::class, 'store'])
-            ->middleware('permission:staff.manage,staff');
+            ->middleware('permission:employee.create,staff.manage,staff');
 
         // Keep the fixed activity paths ahead of the /employees/{id} route.
         Route::get('/employees/activities', [EmployeeActivityController::class, 'index'])
@@ -217,47 +217,47 @@ Route::prefix('v1')->group(function () {
             ->middleware('permission:employee_activity');
 
         Route::get('/employees/{id}', [EmployeeController::class, 'show'])
-            ->middleware('permission:staff.view,staff');
+            ->middleware('permission:employee.read,staff.view,staff');
         Route::put('/employees/{id}', [EmployeeController::class, 'update'])
-            ->middleware('permission:staff.manage,staff');
+            ->middleware('permission:employee.update,staff.manage,staff');
         Route::patch('/employees/{id}/status', [EmployeeController::class, 'updateStatus'])
-            ->middleware('permission:staff.manage,staff');
+            ->middleware('permission:employee.update,staff.manage,staff');
         Route::get('/roles', [EmployeeController::class, 'roles']);
         Route::get('/permissions', [EmployeeController::class, 'permissions']);
 
         // Staff Attendance & Biometric Face Verification Routes
         Route::get('/attendance', [AttendanceController::class, 'index'])
-            ->middleware('permission:ATTENDANCE_VIEW,ATTENDANCE_MANAGE,ATTENDANCE_APPROVE,attendance');
+            ->middleware('permission:attendance.view,attendance.manage,attendance.approve,ATTENDANCE_VIEW,ATTENDANCE_MANAGE,ATTENDANCE_APPROVE,attendance');
         Route::get('/attendance/events', [AttendanceController::class, 'events'])
-            ->middleware('permission:ATTENDANCE_VIEW,ATTENDANCE_MANAGE,ATTENDANCE_APPROVE,attendance');
+            ->middleware('permission:attendance.view,attendance.manage,attendance.approve,ATTENDANCE_VIEW,ATTENDANCE_MANAGE,ATTENDANCE_APPROVE,attendance');
         Route::post('/attendance/punch', [AttendanceController::class, 'punch'])
-            ->middleware('permission:ATTENDANCE_MANAGE');
+            ->middleware('permission:attendance.manage,ATTENDANCE_MANAGE');
         Route::post('/attendance/manual', [AttendanceController::class, 'manual'])
-            ->middleware('permission:ATTENDANCE_MANAGE');
+            ->middleware('permission:attendance.manage,ATTENDANCE_MANAGE');
         Route::post('/attendance/{id}/approve', [AttendanceController::class, 'approve'])
-            ->middleware('permission:ATTENDANCE_APPROVE');
+            ->middleware('permission:attendance.approve,ATTENDANCE_APPROVE');
 
         // Staff Salary, Payroll & Khata Routes
         Route::get('/payroll/profiles', [PayrollController::class, 'profiles'])
-            ->middleware('permission:SALARY_VIEW,SALARY_MANAGE,SALARY_APPROVE,SALARY_PAY,SALARY_REPORT,staff_salary');
+            ->middleware('permission:salary.view,salary.manage,salary.approve,salary.pay,salary.report,SALARY_VIEW,SALARY_MANAGE,SALARY_APPROVE,SALARY_PAY,SALARY_REPORT,staff_salary');
         Route::post('/payroll/profiles', [PayrollController::class, 'storeProfile'])
-            ->middleware('permission:SALARY_MANAGE,staff_salary.manage');
+            ->middleware('permission:salary.manage,SALARY_MANAGE,staff_salary.manage');
         Route::get('/payroll/outlet-allocations', [EmployeeOutletAllocationController::class, 'index'])
-            ->middleware('permission:SALARY_VIEW,SALARY_MANAGE,SALARY_APPROVE,SALARY_PAY,SALARY_REPORT,staff_salary');
+            ->middleware('permission:salary.view,salary.manage,salary.approve,salary.pay,salary.report,SALARY_VIEW,SALARY_MANAGE,SALARY_APPROVE,SALARY_PAY,SALARY_REPORT,staff_salary');
         Route::post('/payroll/outlet-allocations', [EmployeeOutletAllocationController::class, 'store'])
-            ->middleware('permission:SALARY_MANAGE,staff_salary.manage');
+            ->middleware('permission:salary.manage,SALARY_MANAGE,staff_salary.manage');
         Route::get('/payroll/periods', [PayrollController::class, 'periods'])
-            ->middleware('permission:SALARY_VIEW,SALARY_MANAGE,SALARY_APPROVE,SALARY_PAY,SALARY_REPORT,staff_salary');
+            ->middleware('permission:salary.view,salary.manage,salary.approve,salary.pay,salary.report,SALARY_VIEW,SALARY_MANAGE,SALARY_APPROVE,SALARY_PAY,SALARY_REPORT,staff_salary');
         Route::post('/payroll/disburse', [PayrollController::class, 'disburse'])
-            ->middleware('permission:SALARY_APPROVE,SALARY_PAY,staff_salary.approve,staff_salary.pay');
+            ->middleware('permission:salary.approve,salary.pay,SALARY_APPROVE,SALARY_PAY,staff_salary.approve,staff_salary.pay');
         Route::get('/payroll/khata', [PayrollController::class, 'khata'])
-            ->middleware('permission:SALARY_VIEW,SALARY_MANAGE,SALARY_APPROVE,SALARY_PAY,SALARY_REPORT,STAFF_KHATA_CHARGE,staff_salary');
+            ->middleware('permission:salary.view,salary.manage,salary.approve,salary.pay,salary.report,staff_khata_charge,SALARY_VIEW,SALARY_MANAGE,SALARY_APPROVE,SALARY_PAY,SALARY_REPORT,STAFF_KHATA_CHARGE,staff_salary');
         Route::post('/payroll/advance', [PayrollController::class, 'recordAdvance'])
-            ->middleware('permission:SALARY_MANAGE,staff_salary.manage');
+            ->middleware('permission:salary.manage,SALARY_MANAGE,staff_salary.manage');
         Route::post('/payroll/salary-payment', [PayrollController::class, 'recordSalaryPayment'])
-            ->middleware('permission:SALARY_PAY,staff_salary.pay');
+            ->middleware('permission:salary.pay,SALARY_PAY,staff_salary.pay');
         Route::post('/payroll/advance-adjustment', [PayrollController::class, 'adjustAdvance'])
-            ->middleware('permission:SALARY_APPROVE,staff_salary.approve');
+            ->middleware('permission:salary.approve,SALARY_APPROVE,staff_salary.approve');
 
         // Expense Management Routes
         Route::get('/expenses', [ExpenseController::class, 'index'])
@@ -287,19 +287,19 @@ Route::prefix('v1')->group(function () {
 
         // Returns & Credit / Debit Notes Routes
         Route::post('/returns', [ReturnController::class, 'store'])
-            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+            ->middleware('permission:sales.return,sales,sales.view,billing,purchase,purchase.view,inventory');
         Route::get('/returns', [ReturnController::class, 'index'])
-            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+            ->middleware('permission:sales.read,sales,sales.view,billing,purchase,purchase.view,inventory');
         Route::get('/returns/{id}', [ReturnController::class, 'show'])
-            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+            ->middleware('permission:sales.read,sales,sales.view,billing,purchase,purchase.view,inventory');
         Route::put('/returns/{id}', [ReturnController::class, 'update'])
-            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+            ->middleware('permission:sales.return,sales,sales.view,billing,purchase,purchase.view,inventory');
         Route::post('/returns/{id}/cancel', [ReturnController::class, 'cancel'])
-            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+            ->middleware('permission:sales.return,sales,sales.view,billing,purchase,purchase.view,inventory');
         Route::get('/returns/{id}/pdf', [ReturnController::class, 'pdf'])
-            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+            ->middleware('permission:sales.read,sales,sales.view,billing,purchase,purchase.view,inventory');
         Route::get('/bills/{id}/returnable', [ReturnController::class, 'returnableBill'])
-            ->middleware('permission:sales,sales.view,billing,purchase,purchase.view,inventory');
+            ->middleware('permission:sales.read,sales,sales.view,billing,purchase,purchase.view,inventory');
 
         // Return Reasons
         Route::get('/return-reasons', [ReturnReasonController::class, 'index']);
@@ -327,21 +327,21 @@ Route::prefix('v1')->group(function () {
     // Reports & Statutory Analytics Routes (Direct & Authenticated reporting)
     Route::middleware(['auth:sanctum', 'active'])->group(function () {
         Route::get('/reports/overview', [ReportController::class, 'overview'])
-            ->middleware('permission:reports.view,reports,sales,purchase,inventory,expenses');
+            ->middleware('permission:reports.read,reports.view,reports');
         Route::get('/reports/sales', [ReportController::class, 'sales'])
-            ->middleware('permission:reports.view,reports,sales.view,sales,billing');
+            ->middleware('permission:reports.read,reports.view,reports');
         Route::get('/reports/purchases', [ReportController::class, 'purchases'])
-            ->middleware('permission:reports.view,reports,purchase.view,purchase');
+            ->middleware('permission:reports.read,reports.view,reports');
         Route::get('/reports/inventory', [ReportController::class, 'inventory'])
-            ->middleware('permission:reports.view,reports,inventory.view,inventory');
+            ->middleware('permission:reports.read,reports.view,reports');
         Route::get('/reports/profit-loss', [ReportController::class, 'profitLoss'])
-            ->middleware('permission:reports.view,reports,expenses.view,expenses,sales.view,sales,purchase.view,purchase');
+            ->middleware('permission:reports.read,reports.view,reports');
         Route::get('/reports/returns', [ReportController::class, 'returnsSummary'])
-            ->middleware('permission:reports.view,reports,sales,purchase');
+            ->middleware('permission:reports.read,reports.view,reports');
         Route::get('/reports/tax', [ReportController::class, 'tax'])
-            ->middleware('permission:reports.view,reports,sales.view,sales,purchase.view,purchase');
+            ->middleware('permission:reports.read,reports.view,reports');
         Route::get('/reports/reconciliation', [ReportController::class, 'reconciliation'])
-            ->middleware('permission:reports.view,reports');
+            ->middleware('permission:reports.read,reports.view,reports');
     });
 
     // Authenticated Media Access

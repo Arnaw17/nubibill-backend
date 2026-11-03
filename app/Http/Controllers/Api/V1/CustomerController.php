@@ -226,8 +226,14 @@ class CustomerController extends Controller
             'openingBalancePaise' => ['nullable', 'integer'],
         ]);
 
-        $businessId = trim((string) ($request->input('business_id') ?? $request->input('businessId') ?? ''));
-        $outletId = $request->input('outlet_id') ?? $request->input('outletId');
+        $businessId = trim((string) ($request->input('business_id') ?? $request->input('businessId') ?? $request->header('X-Business-Id') ?? ''));
+        if (! $businessId && $user) {
+            $businessId = (string) ($user->defaultBusinessId() ?? '');
+        }
+        $outletId = $request->input('outlet_id') ?? $request->input('outletId') ?? $request->header('X-Outlet-Id');
+        if (strtoupper((string) $user->role) === 'STAFF' && empty($outletId)) {
+            $outletId = app(\App\Services\EmployeePermissionService::class)->defaultOutletFor($user, $businessId);
+        }
         $name = trim((string) ($request->input('name') ?? $request->input('customer_name') ?? ''));
         $phone = preg_replace('/\D/', '', (string) $request->input('phone'));
         $email = $request->filled('email') ? strtolower(trim((string) $request->input('email'))) : null;

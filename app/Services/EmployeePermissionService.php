@@ -60,8 +60,8 @@ class EmployeePermissionService
                 $matchedRoleIds[] = $roleId;
                 $permissions = [...$permissions, ...$this->stringList($fields['permissions'] ?? $fields['permissionIds'] ?? [])];
                 $roleName = strtolower(str_replace([' ', '-'], '_', (string) ($fields['roleName'] ?? $fields['name'] ?? '')));
-                if (in_array(strtolower($roleId), ['role_billing', 'billing'], true)
-                    || in_array($roleName, ['billing', 'billing_staff', 'role_billing'], true)) {
+                if (in_array(strtolower($roleId), ['role_billing', 'billing', 'role_billing_staff'], true)
+                    || in_array($roleName, ['billing', 'billing_staff', 'role_billing', 'role_billing_staff'], true)) {
                     $permissions[] = 'billing';
                 }
             }
@@ -121,6 +121,112 @@ class EmployeePermissionService
         }
 
         return false;
+    }
+
+    public function isBillingStaff(User $user): bool
+    {
+        if (strtoupper((string) $user->role) !== 'STAFF') {
+            return false;
+        }
+
+        $employee = $this->employeeFor($user);
+        if ($employee === null) {
+            return false;
+        }
+
+        $roleIds = $this->stringList(
+            $employee['fields']['roleIds'] ?? (isset($employee['fields']['roleId']) ? [$employee['fields']['roleId']] : [])
+        );
+        $roleIdsLower = array_map('strtolower', $roleIds);
+        foreach ($roleIdsLower as $id) {
+            if (in_array($id, ['role_billing_staff', 'billing_staff', 'role_billing', 'billing'], true)) {
+                return true;
+            }
+        }
+
+        $roles = DB::table('roles')->where('is_deleted', 0)->get();
+        foreach ($roles as $row) {
+            $payload = json_decode((string) $row->payload, true) ?: [];
+            $fields = $payload['fields'] ?? $payload;
+            $roleId = strtolower((string) ($fields['roleId'] ?? $row->id));
+            $roleName = strtolower(str_replace([' ', '-'], '_', (string) ($fields['roleName'] ?? $fields['name'] ?? '')));
+            if (in_array($roleId, $roleIdsLower, true)) {
+                if (in_array($roleName, ['billing_staff', 'billing', 'role_billing_staff', 'role_billing'], true)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    public function isAccountant(User $user): bool
+    {
+        if (strtoupper((string) $user->role) !== 'STAFF') {
+            return false;
+        }
+
+        $employee = $this->employeeFor($user);
+        if ($employee === null) {
+            return false;
+        }
+
+        $roleIds = $this->stringList(
+            $employee['fields']['roleIds'] ?? (isset($employee['fields']['roleId']) ? [$employee['fields']['roleId']] : [])
+        );
+        $roleIdsLower = array_map('strtolower', $roleIds);
+        foreach ($roleIdsLower as $id) {
+            if (in_array($id, ['role_accountant', 'accountant'], true)) {
+                return true;
+            }
+        }
+
+        $roles = DB::table('roles')->where('is_deleted', 0)->get();
+        foreach ($roles as $row) {
+            $payload = json_decode((string) $row->payload, true) ?: [];
+            $fields = $payload['fields'] ?? $payload;
+            $roleId = strtolower((string) ($fields['roleId'] ?? $row->id));
+            $roleName = strtolower(str_replace([' ', '-'], '_', (string) ($fields['roleName'] ?? $fields['name'] ?? '')));
+            if (in_array($roleId, $roleIdsLower, true)) {
+                if (in_array($roleName, ['accountant', 'role_accountant'], true)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    public function defaultOutletFor(User $user, ?string $businessId = null): ?string
+    {
+        $employee = $this->employeeFor($user);
+        if ($employee === null) {
+            return null;
+        }
+
+        $outletIds = $this->canonicalOutletIds(
+            $this->stringList($employee['fields']['outletIds'] ?? $employee['fields']['outletId'] ?? [])
+        );
+
+        if ($businessId !== null) {
+            $businessId = $this->canonicalBusinessIds([$businessId])[0] ?? $businessId;
+            $matchingOutlets = [];
+            foreach (DB::table('outlets')->where('is_deleted', 0)->get() as $row) {
+                $payload = json_decode((string) $row->payload, true) ?: [];
+                $fields = $payload['fields'] ?? $payload;
+                $oBus = (string) ($fields['businessId'] ?? $row->business_id ?? '');
+                $oBus = $this->canonicalBusinessIds([$oBus])[0] ?? $oBus;
+                $oKey = (string) ($fields['outletId'] ?? $row->outlet_id ?? $row->id);
+                if ($oBus === $businessId && in_array($oKey, $outletIds, true)) {
+                    $matchingOutlets[] = $oKey;
+                }
+            }
+            if (! empty($matchingOutlets)) {
+                return $matchingOutlets[0];
+            }
+        }
+
+        return $outletIds[0] ?? null;
     }
 
     public function isWithinAssignedScope(User $user, ?string $businessId, ?string $outletId, bool $resourceScoped = false): bool

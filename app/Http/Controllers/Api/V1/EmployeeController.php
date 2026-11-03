@@ -134,6 +134,7 @@ class EmployeeController extends Controller
                 'status' => (string) ($row->status ?? $fields['status'] ?? 'active'),
                 'roleIds' => $fields['roleIds'] ?? (isset($fields['roleId']) ? [$fields['roleId']] : []),
                 'permissionIds' => $fields['permissionIds'] ?? [],
+                'revoked_permission_ids' => $fields['revoked_permission_ids'] ?? $fields['revokedPermissionIds'] ?? [],
                 'businessIds' => $bIds,
                 'outletIds' => $oIds,
                 'employeeCode' => $fields['employeeCode'] ?? null,
@@ -210,6 +211,7 @@ class EmployeeController extends Controller
             'status' => (string) ($row->status ?? $fields['status'] ?? 'active'),
             'roleIds' => $fields['roleIds'] ?? [],
             'permissionIds' => $fields['permissionIds'] ?? [],
+            'revoked_permission_ids' => $fields['revoked_permission_ids'] ?? $fields['revokedPermissionIds'] ?? [],
             'businessIds' => $bIds,
             'outletIds' => $oIds,
             'employeeCode' => $fields['employeeCode'] ?? null,
@@ -309,7 +311,7 @@ class EmployeeController extends Controller
             }
             $candidatePermissions = array_map(
                 fn (string $permission): string => $this->normalizePermissionIdentifier($permission),
-                [...$permissionIds, ...$revokedPermissionIds],
+                [...$permissionIds, ...$revokedPermissionIds, ...$this->permissionsForRoles($roleIds)],
             );
             if ($creatorPermissions === null || array_diff(
                 array_unique(array_map(fn (string $permission): string => $this->normalizePermissionIdentifier($permission), $candidatePermissions)),
@@ -466,7 +468,7 @@ class EmployeeController extends Controller
             }
         }
         $actor = $request->user();
-        if ((string) ($fields['ownerUid'] ?? '') !== (string) $actor->id) {
+        if (! $this->canManageEmployee($actor, $fields)) {
             return ApiResponse::error('You are not authorized to update this employee.', 403, null, 'FORBIDDEN');
         }
 
@@ -481,6 +483,7 @@ class EmployeeController extends Controller
         $candidateRoleIds = is_array($candidateRoleIds) ? $candidateRoleIds : [$candidateRoleIds];
         $storedRoleIds = is_array($storedRoleIds) ? $storedRoleIds : [$storedRoleIds];
         $candidatePermissionIds = is_array($candidatePermissionIds) ? $candidatePermissionIds : [];
+        $candidateRevokedPermissionIds = is_array($candidateRevokedPermissionIds) ? $candidateRevokedPermissionIds : [];
         $roleAssignmentsChanged = array_values($candidateRoleIds) !== array_values($storedRoleIds);
         if ($roleAssignmentsChanged) {
             // Older Flutter forms copied role permissions into permissionIds.
@@ -492,10 +495,30 @@ class EmployeeController extends Controller
                 fn (string $permission): bool => ! in_array($this->normalizePermissionIdentifier($permission), $inheritedPermissions, true),
             ));
         }
+        if (strtoupper((string) $actor->role) === 'STAFF') {
+            if (! $this->staffMayAssignRoles($candidateRoleIds)) {
+                return ApiResponse::error('One or more selected roles are reserved for owners or administrators.', 403, null, 'FORBIDDEN');
+            }
+
+            $actorPermissions = app(EmployeePermissionService::class)->permissionsFor($actor);
+            $candidatePermissions = array_map(
+                fn (string $permission): string => $this->normalizePermissionIdentifier($permission),
+                [...$candidatePermissionIds, ...$candidateRevokedPermissionIds, ...$this->permissionsForRoles($candidateRoleIds)],
+            );
+            if ($actorPermissions === null || array_diff(
+                array_unique($candidatePermissions),
+                array_map(
+                    fn (string $permission): string => $this->normalizePermissionIdentifier($permission),
+                    $actorPermissions,
+                ),
+            ) !== []) {
+                return ApiResponse::error('You cannot assign permissions you do not have.', 403, null, 'FORBIDDEN');
+            }
+        }
         $candidateBusinessIds = $validated['businessIds'] ?? ($fields['businessIds'] ?? []);
         $candidateOutletIds = $validated['outletIds'] ?? ($fields['outletIds'] ?? []);
         if (! $this->hasActiveAssignments($candidateRoleIds, $candidatePermissionIds, $candidateRevokedPermissionIds)
-            || ! $this->ownsBusinesses($request->user(), $candidateBusinessIds)
+            || ! $this->canAssignEmployeeScope($request->user(), $candidateBusinessIds, $candidateOutletIds)
             || ! $this->outletsBelongToBusinesses($candidateOutletIds, $candidateBusinessIds)) {
             return ApiResponse::error('The selected roles, permissions, businesses, or outlets are unavailable.', 422, null, 'INVALID_ASSIGNMENT');
         }
@@ -735,6 +758,57 @@ class EmployeeController extends Controller
         }
 
         return array_diff($businessIds, $owned) === [];
+    }
+
+    /** @param array<string, mixed> $fields */
+    private function canManageEmployee(User $actor, array $fields): bool
+    {
+        if ($actor->isAdmin() || (string) ($fields['ownerUid'] ?? '') === (string) $actor->id) {
+            return true;
+        }
+
+        if (strtoupper((string) $actor->role) !== 'STAFF'
+            || (string) ($fields['uid'] ?? '') === (string) $actor->id
+            || ! app(EmployeePermissionService::class)->isAuthorized($actor, ['employee.update', 'staff.manage'])) {
+            return false;
+        }
+
+        $manager = $this->employeeForUser($actor);
+        $managerFields = $manager['fields'] ?? [];
+        $sameOwner = (string) ($fields['ownerUid'] ?? '') !== ''
+            && (string) ($fields['ownerUid'] ?? '') === (string) ($managerFields['ownerUid'] ?? '');
+        $businesses = array_intersect(
+            $this->asStringList($fields['businessIds'] ?? []),
+            $this->asStringList($managerFields['businessIds'] ?? []),
+        );
+        $outlets = array_intersect(
+            $this->asStringList($fields['outletIds'] ?? []),
+            $this->asStringList($managerFields['outletIds'] ?? []),
+        );
+
+        return $manager !== null && $sameOwner && $businesses !== [] && $outlets !== [];
+    }
+
+    /** @param list<string> $businessIds @param list<string> $outletIds */
+    private function canAssignEmployeeScope(User $actor, array $businessIds, array $outletIds): bool
+    {
+        if ($actor->isAdmin() || $this->ownsBusinesses($actor, $businessIds)) {
+            return true;
+        }
+
+        if (strtoupper((string) $actor->role) !== 'STAFF') {
+            return false;
+        }
+
+        $manager = $this->employeeForUser($actor);
+        if ($manager === null) {
+            return false;
+        }
+
+        $managerFields = $manager['fields'];
+
+        return array_diff($businessIds, $this->asStringList($managerFields['businessIds'] ?? [])) === []
+            && array_diff($outletIds, $this->asStringList($managerFields['outletIds'] ?? [])) === [];
     }
 
     /** @param list<string> $roleIds @param list<string> $permissionIds */

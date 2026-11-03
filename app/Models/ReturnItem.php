@@ -17,7 +17,30 @@ class ReturnItem extends Model
 
     protected $keyType = 'string';
 
-    protected $guarded = [];
+    protected $fillable = [
+        'id',
+        'return_id',
+        'original_bill_item_id',
+        'product_id',
+        'variant_id',
+        'product_name',
+        'hsn_code',
+        'unit',
+        'qty_returned',
+        'unit_price',
+        'discount_amount',
+        'taxable_amount',
+        'tax_rate',
+        'cgst_amount',
+        'sgst_amount',
+        'igst_amount',
+        'tax_amount',
+        'line_total',
+        'condition',
+        'restock',
+        'batch_number',
+        'expiry_date',
+    ];
 
     protected $casts = [
         'qty_returned' => 'decimal:3',
