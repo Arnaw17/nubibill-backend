@@ -120,10 +120,14 @@ class ReportController extends Controller
         $products = DB::table('products')->where('business_id', $businessId)->where('is_deleted', 0)->get();
         $totalSkusCount = $products->count();
         $lowStockCount = 0;
+        $stockByProduct = $this->stockByProduct($businessId, $outletId);
         foreach ($products as $pr) {
             $p = json_decode($pr->payload ?? '{}', true) ?: [];
             $fields = $p['fields'] ?? [];
-            $stock = (int) ($fields['currentStock'] ?? $fields['stockQuantity'] ?? $pr->current_stock ?? 0);
+            $productId = (string) ($fields['productId'] ?? $pr->id);
+            $stock = $stockByProduct !== null
+                ? ($stockByProduct[$productId] ?? 0)
+                : (int) ($fields['currentStock'] ?? $fields['stockQuantity'] ?? $pr->current_stock ?? 0);
             $reorder = (int) ($fields['reorderLevel'] ?? $pr->reorder_level ?? 5);
             if ($stock <= $reorder) {
                 $lowStockCount++;
@@ -368,6 +372,7 @@ class ReportController extends Controller
     public function inventory(Request $request): JsonResponse
     {
         $businessId = $request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id');
+        $outletId = $request->query('outlet_id') ?? $request->query('outletId') ?? $request->header('X-Outlet-Id');
 
         $user = $request->user();
         if (! $businessId) {
@@ -387,11 +392,19 @@ class ReportController extends Controller
         $outOfStockItems = [];
         $lowStockItems = [];
 
+        // Stock balances are the authoritative source used by the Inventory
+        // screen. Product rows may retain an older denormalized stock value.
+        $stockByProduct = $this->stockByProduct($businessId, $outletId);
+        $hasStockBalances = $stockByProduct !== null;
+
         foreach ($products as $pr) {
             $p = json_decode($pr->payload ?? '{}', true) ?: [];
             $fields = $p['fields'] ?? [];
 
-            $stock = (int) ($fields['currentStock'] ?? $fields['stockQuantity'] ?? $pr->current_stock ?? $pr->stock_quantity ?? 0);
+            $productId = (string) ($fields['productId'] ?? $pr->id);
+            $stock = $hasStockBalances
+                ? ($stockByProduct[$productId] ?? 0)
+                : (int) ($fields['currentStock'] ?? $fields['stockQuantity'] ?? $pr->current_stock ?? $pr->stock_quantity ?? 0);
             $reorder = (int) ($fields['reorderLevel'] ?? $pr->reorder_level ?? 5);
             $cost = (float) ($fields['costPrice'] ?? $fields['purchasePrice'] ?? $pr->cost_price ?? $pr->purchase_price ?? 0);
             $totalValuationRupees += ($stock * $cost);
@@ -422,6 +435,68 @@ class ReportController extends Controller
             'outOfStockItems' => array_slice($outOfStockItems, 0, 20),
             'lowStockItems' => array_slice($lowStockItems, 0, 20),
         ], 'Inventory valuation report generated.');
+    }
+
+    /**
+     * Return whole-unit stock totals keyed by product ID.
+     *
+     * A null result means the stock balance table is unavailable, allowing
+     * callers to retain their legacy product-row fallback.
+     */
+    private function stockByProduct(string $businessId, ?string $outletId): ?array
+    {
+        if (! DB::getSchemaBuilder()->hasTable('stock_balances')) {
+            return null;
+        }
+
+        $variantToProduct = [];
+        if (DB::getSchemaBuilder()->hasTable('product_variants')) {
+            $variantRows = DB::table('product_variants')
+                ->where('business_id', $businessId)
+                ->where('is_deleted', 0)
+                ->get(['id', 'payload']);
+            foreach ($variantRows as $variantRow) {
+                $variantPayload = json_decode($variantRow->payload ?? '{}', true) ?: [];
+                $variantFields = $variantPayload['fields'] ?? [];
+                $variantId = (string) ($variantFields['variantId'] ?? $variantRow->id);
+                $variantProductId = (string) ($variantFields['productId'] ?? '');
+                if ($variantId !== '' && $variantProductId !== '') {
+                    $variantToProduct[$variantId] = $variantProductId;
+                }
+            }
+        }
+
+        $balanceQuery = DB::table('stock_balances')
+            ->where('business_id', $businessId)
+            ->where('is_deleted', 0);
+        if ($outletId && $outletId !== 'ALL') {
+            $balanceQuery->where('outlet_id', $outletId);
+        }
+
+        $stockByProduct = [];
+        foreach ($balanceQuery->get() as $balanceRow) {
+            $balancePayload = json_decode($balanceRow->payload ?? '{}', true) ?: [];
+            $balanceFields = $balancePayload['fields'] ?? $balancePayload;
+            $variantId = (string) ($balanceFields['variantId'] ?? $balanceRow->variant_id ?? '');
+            $productId = (string) ($balanceFields['productId'] ?? $balanceRow->product_id ?? '');
+            $productId = $productId !== ''
+                ? $productId
+                : ($variantToProduct[$variantId] ?? $variantId);
+            if ($productId === '') {
+                continue;
+            }
+
+            $rawQuantity = (float) ($balanceFields['quantityOnHand']
+                ?? $balanceFields['currentStock']
+                ?? $balanceRow->quantity_on_hand
+                ?? 0);
+            $quantity = $rawQuantity >= 1000
+                ? (int) floor($rawQuantity / 1000)
+                : (int) round($rawQuantity);
+            $stockByProduct[$productId] = ($stockByProduct[$productId] ?? 0) + $quantity;
+        }
+
+        return $stockByProduct;
     }
 
     /**
