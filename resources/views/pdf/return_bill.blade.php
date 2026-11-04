@@ -200,11 +200,11 @@
                 <th style="width: 32%;">Item Description</th>
                 <th style="width: 10%;" class="text-center">HSN</th>
                 <th style="width: 8%;" class="text-right">Qty</th>
-                <th style="width: 10%;" class="text-right">Rate (₹)</th>
-                <th style="width: 10%;" class="text-right">Taxable (₹)</th>
+                <th style="width: 10%;" class="text-right">Rate (Rs.)</th>
+                <th style="width: 10%;" class="text-right">Taxable (Rs.)</th>
                 <th style="width: 8%;" class="text-center">Tax %</th>
-                <th style="width: 7%;" class="text-right">Tax (₹)</th>
-                <th style="width: 10%;" class="text-right">Total (₹)</th>
+                <th style="width: 7%;" class="text-right">Tax (Rs.)</th>
+                <th style="width: 10%;" class="text-right">Total (Rs.)</th>
             </tr>
         </thead>
         <tbody>
@@ -212,14 +212,14 @@
                 <tr>
                     <td class="text-center">{{ $idx + 1 }}</td>
                     <td>
-                        <div class="text-bold">{{ $item->product_name }}</div>
+                        <div class="text-bold">{{ $item->product_name ?: ($item->hsn_code ? 'Item (HSN: ' . $item->hsn_code . ')' : 'Item') }}</div>
                         <div style="font-size: 8px; color: #64748b;">
                             Condition: <strong>{{ ucfirst($item->condition) }}</strong> 
                             {{ $item->restock ? '(Restocked)' : '(Not restocked)' }}
                         </div>
                     </td>
                     <td class="text-center">{{ $item->hsn_code ?? '-' }}</td>
-                    <td class="text-right">{{ number_format($item->qty_returned, 3) }} {{ $item->unit ?? '' }}</td>
+                    <td class="text-right">{{ (float)$item->qty_returned == (int)$item->qty_returned ? (int)$item->qty_returned : rtrim(rtrim(number_format($item->qty_returned, 3), '0'), '.') }} {{ $item->unit ?? '' }}</td>
                     <td class="text-right">{{ number_format($item->unit_price, 2) }}</td>
                     <td class="text-right">{{ number_format($item->taxable_amount, 2) }}</td>
                     <td class="text-center">{{ number_format($item->tax_rate, 1) }}%</td>
@@ -244,7 +244,7 @@
                 <table style="width: 95%; border: 1px solid #e2e8f0; border-collapse: collapse; font-size: 9px;">
                     <tr style="background-color: #f8fafc;">
                         <th style="padding: 4px; border: 1px solid #e2e8f0; text-align: left;">Tax Component</th>
-                        <th style="padding: 4px; border: 1px solid #e2e8f0; text-align: right;">Amount (₹)</th>
+                        <th style="padding: 4px; border: 1px solid #e2e8f0; text-align: right;">Amount (Rs.)</th>
                     </tr>
                     @if($return->cgst_total > 0 || $return->sgst_total > 0)
                         <tr>
@@ -264,7 +264,7 @@
                     @endif
                     <tr style="font-weight: bold; background-color: #f1f5f9;">
                         <td style="padding: 4px; border: 1px solid #e2e8f0;">Total GST Amount</td>
-                        <td style="padding: 4px; border: 1px solid #e2e8f0; text-align: right;">₹ {{ number_format($return->tax_total, 2) }}</td>
+                        <td style="padding: 4px; border: 1px solid #e2e8f0; text-align: right;">Rs. {{ number_format($return->tax_total, 2) }}</td>
                     </tr>
                 </table>
             </td>
@@ -272,15 +272,15 @@
                 <table style="width: 100%;">
                     <tr>
                         <td style="padding: 2px 0;">Subtotal (Taxable Value):</td>
-                        <td class="text-right" style="padding: 2px 0;">₹ {{ number_format($return->subtotal, 2) }}</td>
+                        <td class="text-right" style="padding: 2px 0;">Rs. {{ number_format($return->subtotal, 2) }}</td>
                     </tr>
                     <tr>
                         <td style="padding: 2px 0;">Total Tax (GST):</td>
-                        <td class="text-right" style="padding: 2px 0;">₹ {{ number_format($return->tax_total, 2) }}</td>
+                        <td class="text-right" style="padding: 2px 0;">Rs. {{ number_format($return->tax_total, 2) }}</td>
                     </tr>
                 </table>
                 <div class="grand-total-box">
-                    Grand Total: ₹ {{ number_format($return->grand_total, 2) }}
+                    Grand Total: Rs. {{ number_format($return->grand_total, 2) }}
                 </div>
             </td>
         </tr>

@@ -55,6 +55,8 @@ Route::prefix('v1')->group(function () {
         Route::post('/email-otp/resend', [AuthController::class, 'resendOtp'])->middleware('throttle:30,1');
         Route::post('/email-otp/verify', [AuthController::class, 'verifyOtp'])->middleware('throttle:60,1');
         Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:60,1')->name('login');
+        Route::post('/forgot-password/send-otp', [AuthController::class, 'sendForgotPasswordOtp'])->middleware('throttle:10,1');
+        Route::post('/forgot-password/reset', [AuthController::class, 'resetPasswordWithOtp'])->middleware('throttle:10,1');
 
         // Authenticated Session Routes
         Route::middleware(['auth:sanctum', 'active'])->group(function () {
@@ -148,11 +150,11 @@ Route::prefix('v1')->group(function () {
 
         // Purchase Bills & Procurement Routes
         Route::get('/purchases', [PurchaseController::class, 'index'])
-            ->middleware('permission:purchase.read,purchase.view,purchase');
+            ->middleware('permission:purchase.read,purchase.view,purchase,reports,reports.read,reports.view');
         Route::post('/purchases', [PurchaseController::class, 'store'])
             ->middleware('permission:purchase.create,purchase');
         Route::get('/purchases/{id}', [PurchaseController::class, 'show'])
-            ->middleware('permission:purchase.read,purchase.view,purchase');
+            ->middleware('permission:purchase.read,purchase.view,purchase,reports,reports.read,reports.view');
         Route::post('/purchases/{id}/approve', [PurchaseController::class, 'approve'])
             ->middleware('permission:purchase.approve');
 
@@ -259,6 +261,7 @@ Route::prefix('v1')->group(function () {
             ->middleware('permission:salary.pay,SALARY_PAY,staff_salary.pay');
         Route::post('/payroll/advance-adjustment', [PayrollController::class, 'adjustAdvance'])
             ->middleware('permission:salary.approve,SALARY_APPROVE,staff_salary.approve');
+        Route::get('/payroll/employee-statement', [PayrollController::class, 'employeeStatement']);
 
         // Expense Management Routes
         Route::get('/expenses', [ExpenseController::class, 'index'])

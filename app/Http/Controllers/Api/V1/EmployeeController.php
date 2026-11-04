@@ -13,11 +13,19 @@ use Illuminate\Support\Str;
 
 class EmployeeController extends Controller
 {
+    private function decodeFields(array $fields): array
+    {
+        if (class_exists(SyncController::class)) {
+            return SyncController::decodeFields($fields);
+        }
+        return $fields;
+    }
+
     public function showByUid(Request $request, string $uid): JsonResponse
     {
         $row = DB::table('employees')->where('is_deleted', 0)->get()->first(function ($employeeRow) use ($uid, $request): bool {
             $payload = json_decode($employeeRow->payload, true) ?: [];
-            $fields = $payload['fields'] ?? $payload;
+            $fields = $this->decodeFields($payload['fields'] ?? $payload);
 
             return (string) ($fields['uid'] ?? '') === $uid
                 && ((string) $request->user()->id === $uid
@@ -29,7 +37,7 @@ class EmployeeController extends Controller
         }
 
         $payload = json_decode($row->payload, true) ?: [];
-        $fields = $payload['fields'] ?? $payload;
+        $fields = $this->decodeFields($payload['fields'] ?? $payload);
 
         $actor = $request->user();
         if ($actor && ! $actor->isAdmin()) {
@@ -83,7 +91,8 @@ class EmployeeController extends Controller
         $employees = [];
         foreach ($rows as $row) {
             $payload = json_decode($row->payload, true) ?: [];
-            $fields = $payload['fields'] ?? $payload;
+            $rawFields = $payload['fields'] ?? $payload;
+            $fields = $this->decodeFields($rawFields);
 
             $bIds = $fields['businessIds'] ?? [];
             if (! is_array($bIds)) {
@@ -91,6 +100,12 @@ class EmployeeController extends Controller
             }
             if ($row->business_id && ! in_array($row->business_id, $bIds)) {
                 $bIds[] = $row->business_id;
+            }
+
+            if (empty($row->business_id) && ! empty($bIds[0])) {
+                DB::table('employees')->where('id', $row->id)->update([
+                    'business_id' => $bIds[0],
+                ]);
             }
 
             // Scope check: must belong to business
@@ -105,6 +120,12 @@ class EmployeeController extends Controller
             }
             if ($row->outlet_id && ! in_array($row->outlet_id, $oIds)) {
                 $oIds[] = $row->outlet_id;
+            }
+
+            if (empty($row->outlet_id) && ! empty($oIds[0])) {
+                DB::table('employees')->where('id', $row->id)->update([
+                    'outlet_id' => $oIds[0],
+                ]);
             }
 
             if ($outletId && ! in_array($outletId, $oIds)) {
@@ -159,7 +180,7 @@ class EmployeeController extends Controller
         }
 
         $payload = json_decode($row->payload, true) ?: [];
-        $fields = $payload['fields'] ?? $payload;
+        $fields = $this->decodeFields($payload['fields'] ?? $payload);
 
         $actor = $request->user();
         if ($actor && ! $actor->isAdmin()) {
@@ -456,7 +477,7 @@ class EmployeeController extends Controller
         }
 
         $payload = json_decode($row->payload, true) ?: [];
-        $fields = $payload['fields'] ?? $payload;
+        $fields = $this->decodeFields($payload['fields'] ?? $payload);
 
         $actor = $request->user();
         if ($actor && ! $actor->isAdmin()) {
@@ -566,11 +587,15 @@ class EmployeeController extends Controller
                 ? User::whereKey($fields['uid'])->first()
                 : null;
             $staffUser ??= User::where('email', strtolower((string) ($fields['email'] ?? '')))->first();
-            if ($staffUser && strtoupper((string) $staffUser->role) !== 'STAFF') {
+            if ($staffUser && strtoupper((string) $staffUser->role) !== 'STAFF' && ! $actor->isAdmin()) {
                 return ApiResponse::error('This email is already attached to a non-staff account.', 422, null, 'duplicate_email');
             }
             if ($staffUser && strtolower((string) $staffUser->email) !== strtolower((string) ($fields['email'] ?? ''))) {
-                return ApiResponse::error('This employee is linked to a different login email.', 422, null, 'employee_email_mismatch');
+                $conflict = User::where('email', strtolower((string) ($fields['email'] ?? '')))->where('id', '!=', $staffUser->id)->first();
+                if ($conflict) {
+                    return ApiResponse::error('The new email is already used by another account.', 422, null, 'duplicate_email');
+                }
+                $staffUser->email = strtolower((string) ($fields['email'] ?? ''));
             }
 
             $staffUser ??= new User;
@@ -626,7 +651,7 @@ class EmployeeController extends Controller
         }
 
         $payload = json_decode($row->payload, true) ?: [];
-        $fields = $payload['fields'] ?? $payload;
+        $fields = $this->decodeFields($payload['fields'] ?? $payload);
 
         $actor = $request->user();
         if ($actor && ! $actor->isAdmin()) {
@@ -895,7 +920,7 @@ class EmployeeController extends Controller
     {
         foreach (DB::table('employees')->where('is_deleted', 0)->where('status', 'active')->get() as $row) {
             $payload = json_decode((string) $row->payload, true) ?: [];
-            $fields = $payload['fields'] ?? $payload;
+            $fields = $this->decodeFields($payload['fields'] ?? $payload);
             if ((string) ($fields['uid'] ?? '') === (string) $user->id
                 && strtolower((string) ($fields['status'] ?? $row->status ?? 'active')) === 'active') {
                 return ['fields' => $fields];

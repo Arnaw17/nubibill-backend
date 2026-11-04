@@ -17,7 +17,22 @@ class ReturnItemResource extends JsonResource
         $productFields = $this->product?->payload['fields'] ?? [];
         $productName = trim((string) $this->product_name);
         if ($productName === '' || strcasecmp($productName, 'Item') === 0) {
-            $productName = (string) ($productFields['productName'] ?? $productFields['name'] ?? $productName);
+            $productName = (string) ($productFields['productName'] ?? $productFields['name'] ?? '');
+            if ($productName === '' || strcasecmp($productName, 'Item') === 0) {
+                $variantId = $this->variant_id ?: $this->product_id;
+                if ($variantId && str_starts_with($variantId, 'VAR-')) {
+                    $variant = \Illuminate\Support\Facades\DB::table('product_variants')->where('id', $variantId)->first();
+                    if ($variant) {
+                        $vp = json_decode((string) $variant->payload, true) ?: [];
+                        $vf = $vp['fields'] ?? [];
+                        $pName = $vf['productName'] ?? $vf['name'] ?? null;
+                        $vName = $vf['variantName'] ?? $vf['displayName'] ?? null;
+                        if ($pName) {
+                            $productName = $pName . ($vName && $vName !== $pName ? " • {$vName}" : '');
+                        }
+                    }
+                }
+            }
         }
 
         return [

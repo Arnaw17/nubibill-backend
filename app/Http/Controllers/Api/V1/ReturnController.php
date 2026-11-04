@@ -244,6 +244,62 @@ class ReturnController extends Controller
             }
         }
 
+        // Dynamically resolve product names and clean characters for PDF
+        foreach ($return->items as $item) {
+            $name = trim((string) $item->product_name);
+            if ($name === '' || strcasecmp($name, 'Item') === 0) {
+                // 1. Try variant
+                $vId = $item->variant_id ?? $item->product_id ?? null;
+                if ($vId && str_starts_with($vId, 'VAR-')) {
+                    $var = DB::table('product_variants')->where('id', $vId)->first();
+                    if ($var) {
+                        $vp = json_decode((string) $var->payload, true) ?: [];
+                        $vf = $vp['fields'] ?? [];
+                        $pName = $vf['productName'] ?? $vf['name'] ?? null;
+                        $vName = $vf['variantName'] ?? $vf['displayName'] ?? null;
+                        if ($pName) {
+                            $name = $pName . ($vName && $vName !== $pName ? " - {$vName}" : '');
+                        }
+                    }
+                }
+                // 2. Try product
+                if (($name === '' || strcasecmp($name, 'Item') === 0) && !empty($item->product_id) && !str_starts_with($item->product_id, 'VAR-')) {
+                    $prod = DB::table('products')->where('id', $item->product_id)->first();
+                    if ($prod) {
+                        $pp = json_decode((string) $prod->payload, true) ?: [];
+                        $pf = $pp['fields'] ?? [];
+                        $name = $pf['name'] ?? $pf['productName'] ?? null;
+                    }
+                }
+                // 3. Try original invoice / purchase bill items
+                if (($name === '' || strcasecmp($name, 'Item') === 0) && ($return->original_bill_no || $return->original_bill_id)) {
+                    $inv = DB::table('invoices')
+                        ->where('invoice_number', $return->original_bill_no)
+                        ->orWhere('id', $return->original_bill_id)
+                        ->first();
+                    if ($inv) {
+                        $invPayload = json_decode((string) $inv->payload, true) ?: [];
+                        $invItems = $invPayload['fields']['items'] ?? [];
+                        foreach ($invItems as $invLine) {
+                            $mName = $invLine['name'] ?? $invLine['variantName'] ?? $invLine['productName'] ?? $invLine['product_name'] ?? $invLine['itemName'] ?? null;
+                            if ($mName && strcasecmp(trim($mName), 'Item') !== 0) {
+                                $name = $mName;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if ($name && strcasecmp($name, 'Item') !== 0) {
+                    $item->product_name = $name;
+                    DB::table('return_items')->where('id', $item->id)->update(['product_name' => $name]);
+                }
+            }
+
+            // Clean unicode dashes and bullets that break in standard PDF fonts
+            $cleanName = str_replace(['–', '—', '•', '₹'], ['-', '-', '-', 'Rs.'], (string) $item->product_name);
+            $item->product_name = $cleanName;
+        }
+
         $pdf = Pdf::loadView('pdf.return_bill', [
             'return' => $return,
             'businessName' => $businessName,
@@ -298,11 +354,28 @@ class ReturnController extends Controller
                     $returnedQty = (float) ($dbItem->returned_qty ?? $f['returnedQty'] ?? 0);
                     $remaining = max(0.0, $soldQty - $returnedQty);
 
+                    $rawProdName = $f['name'] ?? $f['variantName'] ?? $f['productName'] ?? $f['product_name'] ?? $f['itemName'] ?? $f['item_name'] ?? null;
+                    if (! $rawProdName || strcasecmp(trim($rawProdName), 'Item') === 0) {
+                        $vId = $f['variantId'] ?? $f['variant_id'] ?? $f['productId'] ?? $f['product_id'] ?? null;
+                        if ($vId && str_starts_with($vId, 'VAR-')) {
+                            $var = DB::table('product_variants')->where('id', $vId)->first();
+                            if ($var) {
+                                $vp = json_decode((string) $var->payload, true) ?: [];
+                                $vf = $vp['fields'] ?? [];
+                                $pName = $vf['productName'] ?? $vf['name'] ?? null;
+                                $vName = $vf['variantName'] ?? $vf['displayName'] ?? null;
+                                if ($pName) {
+                                    $rawProdName = $pName . ($vName && $vName !== $pName ? " • {$vName}" : '');
+                                }
+                            }
+                        }
+                    }
+
                     $items[] = [
                         'original_bill_item_id' => $dbItem->id,
                         'product_id' => $f['productId'] ?? $f['product_id'] ?? '',
                         'variant_id' => $f['variantId'] ?? $f['variant_id'] ?? null,
-                        'product_name' => $f['productName'] ?? $f['product_name'] ?? 'Item',
+                        'product_name' => $rawProdName ?: 'Item',
                         'hsn_code' => $f['hsn'] ?? $f['hsn_code'] ?? '',
                         'unit' => $f['unit'] ?? '',
                         'original_qty' => $soldQty,
@@ -320,11 +393,28 @@ class ReturnController extends Controller
                     $returnedQty = (float) ($item['returnedQty'] ?? 0);
                     $remaining = max(0.0, $soldQty - $returnedQty);
 
+                    $rawProdName = $item['name'] ?? $item['variantName'] ?? $item['productName'] ?? $item['product_name'] ?? $item['itemName'] ?? $item['item_name'] ?? null;
+                    if (! $rawProdName || strcasecmp(trim($rawProdName), 'Item') === 0) {
+                        $vId = $item['variantId'] ?? $item['productId'] ?? null;
+                        if ($vId && str_starts_with($vId, 'VAR-')) {
+                            $var = DB::table('product_variants')->where('id', $vId)->first();
+                            if ($var) {
+                                $vp = json_decode((string) $var->payload, true) ?: [];
+                                $vf = $vp['fields'] ?? [];
+                                $pName = $vf['productName'] ?? $vf['name'] ?? null;
+                                $vName = $vf['variantName'] ?? $vf['displayName'] ?? null;
+                                if ($pName) {
+                                    $rawProdName = $pName . ($vName && $vName !== $pName ? " • {$vName}" : '');
+                                }
+                            }
+                        }
+                    }
+
                     $items[] = [
                         'original_bill_item_id' => $item['itemId'] ?? null,
                         'product_id' => $item['productId'] ?? '',
                         'variant_id' => $item['variantId'] ?? null,
-                        'product_name' => $item['productName'] ?? 'Item',
+                        'product_name' => $rawProdName ?: 'Item',
                         'hsn_code' => $item['hsn'] ?? '',
                         'unit' => $item['unit'] ?? '',
                         'original_qty' => $soldQty,
@@ -382,11 +472,28 @@ class ReturnController extends Controller
                     $returnedQty = (float) ($dbItem->returned_qty ?? $f['returnedQty'] ?? 0);
                     $remaining = max(0.0, $purchasedQty - $returnedQty);
 
+                    $rawProdName = $f['name'] ?? $f['variantName'] ?? $f['productName'] ?? $f['product_name'] ?? $f['itemName'] ?? $f['item_name'] ?? null;
+                    if (! $rawProdName || strcasecmp(trim($rawProdName), 'Item') === 0) {
+                        $vId = $f['variantId'] ?? $f['variant_id'] ?? $f['productId'] ?? $f['product_id'] ?? null;
+                        if ($vId && str_starts_with($vId, 'VAR-')) {
+                            $var = DB::table('product_variants')->where('id', $vId)->first();
+                            if ($var) {
+                                $vp = json_decode((string) $var->payload, true) ?: [];
+                                $vf = $vp['fields'] ?? [];
+                                $pName = $vf['productName'] ?? $vf['name'] ?? null;
+                                $vName = $vf['variantName'] ?? $vf['displayName'] ?? null;
+                                if ($pName) {
+                                    $rawProdName = $pName . ($vName && $vName !== $pName ? " • {$vName}" : '');
+                                }
+                            }
+                        }
+                    }
+
                     $items[] = [
                         'original_bill_item_id' => $dbItem->id,
                         'product_id' => $f['productId'] ?? '',
                         'variant_id' => $f['variantId'] ?? null,
-                        'product_name' => $f['productName'] ?? 'Item',
+                        'product_name' => $rawProdName ?: 'Item',
                         'hsn_code' => $f['hsnCode'] ?? '',
                         'unit' => $f['unit'] ?? '',
                         'original_qty' => $purchasedQty,

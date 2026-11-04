@@ -286,4 +286,165 @@ class AuthController extends Controller
 
         return ApiResponse::success(null, 'Logged out successfully.');
     }
+
+    /**
+     * Send password reset OTP for an owner account.
+     */
+    public function sendForgotPasswordOtp(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'email' => 'required|email|max:255',
+        ]);
+
+        $email = strtolower(trim($validated['email']));
+        $user = User::where('email', $email)->first();
+
+        if (! $user) {
+            return ApiResponse::error('No account found with this email address.', 404, null, 'USER_NOT_FOUND');
+        }
+
+        if (strtoupper((string) $user->role) === 'STAFF') {
+            return ApiResponse::error('Staff password resets must be performed by the store owner or administrator in Users & Staff.', 403, null, 'STAFF_ACCOUNT');
+        }
+
+        // Check 60-second cooldown
+        $latestOtp = EmailOtp::where('email', $email)->latest('created_at')->first();
+        if ($latestOtp && $latestOtp->created_at->diffInSeconds(now()) < 60) {
+            $remaining = 60 - $latestOtp->created_at->diffInSeconds(now());
+            return ApiResponse::error(
+                "Please wait {$remaining} seconds before requesting a new OTP.",
+                429,
+                null,
+                'THROTTLED'
+            );
+        }
+
+        // Invalidate older unconsumed OTPs
+        EmailOtp::where('email', $email)->whereNull('consumed_at')->update(['consumed_at' => now()]);
+
+        // Generate fresh 6-digit OTP
+        $otp = (string) random_int(100000, 999999);
+        EmailOtp::create([
+            'email' => $email,
+            'code_hash' => Hash::make($otp),
+            'expires_at' => now()->addMinutes(10),
+            'attempts' => 0,
+            'created_at' => now(),
+        ]);
+
+        try {
+            Mail::to($email)->queue(new SendOtpMail($otp));
+        } catch (\Throwable $e) {
+            // Queue or log failure safely handled
+        }
+
+        $responseData = [
+            'email' => $email,
+            'expiresInMinutes' => 10,
+        ];
+        if (config('app.debug')) {
+            $responseData['debug_otp'] = $otp;
+        }
+
+        return ApiResponse::success(
+            $responseData,
+            'Password reset verification code sent to your registered email address.'
+        );
+    }
+
+    /**
+     * Reset password using verified OTP for an owner account.
+     */
+    public function resetPasswordWithOtp(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'email' => 'required|email|max:255',
+            'otp' => 'required|string|size:6',
+            'password' => 'required|string|min:6|max:255',
+        ]);
+
+        $email = strtolower(trim($validated['email']));
+        $otp = trim($validated['otp']);
+        $newPassword = $validated['password'];
+
+        $user = User::where('email', $email)->first();
+        if (! $user) {
+            return ApiResponse::error('User account not found.', 404, null, 'USER_NOT_FOUND');
+        }
+
+        if (strtoupper((string) $user->role) === 'STAFF') {
+            return ApiResponse::error('Staff password resets must be performed by the store owner or administrator.', 403, null, 'STAFF_ACCOUNT');
+        }
+
+        $record = EmailOtp::where('email', $email)
+            ->whereNull('consumed_at')
+            ->latest('created_at')
+            ->first();
+
+        if (! $record) {
+            return ApiResponse::error(
+                'No pending verification code found. Please request a new one.',
+                422,
+                null,
+                'OTP_INVALID'
+            );
+        }
+
+        if ($record->isLocked()) {
+            return ApiResponse::error(
+                'Verification code locked due to too many failed attempts. Please request a new one.',
+                422,
+                null,
+                'OTP_LOCKED'
+            );
+        }
+
+        if ($record->isExpired()) {
+            return ApiResponse::error(
+                'Verification code has expired. Please request a new one.',
+                422,
+                null,
+                'OTP_EXPIRED'
+            );
+        }
+
+        if (! Hash::check($otp, $record->code_hash)) {
+            $record->increment('attempts');
+            if ($record->attempts >= 5) {
+                return ApiResponse::error(
+                    'Maximum verification attempts exceeded. Code has been locked.',
+                    422,
+                    null,
+                    'OTP_LOCKED'
+                );
+            }
+
+            return ApiResponse::error(
+                'Invalid verification code. Please check and try again.',
+                422,
+                null,
+                'OTP_INVALID'
+            );
+        }
+
+        // OTP is valid, consume it
+        $record->update(['consumed_at' => now()]);
+
+        // Update user password and ensure verified
+        $user->password = $newPassword;
+        if (! $user->email_verified_at) {
+            $user->email_verified_at = now();
+        }
+        $user->save();
+
+        // Invalidate older personal access tokens for security
+        if (method_exists($user, 'tokens')) {
+            $user->tokens()->delete();
+        }
+
+        return ApiResponse::success(
+            ['email' => $email],
+            'Password has been reset successfully. You can now log in with your new password.'
+        );
+    }
 }

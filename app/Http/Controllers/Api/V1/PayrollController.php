@@ -14,6 +14,15 @@ use Illuminate\Validation\ValidationException;
 
 class PayrollController extends Controller
 {
+    private function decodeFields(array $fields): array
+    {
+        if (class_exists(SyncController::class)) {
+            return SyncController::decodeFields($fields);
+        }
+
+        return $fields;
+    }
+
     /**
      * List employee salary profiles.
      */
@@ -44,7 +53,7 @@ class PayrollController extends Controller
         $profiles = [];
         foreach ($rows as $row) {
             $payload = json_decode($row->payload, true) ?: [];
-            $fields = $payload['fields'] ?? $payload;
+            $fields = $this->decodeFields($payload['fields'] ?? $payload);
 
             $base = (int) ($fields['baseRatePaise'] ?? $fields['baseSalaryPaise'] ?? 0);
             $daily = (int) ($fields['dailyWagePaise'] ?? 0);
@@ -337,7 +346,10 @@ class PayrollController extends Controller
             ->where('is_deleted', 0);
 
         if ($outletId) {
-            $query->where('outlet_id', $outletId);
+            $query->where(function ($q) use ($outletId) {
+                $q->where('outlet_id', $outletId)
+                    ->orWhereNull('outlet_id');
+            });
         }
 
         $rows = $query->orderBy('created_at', 'desc')->get();
@@ -345,10 +357,10 @@ class PayrollController extends Controller
         $periods = [];
         foreach ($rows as $row) {
             $payload = json_decode($row->payload, true) ?: [];
-            $fields = $payload['fields'] ?? $payload;
+            $fields = $this->decodeFields($payload['fields'] ?? $payload);
 
             $rowEmpId = (string) ($fields['employeeId'] ?? '');
-            if ($employeeId && $rowEmpId && $rowEmpId !== $employeeId) {
+            if ($employeeId && $rowEmpId !== $employeeId) {
                 continue;
             }
 
@@ -450,7 +462,7 @@ class PayrollController extends Controller
                 return ApiResponse::error('The selected employee was not found.', 404, null, 'EMPLOYEE_NOT_FOUND');
             }
             $employeePayload = json_decode((string) $employeeRow->payload, true) ?: [];
-            $employeeFields = $employeePayload['fields'] ?? $employeePayload;
+            $employeeFields = $this->decodeFields($employeePayload['fields'] ?? $employeePayload);
             $employeeBusinesses = $employeeFields['businessIds'] ?? [];
             $employeeOutlets = $employeeFields['outletIds'] ?? [];
             if (! is_array($employeeBusinesses)) {
@@ -493,7 +505,7 @@ class PayrollController extends Controller
                 return ApiResponse::error('The effective salary profile is unavailable.', 422, null, 'SALARY_PROFILE_UNAVAILABLE');
             }
             $pPayload = json_decode((string) $prof->payload, true) ?: [];
-            $pF = $pPayload['fields'] ?? $pPayload;
+            $pF = $this->decodeFields($pPayload['fields'] ?? $pPayload);
             $salaryType = strtoupper((string) ($pF['salaryType'] ?? 'MONTHLY'));
             $baseRate = (int) ($pF['baseRatePaise'] ?? $pF['baseSalaryPaise'] ?? $pF['dailyWagePaise'] ?? 0);
             $units = (int) ($validated['workUnitsMilli'] ?? 1000);
@@ -723,7 +735,7 @@ class PayrollController extends Controller
         $transactions = [];
         foreach ($rows as $row) {
             $payload = json_decode($row->payload, true) ?: [];
-            $fields = $payload['fields'] ?? $payload;
+            $fields = $this->decodeFields($payload['fields'] ?? $payload);
 
             $type = (string) ($fields['type'] ?? 'ADVANCE');
             $txType = (string) ($fields['transactionType'] ?? ($type === 'SALARY_PAYMENT' ? 'SALARY_PAYMENT' : 'CASH_ADVANCE'));
@@ -950,7 +962,7 @@ class PayrollController extends Controller
                 return ['error' => 'Approved salary payable was not found.', 'status' => 404];
             }
             $periodPayload = json_decode($period->payload, true) ?: [];
-            $periodFields = $periodPayload['fields'] ?? $periodPayload;
+            $periodFields = $this->decodeFields($periodPayload['fields'] ?? $periodPayload);
             $periodStatus = strtoupper((string) ($period->status ?? $periodFields['status'] ?? ''));
             $periodOutletId = (string) ($periodFields['outletId'] ?? $period->outlet_id ?? '');
             if (($periodFields['employeeId'] ?? null) !== $employeeId ||
@@ -1191,7 +1203,7 @@ class PayrollController extends Controller
                 return ['error' => 'Approved salary payable was not found.', 'status' => 404];
             }
             $periodPayload = json_decode($period->payload, true) ?: [];
-            $periodFields = $periodPayload['fields'] ?? $periodPayload;
+            $periodFields = $this->decodeFields($periodPayload['fields'] ?? $periodPayload);
             $periodStatus = strtoupper((string) ($period->status ?? $periodFields['status'] ?? ''));
             $periodOutletId = (string) ($periodFields['outletId'] ?? $period->outlet_id ?? '');
             if (($periodFields['employeeId'] ?? null) !== $employeeId ||
@@ -1295,5 +1307,295 @@ class PayrollController extends Controller
             $result['fields'],
             $result['alreadyRecorded'] ? 'Advance adjustment already recorded.' : 'Advance adjustment applied successfully.'
         );
+    }
+
+    /**
+     * Retrieve comprehensive attendance & salary statement for an employee
+     * from their date of joining up to the current period.
+     */
+    public function employeeStatement(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        $userId = (string) $user->id;
+
+        $businessId = $request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id');
+        if (! $businessId) {
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+
+        // Find employee associated with this user account (if any)
+        $userEmployeeRow = DB::table('employees')->where('is_deleted', 0)->get()->first(function ($r) use ($userId): bool {
+            $p = json_decode($r->payload, true) ?: [];
+            $f = $this->decodeFields($p['fields'] ?? $p);
+            return (string) ($f['uid'] ?? '') === $userId || (string) $r->id === $userId;
+        });
+
+        $userEmployeeId = $userEmployeeRow ? (string) $userEmployeeRow->id : null;
+        $requestedEmployeeId = $request->query('employee_id') ?? $request->query('employeeId');
+
+        $isOwnerOrAdmin = $user->isAdmin() || ($businessId && $user->canAccessBusiness($businessId));
+        $authorization = app(EmployeePermissionService::class);
+        $hasSalaryPerm = $authorization->isAuthorized($user, ['salary.view', 'staff_salary', 'salary.manage']);
+
+        // Resolve target employee ID
+        if ($requestedEmployeeId) {
+            if ($requestedEmployeeId !== $userEmployeeId && ! $isOwnerOrAdmin && ! $hasSalaryPerm) {
+                return ApiResponse::error('Unauthorized: You can only view your own attendance and salary statement.', 403, null, 'FORBIDDEN');
+            }
+            $targetEmployeeId = $requestedEmployeeId;
+        } else {
+            $targetEmployeeId = $userEmployeeId;
+        }
+
+        if (! $targetEmployeeId) {
+            // If caller is owner/admin and no employee specified, pick first employee in business
+            if ($isOwnerOrAdmin || $hasSalaryPerm) {
+                $firstEmp = DB::table('employees')->where('is_deleted', 0)->get()->first(function ($r) use ($businessId): bool {
+                    $p = json_decode($r->payload, true) ?: [];
+                    $f = $this->decodeFields($p['fields'] ?? $p);
+                    $bIds = (array) ($f['businessIds'] ?? (isset($f['businessId']) ? [$f['businessId']] : []));
+                    return in_array((string) $businessId, array_map('strval', $bIds), true);
+                });
+                $targetEmployeeId = $firstEmp ? (string) $firstEmp->id : null;
+            }
+        }
+
+        if (! $targetEmployeeId) {
+            return ApiResponse::error('No employee profile found for this account.', 404, null, 'EMPLOYEE_NOT_FOUND');
+        }
+
+        $employeeRow = DB::table('employees')->where('id', $targetEmployeeId)->where('is_deleted', 0)->first();
+        if (! $employeeRow) {
+            return ApiResponse::error('Employee not found.', 404, null, 'EMPLOYEE_NOT_FOUND');
+        }
+
+        $empPayload = json_decode($employeeRow->payload, true) ?: [];
+        $empFields = $this->decodeFields($empPayload['fields'] ?? $empPayload);
+
+        if (! $businessId) {
+            $businessIds = (array) ($empFields['businessIds'] ?? (isset($empFields['businessId']) ? [$empFields['businessId']] : []));
+            $businessId = $businessIds[0] ?? $employeeRow->business_id;
+        }
+
+        $rawJoiningDate = $empFields['joiningDate'] ?? $empFields['joining_date'] ?? $employeeRow->created_at;
+        $joinDate = $rawJoiningDate ? Carbon::parse($rawJoiningDate)->startOfDay() : Carbon::now()->startOfMonth();
+
+        // 2. Resolve Salary Profile
+        $spRow = DB::table('salary_profiles')
+            ->where('employee_id', $targetEmployeeId)
+            ->where('business_id', $businessId)
+            ->where('is_deleted', 0)
+            ->first();
+        $spPayload = json_decode($spRow->payload ?? '{}', true) ?: [];
+        $spFields = $this->decodeFields($spPayload['fields'] ?? $spPayload);
+        $baseSalaryPaise = (int) ($spFields['baseSalaryPaise'] ?? $spFields['baseRatePaise'] ?? 0);
+        $baseSalary = round($baseSalaryPaise / 100, 2);
+        $salaryType = strtoupper((string) ($spFields['salaryType'] ?? 'MONTHLY'));
+        $dailyWagePaise = (int) ($spFields['dailyWagePaise'] ?? 0);
+
+        // 3. Resolve all Attendance records
+        $attRows = DB::table('staff_attendance')
+            ->where('business_id', $businessId)
+            ->where('is_deleted', 0)
+            ->get();
+
+        $attendanceMap = [];
+        $allAttendanceList = [];
+        foreach ($attRows as $ar) {
+            $ap = json_decode($ar->payload, true) ?: [];
+            $af = $this->decodeFields($ap['fields'] ?? $ap);
+            if ((string) ($af['employeeId'] ?? '') !== $targetEmployeeId) {
+                continue;
+            }
+            $wDate = substr((string) ($af['workDate'] ?? ''), 0, 10);
+            if ($wDate) {
+                $record = [
+                    'attendanceId' => (string) ($af['attendanceId'] ?? $ar->id),
+                    'workDate' => $wDate,
+                    'status' => strtoupper((string) ($af['attendanceStatus'] ?? 'PRESENT')),
+                    'approvalStatus' => strtoupper((string) ($af['approvalStatus'] ?? $ar->status ?? 'PENDING')),
+                    'checkInAt' => $af['checkInAt'] ?? null,
+                    'checkOutAt' => $af['checkOutAt'] ?? null,
+                    'workedMinutes' => (int) ($af['workedMinutes'] ?? 0),
+                    'notes' => $af['notes'] ?? null,
+                ];
+                $attendanceMap[$wDate] = $record;
+                $allAttendanceList[] = $record;
+            }
+        }
+
+        // 4. Resolve Approved Salary Periods
+        $periodRows = DB::table('salary_periods')
+            ->where('business_id', $businessId)
+            ->where('is_deleted', 0)
+            ->get();
+        $periodsMap = [];
+        foreach ($periodRows as $pr) {
+            $pp = json_decode($pr->payload, true) ?: [];
+            $pf = $this->decodeFields($pp['fields'] ?? $pp);
+            if ((string) ($pf['employeeId'] ?? '') !== $targetEmployeeId) {
+                continue;
+            }
+            $pStartCarbon = Carbon::parse($pf['periodStart'] ?? '')->setTimezone('Asia/Kolkata');
+            $m = (int) ($pf['periodMonth'] ?? $pStartCarbon->month);
+            $y = (int) ($pf['periodYear'] ?? $pStartCarbon->year);
+            $periodsMap["{$y}-" . str_pad((string)$m, 2, '0', STR_PAD_LEFT)] = [
+                'periodId' => (string) $pr->id,
+                ...$pf,
+            ];
+        }
+
+        // 5. Generate Monthly Breakdown from Join Date to Current Month
+        $statements = [];
+        $cursor = $joinDate->copy()->startOfMonth();
+        $nowMonth = Carbon::now()->startOfMonth();
+        $totalPresentAll = 0;
+        $totalAbsentAll = 0;
+        $totalLeavesAll = 0;
+
+        while ($cursor->lte($nowMonth)) {
+            $year = $cursor->year;
+            $month = $cursor->month;
+            $monthKey = $cursor->format('Y-m');
+            $monthLabel = $cursor->format('F Y');
+            $daysInMonth = $cursor->daysInMonth;
+
+            $monthStart = $cursor->copy()->startOfMonth();
+            $monthEnd = $cursor->copy()->endOfMonth();
+            $eligibleStart = $joinDate->gt($monthStart) ? $joinDate->copy() : $monthStart;
+            $eligibleDays = max(1, $monthEnd->diffInDays($eligibleStart) + 1);
+
+            $period = $periodsMap[$monthKey] ?? null;
+
+            $presentDays = 0;
+            $absentDays = 0;
+            $halfDays = 0;
+            $leaveDays = 0;
+            $absentDates = [];
+
+            $dayCursor = $eligibleStart->copy();
+            $today = Carbon::today();
+            while ($dayCursor->lte($monthEnd) && $dayCursor->lte($today)) {
+                $dKey = $dayCursor->format('Y-m-d');
+                if (isset($attendanceMap[$dKey])) {
+                    $att = $attendanceMap[$dKey];
+                    $st = $att['status'];
+                    if ($st === 'PRESENT') {
+                        $presentDays++;
+                    } elseif ($st === 'HALF_DAY') {
+                        $halfDays++;
+                    } elseif ($st === 'LEAVE') {
+                        $leaveDays++;
+                    } else {
+                        $absentDays++;
+                        $absentDates[] = [
+                            'date' => $dKey,
+                            'day' => $dayCursor->format('l'),
+                            'status' => 'ABSENT',
+                            'reason' => 'Marked Absent',
+                        ];
+                    }
+                } else {
+                    $absentDays++;
+                    $absentDates[] = [
+                        'date' => $dKey,
+                        'day' => $dayCursor->format('l'),
+                        'status' => 'ABSENT',
+                        'reason' => 'Not Clocked In / Absent',
+                    ];
+                }
+                $dayCursor = $dayCursor->copy()->addDay();
+            }
+
+            if ($period) {
+                $gross = round(((int) ($period['grossEarningsPaise'] ?? $period['totalGrossPaise'] ?? $baseSalaryPaise)) / 100, 2);
+                $net = round(((int) ($period['netEarnedPaise'] ?? $period['totalNetPaise'] ?? 0)) / 100, 2);
+                $unpaidLeaveDays = (float) ($period['unpaidLeaveDays'] ?? $period['unpaid_leave_days'] ?? 0);
+                $absentDeduction = round(((int) ($period['unpaidLeaveDeductionPaise'] ?? 0)) / 100, 2);
+                $dailyRate = $daysInMonth > 0 ? round($gross / $daysInMonth, 2) : 0;
+                if ($unpaidLeaveDays > 0) {
+                    $absentDays = $unpaidLeaveDays;
+                }
+                $payableDays = max(0, $daysInMonth - $absentDays - ($halfDays * 0.5));
+                $status = strtoupper((string) ($period['status'] ?? 'APPROVED'));
+                $bonus = round(((int) ($period['bonusPaise'] ?? 0)) / 100, 2);
+                $overtime = round(((int) ($period['overtimePaise'] ?? 0)) / 100, 2);
+                $periodId = (string) ($period['periodId'] ?? '');
+            } else {
+                $gross = $baseSalary;
+                $dailyRate = $daysInMonth > 0 ? round($gross / $daysInMonth, 2) : 0;
+                $absentDeduction = round($dailyRate * $absentDays, 2);
+                $payableDays = max(0, $eligibleDays - $absentDays - ($halfDays * 0.5));
+                $net = max(0, round($gross - $absentDeduction, 2));
+                $status = 'PENDING';
+                $bonus = 0.0;
+                $overtime = 0.0;
+                $periodId = null;
+            }
+
+            $totalPresentAll += $presentDays;
+            $totalAbsentAll += $absentDays;
+            $totalLeavesAll += $leaveDays;
+
+            $statements[] = [
+                'month' => $month,
+                'year' => $year,
+                'monthKey' => $monthKey,
+                'monthLabel' => $monthLabel,
+                'periodId' => $periodId,
+                'daysInMonth' => $daysInMonth,
+                'eligibleDays' => $eligibleDays,
+                'presentDays' => $presentDays,
+                'absentDays' => $absentDays,
+                'halfDays' => $halfDays,
+                'leaveDays' => $leaveDays,
+                'payableDays' => $payableDays,
+                'dailyRate' => $dailyRate,
+                'dailyRatePaise' => (int) round($dailyRate * 100),
+                'grossSalary' => $gross,
+                'grossSalaryPaise' => (int) round($gross * 100),
+                'absentDeduction' => $absentDeduction,
+                'absentDeductionPaise' => (int) round($absentDeduction * 100),
+                'bonus' => $bonus,
+                'overtime' => $overtime,
+                'netPayable' => $net,
+                'netPayablePaise' => (int) round($net * 100),
+                'status' => $status,
+                'isApproved' => ($period !== null),
+                'absentDates' => $absentDates,
+                'calculationNote' => "{$payableDays} days payable @ " . number_format($dailyRate, 2) . "/day (Deduction: {$absentDays} days absent = " . number_format($absentDeduction, 2) . ")",
+            ];
+
+            $cursor = $cursor->copy()->addMonth();
+        }
+
+        $statements = array_reverse($statements);
+        $daysEmployed = (int) ceil($joinDate->diffInDays(Carbon::now()) + 1);
+
+        return ApiResponse::success([
+            'employee' => [
+                'employeeId' => $targetEmployeeId,
+                'name' => (string) ($empFields['name'] ?? ''),
+                'email' => (string) ($empFields['email'] ?? ''),
+                'employeeCode' => (string) ($empFields['employeeCode'] ?? $empFields['employee_code'] ?? ''),
+                'joiningDate' => $joinDate->toDateString(),
+                'joiningDateFormatted' => $joinDate->format('d M Y'),
+                'daysEmployed' => $daysEmployed,
+                'status' => (string) ($employeeRow->status ?? $empFields['status'] ?? 'active'),
+            ],
+            'salaryProfile' => [
+                'baseSalary' => $baseSalary,
+                'baseSalaryPaise' => $baseSalaryPaise,
+                'dailyRate' => ($daysInMonth ?? 30) > 0 ? round($baseSalary / ($daysInMonth ?? 30), 2) : 0,
+                'salaryType' => $salaryType,
+            ],
+            'overallStats' => [
+                'totalPresent' => $totalPresentAll,
+                'totalAbsent' => $totalAbsentAll,
+                'totalLeaves' => $totalLeavesAll,
+            ],
+            'statements' => $statements,
+            'attendanceHistory' => array_reverse($allAttendanceList),
+        ], 'Employee attendance and salary statement retrieved successfully.');
     }
 }

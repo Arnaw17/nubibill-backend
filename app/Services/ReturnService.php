@@ -101,12 +101,42 @@ class ReturnService
                 $taxTotal += $taxAmount;
                 $grandTotal += $lineTotal;
 
+                $resolvedProductName = trim((string) ($item['product_name'] ?? ''));
+                if ($resolvedProductName === '' || strcasecmp($resolvedProductName, 'Item') === 0) {
+                    $vId = $item['variant_id'] ?? $item['product_id'] ?? null;
+                    if ($vId && str_starts_with($vId, 'VAR-')) {
+                        $variant = DB::table('product_variants')->where('id', $vId)->first();
+                        if ($variant) {
+                            $vp = json_decode((string) $variant->payload, true) ?: [];
+                            $vf = $vp['fields'] ?? [];
+                            $pName = $vf['productName'] ?? $vf['name'] ?? null;
+                            $vName = $vf['variantName'] ?? $vf['displayName'] ?? null;
+                            if ($pName) {
+                                $resolvedProductName = $pName . ($vName && $vName !== $pName ? " • {$vName}" : '');
+                            }
+                        }
+                    }
+                    if (($resolvedProductName === '' || strcasecmp($resolvedProductName, 'Item') === 0) && ! empty($item['product_id'])) {
+                        $prod = DB::table('products')->where('id', $item['product_id'])->first();
+                        if ($prod) {
+                            $pp = json_decode((string) $prod->payload, true) ?: [];
+                            $pf = $pp['fields'] ?? [];
+                            if (! empty($pf['name']) || ! empty($pf['productName'])) {
+                                $resolvedProductName = (string) ($pf['name'] ?? $pf['productName']);
+                            }
+                        }
+                    }
+                }
+                if ($resolvedProductName === '') {
+                    $resolvedProductName = 'Item';
+                }
+
                 $calculatedItems[] = [
                     'id' => (string) Str::uuid(),
                     'original_bill_item_id' => $item['original_bill_item_id'] ?? null,
                     'product_id' => ! empty($item['product_id']) ? (string) $item['product_id'] : ($item['original_bill_item_id'] ?? 'item'),
                     'variant_id' => ! empty($item['variant_id']) ? (string) $item['variant_id'] : null,
-                    'product_name' => (string) ($item['product_name'] ?? 'Item'),
+                    'product_name' => $resolvedProductName,
                     'hsn_code' => ! empty($item['hsn_code']) ? (string) $item['hsn_code'] : null,
                     'unit' => ! empty($item['unit']) ? (string) $item['unit'] : null,
                     'qty_returned' => $qty,

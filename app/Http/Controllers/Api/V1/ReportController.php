@@ -140,7 +140,7 @@ class ReportController extends Controller
             $p = json_decode($pb->payload ?? '{}', true) ?: [];
             $fields = $p['fields'] ?? [];
             $grand = (float) ($fields['grandTotal'] ?? $fields['totalAmount'] ?? $pb->total_amount ?? 0);
-            $purchasesTotalPaise += (int) ($grand * 100);
+            $purchasesTotalPaise += ($grand > 100000 || isset($fields['grandTotal'])) ? (int) $grand : (int) ($grand * 100);
         }
 
         // Expenses in range
@@ -923,11 +923,13 @@ class ReportController extends Controller
         foreach ($purchases as $pb) {
             $p = json_decode($pb->payload ?? '{}', true) ?: [];
             $fields = $p['fields'] ?? [];
-            $purchasesPaise += (int) (($fields['subtotal'] ?? $fields['taxableAmount'] ?? $pb->total_amount ?? 0) * 100);
+            $rawTaxable = (float) ($fields['subtotal'] ?? $fields['taxableAmount'] ?? $pb->total_amount ?? 0);
+            $purchasesPaise += ($rawTaxable > 100000 || isset($fields['grandTotal'])) ? (int) $rawTaxable : (int) ($rawTaxable * 100);
             $cgst = (float) ($fields['cgstAmount'] ?? 0);
             $sgst = (float) ($fields['sgstAmount'] ?? 0);
             $igst = (float) ($fields['igstAmount'] ?? 0);
-            $inputTaxCreditPaise += (int) (($cgst + $sgst + $igst) * 100);
+            $taxSum = $cgst + $sgst + $igst;
+            $inputTaxCreditPaise += ($taxSum > 100000 || isset($fields['grandTotal'])) ? (int) $taxSum : (int) ($taxSum * 100);
         }
 
         // Expenses

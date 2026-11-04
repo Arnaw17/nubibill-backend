@@ -19,6 +19,8 @@ class PurchaseController extends Controller
         $businessId = $request->query('business_id') ?? $request->query('businessId') ?? $request->header('X-Business-Id');
         $outletId = $request->query('outlet_id') ?? $request->query('outletId') ?? $request->header('X-Outlet-Id');
         $supplierId = $request->query('supplier_id') ?? $request->query('supplierId');
+        $startDate = $request->query('start_date') ?? $request->query('startDate');
+        $endDate = $request->query('end_date') ?? $request->query('endDate');
         $statusFilter = strtoupper((string) ($request->query('status') ?? 'ALL'));
         $search = trim((string) ($request->query('search') ?? $request->query('q') ?? ''));
 
@@ -35,12 +37,18 @@ class PurchaseController extends Controller
             ->where('business_id', $businessId)
             ->where('is_deleted', 0);
 
-        if ($outletId) {
+        if ($outletId && $outletId !== 'ALL') {
             $query->where(function ($q) use ($outletId) {
                 $q->where('outlet_id', $outletId)
                     ->orWhere('outlet_id', '')
                     ->orWhereNull('outlet_id');
             });
+        }
+
+        if ($startDate && $endDate) {
+            $startDt = date('Y-m-d 00:00:00', strtotime($startDate));
+            $endDt = date('Y-m-d 23:59:59', strtotime($endDate));
+            $query->whereBetween('created_at', [$startDt, $endDt]);
         }
 
         if ($supplierId) {
@@ -57,6 +65,29 @@ class PurchaseController extends Controller
         }
 
         $rows = $query->orderBy('created_at', 'desc')->get();
+
+        // Pre-fetch product HSN map for line items if needed
+        $allProductIds = [];
+        foreach ($rows as $row) {
+            $payload = json_decode($row->payload, true) ?: [];
+            $fields = $payload['fields'] ?? [];
+            foreach ($fields['items'] ?? [] as $it) {
+                if (!empty($it['productId'])) {
+                    $allProductIds[] = $it['productId'];
+                }
+            }
+        }
+        $hsnMap = [];
+        if (!empty($allProductIds)) {
+            $prods = DB::table('products')->whereIn('id', array_unique($allProductIds))->get();
+            foreach ($prods as $p) {
+                $pPayload = json_decode($p->payload, true) ?: [];
+                $hsn = $pPayload['fields']['hsnCode'] ?? $pPayload['fields']['hsn'] ?? null;
+                if ($hsn) {
+                    $hsnMap[$p->id] = (string) $hsn;
+                }
+            }
+        }
 
         $data = [];
         foreach ($rows as $row) {
@@ -75,6 +106,16 @@ class PurchaseController extends Controller
                 if (! $matches) {
                     continue;
                 }
+            }
+
+            $items = $fields['items'] ?? [];
+            if (!empty($items) && is_array($items)) {
+                foreach ($items as &$it) {
+                    if (empty($it['hsnCode']) && !empty($it['productId']) && isset($hsnMap[$it['productId']])) {
+                        $it['hsnCode'] = $hsnMap[$it['productId']];
+                    }
+                }
+                unset($it);
             }
 
             $data[] = [
@@ -102,8 +143,8 @@ class PurchaseController extends Controller
                 'outstandingAmount' => (int) ($fields['outstandingAmount'] ?? 0),
                 'taxType' => $fields['taxType'] ?? 'INTRA_STATE',
                 'status' => $fields['status'] ?? $row->status ?? 'APPROVED',
-                'itemsCount' => count($fields['items'] ?? []),
-                'items' => $fields['items'] ?? [],
+                'itemsCount' => count($items),
+                'items' => $items,
                 'createdAt' => $row->created_at,
             ];
         }
@@ -147,6 +188,27 @@ class PurchaseController extends Controller
             foreach ($itemRows as $iRow) {
                 $iPayload = json_decode($iRow->payload, true) ?: [];
                 $items[] = $iPayload['fields'] ?? [];
+            }
+        }
+
+        if (!empty($items) && is_array($items)) {
+            $pIds = array_filter(array_column($items, 'productId'));
+            if (!empty($pIds)) {
+                $prods = DB::table('products')->whereIn('id', array_unique($pIds))->get();
+                $hsnMap = [];
+                foreach ($prods as $p) {
+                    $pPayload = json_decode($p->payload, true) ?: [];
+                    $hsn = $pPayload['fields']['hsnCode'] ?? $pPayload['fields']['hsn'] ?? null;
+                    if ($hsn) {
+                        $hsnMap[$p->id] = (string) $hsn;
+                    }
+                }
+                foreach ($items as &$it) {
+                    if (empty($it['hsnCode']) && !empty($it['productId']) && isset($hsnMap[$it['productId']])) {
+                        $it['hsnCode'] = $hsnMap[$it['productId']];
+                    }
+                }
+                unset($it);
             }
         }
 

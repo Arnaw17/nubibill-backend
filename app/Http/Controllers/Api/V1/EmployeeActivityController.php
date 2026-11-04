@@ -36,21 +36,31 @@ class EmployeeActivityController extends Controller
             return $accessError;
         }
 
-        // Cache employee and outlet names for rapid enrichment
+        // Cache employee, user, and outlet names for rapid enrichment
         $employeesMap = [];
+        $userRows = DB::table('users')->where('is_deleted', 0)->get();
+        foreach ($userRows as $ur) {
+            $employeesMap[(string) $ur->id] = [
+                'name' => $ur->name ?: ($ur->email ?: 'Admin'),
+                'code' => 'ADMIN',
+                'role' => $ur->role === 'USER' ? 'Owner' : ucfirst(strtolower($ur->role)),
+            ];
+        }
+
         $employeeRows = DB::table('employees')->where('is_deleted', 0)->get();
         foreach ($employeeRows as $er) {
             $p = json_decode($er->payload, true) ?: [];
-            $f = $p['fields'] ?? $p;
+            $f = $this->decodeFields($p['fields'] ?? $p);
             $empId = (string) ($f['employeeId'] ?? $er->id);
             $employeesMap[$empId] = [
+                'employeeId' => $empId,
                 'name' => $f['name'] ?? $er->name ?? 'Staff Member',
                 'code' => $f['employeeCode'] ?? $er->employee_code ?? 'EMP',
                 'role' => $f['roleName'] ?? 'Staff',
             ];
             // Also map by uid if present
             if (! empty($f['uid'])) {
-                $employeesMap[$f['uid']] = $employeesMap[$empId];
+                $employeesMap[(string) $f['uid']] = $employeesMap[$empId];
             }
         }
 
@@ -58,7 +68,7 @@ class EmployeeActivityController extends Controller
         $outletRows = DB::table('outlets')->where('is_deleted', 0)->get();
         foreach ($outletRows as $or) {
             $p = json_decode($or->payload, true) ?: [];
-            $f = $p['fields'] ?? $p;
+            $f = $this->decodeFields($p['fields'] ?? $p);
             $oId = (string) ($f['outletId'] ?? $or->id);
             $outletsMap[$oId] = $f['name'] ?? $f['outletName'] ?? $or->name ?? 'Outlet';
         }
@@ -81,7 +91,7 @@ class EmployeeActivityController extends Controller
         $auditRows = $auditQuery->orderBy('created_at', 'desc')->limit(500)->get();
         foreach ($auditRows as $row) {
             $p = json_decode($row->payload, true) ?: [];
-            $f = $p['fields'] ?? $p;
+            $f = $this->decodeFields($p['fields'] ?? $p);
             $activityBusinessId = (string) ($row->business_id ?? $f['businessId'] ?? '');
             if ($activityBusinessId !== (string) $businessId) {
                 continue;
@@ -103,7 +113,7 @@ class EmployeeActivityController extends Controller
             $activities[] = [
                 'id' => (string) $row->id,
                 'logId' => (string) ($f['logId'] ?? $row->id),
-                'employeeId' => $empId,
+                'employeeId' => $empInfo['employeeId'] ?? $empId,
                 'employeeName' => $empInfo['name'],
                 'employeeCode' => $empInfo['code'],
                 'role' => $empInfo['role'],
@@ -133,9 +143,9 @@ class EmployeeActivityController extends Controller
         $invoiceRows = $invoiceQuery->orderBy('created_at', 'desc')->limit(150)->get();
         foreach ($invoiceRows as $inv) {
             $p = json_decode($inv->payload, true) ?: [];
-            $f = $p['fields'] ?? $p;
+            $f = $this->decodeFields($p['fields'] ?? $p);
 
-            $empId = (string) ($f['createdBy'] ?? $f['employeeId'] ?? $f['cashierId'] ?? '');
+            $empId = (string) ($f['createdByUid'] ?? $f['createdBy'] ?? $f['employeeId'] ?? $f['cashierId'] ?? $f['userId'] ?? '');
             $empInfo = $employeesMap[$empId] ?? [
                 'name' => $f['cashierName'] ?? $f['createdByName'] ?? 'Billing Staff',
                 'code' => 'BILLING',
@@ -158,7 +168,7 @@ class EmployeeActivityController extends Controller
             $activities[] = [
                 'id' => 'ACT-INV-'.$inv->id,
                 'logId' => 'INV-'.$inv->id,
-                'employeeId' => $empId,
+                'employeeId' => $empInfo['employeeId'] ?? $empId,
                 'employeeName' => $empInfo['name'],
                 'employeeCode' => $empInfo['code'],
                 'role' => $empInfo['role'],
@@ -193,9 +203,9 @@ class EmployeeActivityController extends Controller
         $paymentRows = $paymentQuery->orderBy('created_at', 'desc')->limit(100)->get();
         foreach ($paymentRows as $pay) {
             $p = json_decode($pay->payload, true) ?: [];
-            $f = $p['fields'] ?? $p;
+            $f = $this->decodeFields($p['fields'] ?? $p);
 
-            $empId = (string) ($f['receivedBy'] ?? $f['createdBy'] ?? $f['employeeId'] ?? '');
+            $empId = (string) ($f['receivedByUid'] ?? $f['receivedBy'] ?? $f['createdByUid'] ?? $f['createdBy'] ?? $f['employeeId'] ?? $f['cashierId'] ?? $f['userId'] ?? '');
             $empInfo = $employeesMap[$empId] ?? [
                 'name' => $f['receivedByName'] ?? 'Cashier',
                 'code' => 'CASHIER',
@@ -217,7 +227,7 @@ class EmployeeActivityController extends Controller
             $activities[] = [
                 'id' => 'ACT-PAY-'.$pay->id,
                 'logId' => 'PAY-'.$pay->id,
-                'employeeId' => $empId,
+                'employeeId' => $empInfo['employeeId'] ?? $empId,
                 'employeeName' => $empInfo['name'],
                 'employeeCode' => $empInfo['code'],
                 'role' => $empInfo['role'],
@@ -251,7 +261,7 @@ class EmployeeActivityController extends Controller
         $attRows = $attQuery->orderBy('created_at', 'desc')->limit(100)->get();
         foreach ($attRows as $att) {
             $p = json_decode($att->payload, true) ?: [];
-            $f = $p['fields'] ?? $p;
+            $f = $this->decodeFields($p['fields'] ?? $p);
 
             $empId = (string) ($f['employeeId'] ?? $att->employee_id ?? '');
             $empInfo = $employeesMap[$empId] ?? [
@@ -266,7 +276,7 @@ class EmployeeActivityController extends Controller
                 $activities[] = [
                     'id' => 'ACT-ATT-IN-'.$att->id,
                     'logId' => 'ATT-IN-'.$att->id,
-                    'employeeId' => $empId,
+                    'employeeId' => $empInfo['employeeId'] ?? $empId,
                     'employeeName' => $empInfo['name'],
                     'employeeCode' => $empInfo['code'],
                     'role' => $empInfo['role'],
@@ -296,7 +306,7 @@ class EmployeeActivityController extends Controller
                 $activities[] = [
                     'id' => 'ACT-ATT-OUT-'.$att->id,
                     'logId' => 'ATT-OUT-'.$att->id,
-                    'employeeId' => $empId,
+                    'employeeId' => $empInfo['employeeId'] ?? $empId,
                     'employeeName' => $empInfo['name'],
                     'employeeCode' => $empInfo['code'],
                     'role' => $empInfo['role'],
@@ -330,7 +340,7 @@ class EmployeeActivityController extends Controller
         $khataRows = $khataQuery->orderBy('created_at', 'desc')->limit(60)->get();
         foreach ($khataRows as $khata) {
             $p = json_decode($khata->payload, true) ?: [];
-            $f = $p['fields'] ?? $p;
+            $f = $this->decodeFields($p['fields'] ?? $p);
 
             $empId = (string) ($f['employeeId'] ?? '');
             $empInfo = $employeesMap[$empId] ?? [
@@ -346,7 +356,7 @@ class EmployeeActivityController extends Controller
             $activities[] = [
                 'id' => 'ACT-KHT-'.$khata->id,
                 'logId' => 'KHT-'.$khata->id,
-                'employeeId' => $empId,
+                'employeeId' => $empInfo['employeeId'] ?? $empId,
                 'employeeName' => $empInfo['name'],
                 'employeeCode' => $empInfo['code'],
                 'role' => $empInfo['role'],
@@ -553,9 +563,10 @@ class EmployeeActivityController extends Controller
         $distinctEmpIds = [];
         foreach ($activeStaffRows as $r) {
             $p = json_decode($r->payload, true) ?: [];
-            $emp = $p['fields']['employeeId'] ?? $p['employeeId'] ?? null;
+            $f = $this->decodeFields($p['fields'] ?? $p);
+            $emp = $f['employeeId'] ?? $r->employee_id ?? null;
             if ($emp) {
-                $distinctEmpIds[$emp] = true;
+                $distinctEmpIds[(string) $emp] = true;
             }
         }
         $activeEmployeesToday = count($distinctEmpIds);
@@ -577,6 +588,15 @@ class EmployeeActivityController extends Controller
                 'OTHER' => $todayAuditLogs,
             ],
         ], 'Activity statistics computed.');
+    }
+
+    private function decodeFields(array $fields): array
+    {
+        try {
+            return SyncController::decodeFields($fields);
+        } catch (\Throwable $e) {
+            return $fields;
+        }
     }
 
     private function formatActionLabel(string $action): string
@@ -643,9 +663,10 @@ class EmployeeActivityController extends Controller
         }
 
         $payload = json_decode($business->payload, true) ?: [];
-        $fields = $payload['fields'] ?? $payload;
+        $fields = $this->decodeFields($payload['fields'] ?? $payload);
         $ownerUid = (string) ($fields['ownerUid'] ?? $business->owner_uid ?? '');
-        if (! $request->user()->isAdmin() && $ownerUid !== (string) $request->user()->id) {
+        $user = $request->user();
+        if ($user && ! $user->isAdmin() && $ownerUid !== (string) $user->id && ! $user->canAccessBusiness($businessId)) {
             return ApiResponse::error('Unauthorized access to employee activity for this business.', 403);
         }
 
