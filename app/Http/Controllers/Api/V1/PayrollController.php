@@ -367,6 +367,9 @@ class PayrollController extends Controller
                 'bonusPaise' => (int) ($fields['bonusPaise'] ?? 0),
                 'overtimePaise' => (int) ($fields['overtimePaise'] ?? 0),
                 'approvedDeductionsPaise' => (int) ($fields['approvedDeductionsPaise'] ?? $fields['totalDeductionsPaise'] ?? 0),
+                'unpaidLeaveDays' => (float) ($fields['unpaidLeaveDays'] ?? $fields['unpaid_leave_days'] ?? 0),
+                'unpaidLeaveDeductionPaise' => (int) ($fields['unpaidLeaveDeductionPaise'] ?? $fields['deduction_amount_paise'] ?? 0),
+                'dailyRatePaise' => (int) ($fields['dailyRatePaise'] ?? 0),
                 'paidAmountPaise' => (int) ($fields['paidAmountPaise'] ?? 0),
                 'advanceAdjustedPaise' => (int) ($fields['advanceAdjustedPaise'] ?? 0),
                 'staffPurchaseAdjustedPaise' => (int) ($fields['staffPurchaseAdjustedPaise'] ?? 0),
@@ -408,6 +411,9 @@ class PayrollController extends Controller
             'bonusPaise' => 'nullable|integer',
             'overtimePaise' => 'nullable|integer',
             'approvedDeductionsPaise' => 'nullable|integer',
+            'otherDeductionsPaise' => 'nullable|integer',
+            'unpaid_leave_days' => 'nullable|numeric|min:0',
+            'unpaidLeaveDays' => 'nullable|numeric|min:0',
             'periodMonth' => 'nullable|integer|between:1,12',
             'periodYear' => 'nullable|integer|min:2020|max:2050',
             'employeeIds' => 'nullable|array',
@@ -498,7 +504,27 @@ class PayrollController extends Controller
                 ? $baseRate
                 : intdiv(($baseRate * $units) + 500, 1000);
             $gross = (int) ($validated['grossEarningsPaise'] ?? ($baseEarnings + $bonus + $overtime));
-            $net = (int) ($validated['netEarnedPaise'] ?? ($gross - $deductions));
+
+            // Dynamic Unpaid Leave Days calculation:
+            // $dailyRate = $monthlyGrossSalary / $daysInMonth
+            // $deductionAmount = $dailyRate * $request->unpaid_leave_days
+            // $netPayable = $monthlyGrossSalary - $deductionAmount
+            $daysInMonth = Carbon::create($year, $month, 1)->daysInMonth ?: 30;
+            $unpaidLeaveDays = (float) ($validated['unpaid_leave_days'] ?? $validated['unpaidLeaveDays'] ?? 0);
+            $monthlyGrossSalary = $gross / 100.0;
+            $dailyRate = $daysInMonth > 0 ? ($monthlyGrossSalary / $daysInMonth) : 0.0;
+            $deductionAmount = round($dailyRate * $unpaidLeaveDays, 2);
+
+            $dailyRatePaise = (int) round($dailyRate * 100);
+            $unpaidLeaveDeductionPaise = (int) round($deductionAmount * 100);
+
+            // Other deductions
+            $otherDeductionsPaise = (int) ($validated['otherDeductionsPaise'] ?? $validated['approvedDeductionsPaise'] ?? 0);
+            $totalDeductionsPaise = $otherDeductionsPaise + $unpaidLeaveDeductionPaise;
+
+            $net = max(0, $gross - $totalDeductionsPaise);
+            $netPayable = $net / 100.0;
+
             if ($gross < 0 || $net < 0) {
                 return ApiResponse::error('Deductions cannot exceed salary earnings.', 422, null, 'INVALID_SALARY_TOTAL');
             }
@@ -511,12 +537,22 @@ class PayrollController extends Controller
                 'profileId' => $prof->id,
                 'periodStart' => $periodStart,
                 'periodEnd' => $periodEnd,
+                'daysInMonth' => $daysInMonth,
                 'workUnitsMilli' => (int) ($validated['workUnitsMilli'] ?? 1000),
                 'grossEarningsPaise' => $gross,
+                'monthlyGrossSalary' => $monthlyGrossSalary,
+                'dailyRate' => round($dailyRate, 2),
+                'dailyRatePaise' => $dailyRatePaise,
+                'unpaidLeaveDays' => $unpaidLeaveDays,
+                'unpaid_leave_days' => $unpaidLeaveDays,
+                'deductionAmount' => $deductionAmount,
+                'unpaidLeaveDeductionPaise' => $unpaidLeaveDeductionPaise,
+                'otherDeductionsPaise' => $otherDeductionsPaise,
+                'approvedDeductionsPaise' => $totalDeductionsPaise,
                 'netEarnedPaise' => $net,
+                'netPayable' => $netPayable,
                 'bonusPaise' => (int) ($validated['bonusPaise'] ?? 0),
                 'overtimePaise' => (int) ($validated['overtimePaise'] ?? 0),
-                'approvedDeductionsPaise' => (int) ($validated['approvedDeductionsPaise'] ?? 0),
                 'paidAmountPaise' => 0,
                 'advanceAdjustedPaise' => 0,
                 'staffPurchaseAdjustedPaise' => 0,
@@ -529,6 +565,49 @@ class PayrollController extends Controller
                 'updatedAt' => $nowIso,
             ];
 
+            // 1. Save to `salaries` table
+            $salaryId = sprintf('SAL_%s_%s_%04d%02d', $businessId, $employeeId, $year, $month);
+            DB::table('salaries')->updateOrInsert(
+                ['id' => $salaryId],
+                [
+                    'document_path' => "salaries/{$salaryId}",
+                    'period_id' => $periodId,
+                    'business_id' => $businessId,
+                    'outlet_id' => $outletId,
+                    'employee_id' => $employeeId,
+                    'profile_id' => $prof->id,
+                    'period_start' => $periodStart,
+                    'period_end' => $periodEnd,
+                    'month' => $month,
+                    'year' => $year,
+                    'days_in_month' => $daysInMonth,
+                    'monthly_gross_salary' => $monthlyGrossSalary,
+                    'monthly_gross_salary_paise' => $gross,
+                    'daily_rate' => round($dailyRate, 2),
+                    'daily_rate_paise' => $dailyRatePaise,
+                    'unpaid_leave_days' => $unpaidLeaveDays,
+                    'deduction_amount' => $deductionAmount,
+                    'deduction_amount_paise' => $unpaidLeaveDeductionPaise,
+                    'unpaid_leave_deduction' => $deductionAmount,
+                    'unpaid_leave_deduction_paise' => $unpaidLeaveDeductionPaise,
+                    'other_deductions' => $otherDeductionsPaise / 100.0,
+                    'other_deductions_paise' => $otherDeductionsPaise,
+                    'bonus' => $bonus / 100.0,
+                    'bonus_paise' => $bonus,
+                    'overtime' => $overtime / 100.0,
+                    'overtime_paise' => $overtime,
+                    'net_payable' => $netPayable,
+                    'net_payable_paise' => $net,
+                    'status' => $requestedStatus,
+                    'created_by' => $userId,
+                    'is_deleted' => 0,
+                    'payload' => json_encode($fields),
+                    'created_at' => $nowDateTime,
+                    'updated_at' => $nowDateTime,
+                ]
+            );
+
+            // 2. Save to `salary_periods` table
             DB::table('salary_periods')->updateOrInsert(
                 ['id' => $periodId],
                 [
