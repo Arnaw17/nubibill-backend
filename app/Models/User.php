@@ -134,17 +134,33 @@ class User extends Authenticatable implements FilamentUser
                 ->first(function ($row) use ($userId): bool {
                     $payload = json_decode((string) $row->payload, true) ?: [];
                     $fields = $payload['fields'] ?? $payload;
+                    if (is_array($fields) && class_exists(\App\Http\Controllers\Api\V1\SyncController::class)) {
+                        $fields = \App\Http\Controllers\Api\V1\SyncController::decodeFields($fields);
+                    }
 
-                    return (string) ($fields['uid'] ?? '') === $userId;
+                    $empUid = $fields['uid'] ?? '';
+                    if (is_array($empUid)) {
+                        $empUid = $empUid['stringValue'] ?? '';
+                    }
+
+                    return (string) $empUid === $userId;
                 });
 
             if ($employee) {
                 $payload = json_decode((string) $employee->payload, true) ?: [];
                 $fields = $payload['fields'] ?? $payload;
+                if (is_array($fields) && class_exists(\App\Http\Controllers\Api\V1\SyncController::class)) {
+                    $fields = \App\Http\Controllers\Api\V1\SyncController::decodeFields($fields);
+                }
                 $assigned = $fields['businessIds'] ?? (isset($fields['businessId']) ? [$fields['businessId']] : []);
                 if (is_array($assigned)) {
                     foreach ($assigned as $bId) {
-                        $businessIds[] = (string) $bId;
+                        if (is_array($bId)) {
+                            $bId = $bId['stringValue'] ?? '';
+                        }
+                        if ($bId !== '') {
+                            $businessIds[] = (string) $bId;
+                        }
                     }
                 }
             }
@@ -157,11 +173,27 @@ class User extends Authenticatable implements FilamentUser
             foreach ($rows as $row) {
                 $payload = json_decode((string) $row->payload, true) ?: [];
                 $fields = $payload['fields'] ?? [];
-                $ownerUid = (string) ($fields['ownerUid'] ?? $row->owner_uid ?? '');
-                if ($ownerUid === $userId) {
-                    $businessIds[] = (string) ($fields['businessId'] ?? $row->business_id ?? $row->id);
+                if (is_array($fields) && class_exists(\App\Http\Controllers\Api\V1\SyncController::class)) {
+                    $fields = \App\Http\Controllers\Api\V1\SyncController::decodeFields($fields);
+                }
+                $ownerUid = $fields['ownerUid'] ?? $row->owner_uid ?? '';
+                if (is_array($ownerUid)) {
+                    $ownerUid = $ownerUid['stringValue'] ?? '';
+                }
+                if ((string) $ownerUid === $userId) {
+                    $bId = $fields['businessId'] ?? $row->business_id ?? $row->id;
+                    if (is_array($bId)) {
+                        $bId = $bId['stringValue'] ?? '';
+                    }
+                    if ($bId !== '') {
+                        $businessIds[] = (string) $bId;
+                    }
                 }
             }
+        }
+
+        if ($this->business_id) {
+            $businessIds[] = (string) $this->business_id;
         }
 
         return array_values(array_unique(array_filter($businessIds)));
@@ -174,6 +206,10 @@ class User extends Authenticatable implements FilamentUser
         }
 
         if ($this->isAdmin()) {
+            return true;
+        }
+
+        if ($this->business_id && (string) $this->business_id === (string) $businessId) {
             return true;
         }
 

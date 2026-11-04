@@ -70,12 +70,19 @@ class ReportController extends Controller
             $paid = (float) ($fields['paidAmount'] ?? ($fields['paymentStatus'] === 'paid' || $fields['paymentStatus'] === 'PAID' ? $total : 0));
             $due = (float) ($fields['dueAmount'] ?? $fields['balanceDue'] ?? ($total - $paid));
 
-            $grossSalesPaise += (int) ($subtotal * 100);
-            $totalTaxPaise += (int) ($tax * 100);
-            $totalDiscountPaise += (int) ($discount * 100);
-            $collectedPaise += (int) ($paid * 100);
-            if ($due > 0) {
-                $receivablesOutstandingPaise += (int) ($due * 100);
+            $isPaise = isset($fields['grandTotal']) || isset($fields['subtotalPaise']) || isset($fields['grandTotalPaise']) || $total >= 10000;
+            $subPaise = (int) ($isPaise ? $subtotal : round($subtotal * 100));
+            $tPaise = (int) ($isPaise ? $tax : round($tax * 100));
+            $discPaise = (int) ($isPaise ? $discount : round($discount * 100));
+            $pPaise = (int) ($isPaise ? $paid : round($paid * 100));
+            $dPaise = (int) ($isPaise ? $due : round($due * 100));
+
+            $grossSalesPaise += $subPaise;
+            $totalTaxPaise += $tPaise;
+            $totalDiscountPaise += $discPaise;
+            $collectedPaise += $pPaise;
+            if ($dPaise > 0) {
+                $receivablesOutstandingPaise += $dPaise;
             }
 
             $items = $fields['items'] ?? [];
@@ -210,7 +217,9 @@ class ReportController extends Controller
                 if ($invTs >= $iStart && $invTs <= $iEnd) {
                     $p = json_decode($inv->payload ?? '{}', true) ?: [];
                     $fields = $p['fields'] ?? [];
-                    $iSales += (int) (($fields['totalAmount'] ?? $fields['total'] ?? $inv->total_amount ?? 0) * 100);
+                    $tot = (float) ($fields['totalAmount'] ?? $fields['grandTotal'] ?? $fields['total'] ?? $inv->total_amount ?? 0);
+                    $isTotPaise = isset($fields['grandTotal']) || isset($fields['subtotalPaise']) || isset($fields['grandTotalPaise']) || $tot >= 10000;
+                    $iSales += (int) ($isTotPaise ? $tot : round($tot * 100));
                 }
             }
 
@@ -220,7 +229,9 @@ class ReportController extends Controller
                 if ($pbTs >= $iStart && $pbTs <= $iEnd) {
                     $p = json_decode($pb->payload ?? '{}', true) ?: [];
                     $fields = $p['fields'] ?? [];
-                    $iPurchases += (int) (($fields['grandTotal'] ?? $fields['totalAmount'] ?? $pb->total_amount ?? 0) * 100);
+                    $grand = (float) ($fields['grandTotal'] ?? $fields['totalAmount'] ?? $pb->total_amount ?? 0);
+                    $isGrandPaise = isset($fields['grandTotalPaise']) || $grand >= 10000;
+                    $iPurchases += (int) ($isGrandPaise ? $grand : round($grand * 100));
                 }
             }
 
@@ -324,10 +335,20 @@ class ReportController extends Controller
             $rawTax = (float) ($fields['gstAmount'] ?? $fields['taxAmount'] ?? $inv->tax_amount ?? 0);
             $rawDue = (float) ($fields['dueAmount'] ?? $fields['duePaise'] ?? $fields['balanceDue'] ?? $inv->balance_due ?? 0);
 
-            // Handle paise vs rupees representation
-            $totalRupees = ($rawTotal > 100000 || isset($fields['grandTotal'])) ? round($rawTotal / 100, 2) : round($rawTotal, 2);
-            $taxRupees = ($rawTax > 100000 || isset($fields['grandTotal'])) ? round($rawTax / 100, 2) : round($rawTax, 2);
-            $dueRupees = ($rawDue > 100000 || isset($fields['grandTotal'])) ? round($rawDue / 100, 2) : round($rawDue, 2);
+            $isPaise = isset($fields['grandTotal']) || isset($fields['subtotalPaise']) || isset($fields['grandTotalPaise']) || $rawTotal >= 10000;
+            $grandTotalPaise = (int) ($isPaise ? $rawTotal : round($rawTotal * 100));
+            $taxPaise = (int) ($isPaise ? $rawTax : round($rawTax * 100));
+            $duePaise = (int) ($isPaise ? $rawDue : round($rawDue * 100));
+            $rawSub = (float) ($fields['subtotal'] ?? $fields['subtotalPaise'] ?? max(0, $rawTotal - $rawTax));
+            $subtotalPaise = (int) ($isPaise ? $rawSub : round($rawSub * 100));
+            $paidPaise = (int) ($fields['paidPaise'] ?? $fields['paidAmount'] ?? max(0, $grandTotalPaise - $duePaise));
+            if (! $isPaise && $paidPaise < 10000 && $paidPaise > 0) {
+                $paidPaise = (int) round($paidPaise * 100);
+            }
+
+            $totalRupees = round($grandTotalPaise / 100, 2);
+            $taxRupees = round($taxPaise / 100, 2);
+            $dueRupees = round($duePaise / 100, 2);
 
             $items = $fields['items'] ?? [];
             if (empty($items)) {
@@ -353,17 +374,17 @@ class ReportController extends Controller
                 'customerName' => (string) ($fields['customerName'] ?? $inv->customer_name ?? 'Cash Customer'),
                 'customerPhone' => (string) ($fields['customerPhone'] ?? $inv->customer_phone ?? ''),
                 'totalAmount' => $totalRupees,
-                'grandTotal' => $rawTotal,
-                'grandTotalPaise' => (int) ($rawTotal > 100000 || isset($fields['grandTotal']) ? $rawTotal : $rawTotal * 100),
-                'subtotal' => (float) ($fields['subtotal'] ?? 0),
-                'subtotalPaise' => (int) (($fields['subtotal'] ?? $rawTotal) > 100000 ? ($fields['subtotal'] ?? $rawTotal) : ($fields['subtotal'] ?? $rawTotal) * 100),
+                'grandTotal' => $grandTotalPaise,
+                'grandTotalPaise' => $grandTotalPaise,
+                'subtotal' => $subtotalPaise,
+                'subtotalPaise' => $subtotalPaise,
                 'taxAmount' => $taxRupees,
-                'taxPaise' => (int) ($rawTax > 100000 ? $rawTax : $rawTax * 100),
+                'taxPaise' => $taxPaise,
                 'balanceDue' => $dueRupees,
-                'dueAmount' => (int) ($rawDue > 100000 ? $rawDue : $rawDue * 100),
-                'duePaise' => (int) ($rawDue > 100000 ? $rawDue : $rawDue * 100),
-                'paidPaise' => (int) (($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) > 100000 ? ($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) : ($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) * 100),
-                'paidAmount' => (int) (($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) > 100000 ? ($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) : ($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) * 100),
+                'dueAmount' => $duePaise,
+                'duePaise' => $duePaise,
+                'paidPaise' => $paidPaise,
+                'paidAmount' => $paidPaise,
                 'paymentMode' => strtoupper((string) ($fields['paymentMode'] ?? $inv->payment_mode ?? 'CASH')),
                 'paymentStatus' => strtoupper((string) ($fields['paymentStatus'] ?? $inv->payment_status ?? 'PAID')),
                 'status' => strtoupper((string) ($fields['status'] ?? $inv->status ?? 'PAID')),

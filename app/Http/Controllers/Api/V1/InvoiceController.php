@@ -196,12 +196,12 @@ class InvoiceController extends Controller
             ->first();
 
         if (! $row) {
-            return ApiResponse::error('Invoice not found.', 'NOT_FOUND', 404);
+            return ApiResponse::error('Invoice not found.', 404, null, 'NOT_FOUND');
         }
 
         $user = $request->user();
         if ($user && ! $user->canAccessBusiness((string) $row->business_id)) {
-            return ApiResponse::error('Unauthorized access to this invoice.', 'FORBIDDEN', 403);
+            return ApiResponse::error('Unauthorized access to this invoice.', 403, null, 'FORBIDDEN');
         }
 
         $payload = json_decode($row->payload, true) ?: [];
@@ -233,7 +233,11 @@ class InvoiceController extends Controller
 
         $dueAmount = (int) ($fields['dueAmount'] ?? $fields['duePaise'] ?? 0);
         $paidPaise = (int) ($fields['paidPaise'] ?? $fields['paidAmount'] ?? 0);
-        $totalAmount = (int) ($fields['totalAmount'] ?? $fields['grandTotal'] ?? $fields['subtotal'] ?? 0);
+        $totalAmount = (int) ($fields['totalAmount'] ?? $fields['grandTotal'] ?? $fields['grandTotalPaise'] ?? $fields['subtotal'] ?? 0);
+        $subtotal = (int) ($fields['subtotal'] ?? $fields['subtotalPaise'] ?? 0);
+        $discount = (int) ($fields['discount'] ?? $fields['discountAmount'] ?? $fields['discountPaise'] ?? 0);
+        $gstAmount = (int) ($fields['gstAmount'] ?? $fields['taxPaise'] ?? 0);
+        $taxable = (int) ($fields['taxableAmount'] ?? $fields['taxablePaise'] ?? max(0, $subtotal - $discount));
 
         $data = [
             'invoiceId' => $row->id,
@@ -246,13 +250,25 @@ class InvoiceController extends Controller
             'customerPhone' => $fields['customerPhone'] ?? null,
             'customerGstin' => $fields['customerGstin'] ?? null,
             'customerStateCode' => $fields['customerStateCode'] ?? null,
-            'subtotal' => (int) ($fields['subtotal'] ?? 0),
-            'discount' => (int) ($fields['discount'] ?? $fields['discountAmount'] ?? 0),
-            'gstAmount' => (int) ($fields['gstAmount'] ?? 0),
+            'subtotal' => $subtotal,
+            'subtotalPaise' => $subtotal,
+            'discount' => $discount,
+            'discountPaise' => $discount,
+            'taxableAmount' => $taxable,
+            'taxablePaise' => $taxable,
+            'gstAmount' => $gstAmount,
+            'taxPaise' => $gstAmount,
+            'cgstPaise' => (int) ($fields['cgstPaise'] ?? ($gstAmount > 0 ? (int) ($gstAmount / 2) : 0)),
+            'sgstPaise' => (int) ($fields['sgstPaise'] ?? ($gstAmount > 0 ? (int) ($gstAmount / 2) : 0)),
+            'igstPaise' => (int) ($fields['igstPaise'] ?? 0),
+            'roundOffPaise' => (int) ($fields['roundOffPaise'] ?? 0),
             'totalAmount' => $totalAmount,
+            'grandTotal' => $totalAmount,
+            'grandTotalPaise' => $totalAmount,
             'dueAmount' => $dueAmount,
             'duePaise' => $dueAmount,
             'paidPaise' => $paidPaise,
+            'paidAmount' => $paidPaise,
             'dueDate' => $fields['dueDate'] ?? null,
             'paymentMode' => $fields['paymentMode'] ?? 'CASH',
             'paymentStatus' => $fields['paymentStatus'] ?? ($dueAmount == 0 ? 'PAID' : 'PARTIALLY_PAID'),

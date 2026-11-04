@@ -22,6 +22,7 @@ class CustomerController extends Controller
         $search = trim((string) ($request->query('search') ?? $request->query('q') ?? ''));
         $phone = trim((string) ($request->query('phone') ?? ''));
         $statusFilter = strtoupper((string) ($request->query('status') ?? 'ACTIVE'));
+        $filter = strtolower(trim((string) ($request->query('filter') ?? $request->query('custom_filter') ?? '')));
 
         $user = $request->user();
         if (! $businessId) {
@@ -54,7 +55,77 @@ class CustomerController extends Controller
             }
         }
 
-        // 2. Fetch customers for this business
+        // 2. Fetch non-cancelled invoices to compute customer purchase metrics (Frequent, Overdue, High Purchase)
+        $invoiceRows = DB::table('invoices')
+            ->where('business_id', $businessId)
+            ->where('is_deleted', 0)
+            ->where(function ($q) {
+                $q->whereNull('status')->orWhere('status', '!=', 'CANCELLED');
+            })
+            ->when($outletId, fn ($query) => $query->where(function ($scope) use ($outletId) {
+                $scope->where('outlet_id', $outletId)->orWhereNull('outlet_id')->orWhere('outlet_id', '');
+            }))
+            ->get();
+
+        $statsByCustomer = [];
+        $now = now();
+        $cutoff90Days = $now->copy()->subDays(90);
+        $creditPeriodCutoff = $now->copy()->subDays(30);
+
+        foreach ($invoiceRows as $inv) {
+            $p = json_decode($inv->payload ?? '{}', true) ?: [];
+            $fields = $p['fields'] ?? [];
+            $cId = (string) ($fields['customerId'] ?? $inv->customer_id ?? '');
+            if (! $cId) {
+                continue;
+            }
+
+            if (! isset($statsByCustomer[$cId])) {
+                $statsByCustomer[$cId] = [
+                    'purchasesCount' => 0,
+                    'recentPurchasesCount' => 0,
+                    'totalPurchasesPaise' => 0,
+                    'hasOverdueInvoice' => false,
+                    'latestInvoiceDate' => null,
+                ];
+            }
+
+            $invDate = $inv->created_at ? \Carbon\Carbon::parse($inv->created_at) : ($fields['createdAt'] ? \Carbon\Carbon::parse($fields['createdAt']) : null);
+            $rawTotal = (float) ($fields['totalAmount'] ?? $fields['grandTotal'] ?? $fields['subtotal'] ?? $inv->total_amount ?? 0);
+            $isPaise = isset($fields['grandTotal']) || isset($fields['subtotalPaise']) || isset($fields['grandTotalPaise']) || $rawTotal >= 10000;
+            $grandTotalPaise = (int) ($isPaise ? $rawTotal : round($rawTotal * 100));
+
+            $statsByCustomer[$cId]['purchasesCount']++;
+            $statsByCustomer[$cId]['totalPurchasesPaise'] += $grandTotalPaise;
+
+            if ($invDate) {
+                if ($statsByCustomer[$cId]['latestInvoiceDate'] === null || $invDate->greaterThan($statsByCustomer[$cId]['latestInvoiceDate'])) {
+                    $statsByCustomer[$cId]['latestInvoiceDate'] = $invDate;
+                }
+                if ($invDate->greaterThanOrEqualTo($cutoff90Days)) {
+                    $statsByCustomer[$cId]['recentPurchasesCount']++;
+                }
+            }
+
+            $dueAmount = (int) ($fields['dueAmount'] ?? $fields['duePaise'] ?? 0);
+            if ($dueAmount > 0) {
+                $dueDate = isset($fields['dueDate']) && ! empty($fields['dueDate']) ? \Carbon\Carbon::parse($fields['dueDate']) : null;
+                if ($dueDate && $dueDate->isPast()) {
+                    $statsByCustomer[$cId]['hasOverdueInvoice'] = true;
+                } elseif ($invDate && $invDate->lessThan($creditPeriodCutoff)) {
+                    $statsByCustomer[$cId]['hasOverdueInvoice'] = true;
+                }
+            }
+        }
+
+        // Adaptive high purchase threshold (default 5,000,000 paise / ₹50,000; adapts to top spenders if early stage)
+        $maxPurchase = ! empty($statsByCustomer) ? max(array_column($statsByCustomer, 'totalPurchasesPaise')) : 0;
+        $highPurchaseThreshold = 5000000;
+        if ($maxPurchase > 0 && $maxPurchase < $highPurchaseThreshold) {
+            $highPurchaseThreshold = (int) ($maxPurchase * 0.7);
+        }
+
+        // 3. Fetch customers for this business
         $query = DB::table('customers')
             ->where('business_id', $businessId)
             ->where('is_deleted', 0);
@@ -114,6 +185,43 @@ class CustomerController extends Controller
                 'advancePaise' => (int) ($fields['advancePaise'] ?? 0),
             ];
 
+            $custStats = $statsByCustomer[$cId] ?? [
+                'purchasesCount' => 0,
+                'recentPurchasesCount' => 0,
+                'totalPurchasesPaise' => 0,
+                'hasOverdueInvoice' => false,
+                'latestInvoiceDate' => null,
+            ];
+
+            $isFrequent = $custStats['recentPurchasesCount'] >= 3 || $custStats['purchasesCount'] >= 3;
+            $isOverdue = $bal['duePaise'] > 0 && (
+                $custStats['hasOverdueInvoice'] ||
+                ($custStats['latestInvoiceDate'] && $custStats['latestInvoiceDate']->lessThan($creditPeriodCutoff)) ||
+                ($creditLimit !== null && $bal['duePaise'] > $creditLimit) ||
+                (! $custStats['latestInvoiceDate'] && $row->created_at && \Carbon\Carbon::parse($row->created_at)->lessThan($creditPeriodCutoff))
+            );
+            $isHighPurchase = $custStats['totalPurchasesPaise'] >= $highPurchaseThreshold && $custStats['totalPurchasesPaise'] > 0;
+
+            // Apply custom filter if requested
+            if ($filter === 'frequent' && ! $isFrequent) {
+                continue;
+            }
+            if ($filter === 'overdue' && ! $isOverdue) {
+                continue;
+            }
+            if ($filter === 'high_purchase' && ! $isHighPurchase) {
+                continue;
+            }
+            if (($filter === 'has_due' || $filter === 'due') && $bal['duePaise'] <= 0) {
+                continue;
+            }
+            if (($filter === 'has_advance' || $filter === 'advance') && $bal['advancePaise'] <= 0) {
+                continue;
+            }
+            if ($filter === 'settled' && ($bal['duePaise'] > 0 || $bal['advancePaise'] > 0)) {
+                continue;
+            }
+
             $customers[] = [
                 'customerId' => $cId,
                 'businessId' => $businessId,
@@ -129,6 +237,12 @@ class CustomerController extends Controller
                 'duePaise' => $bal['duePaise'],
                 'advancePaise' => $bal['advancePaise'],
                 'status' => (string) ($fields['status'] ?? 'ACTIVE'),
+                'totalPurchasesPaise' => $custStats['totalPurchasesPaise'],
+                'purchasesCount' => $custStats['purchasesCount'],
+                'recentPurchasesCount' => $custStats['recentPurchasesCount'],
+                'isFrequent' => $isFrequent,
+                'isOverdue' => $isOverdue,
+                'isHighPurchase' => $isHighPurchase,
                 'createdAt' => $fields['createdAt'] ?? $row->created_at,
                 'updatedAt' => $fields['updatedAt'] ?? $row->updated_at,
             ];
@@ -177,6 +291,69 @@ class CustomerController extends Controller
 
         $name = (string) ($fields['customerName'] ?? $fields['name'] ?? '');
 
+        // Compute metrics for single customer
+        $invoices = DB::table('invoices')
+            ->where('business_id', $businessId)
+            ->where('is_deleted', 0)
+            ->where(function ($q) {
+                $q->whereNull('status')->orWhere('status', '!=', 'CANCELLED');
+            })
+            ->where(function ($q) use ($id) {
+                $q->where('customer_id', $id)
+                    ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.customerId')) = ?", [$id]);
+            })
+            ->get();
+
+        $purchasesCount = 0;
+        $recentPurchasesCount = 0;
+        $totalPurchasesPaise = 0;
+        $hasOverdueInvoice = false;
+        $latestInvoiceDate = null;
+        $now = now();
+        $cutoff90Days = $now->copy()->subDays(90);
+        $creditPeriodCutoff = $now->copy()->subDays(30);
+
+        foreach ($invoices as $inv) {
+            $p = json_decode($inv->payload ?? '{}', true) ?: [];
+            $f = $p['fields'] ?? [];
+            $invDate = $inv->created_at ? \Carbon\Carbon::parse($inv->created_at) : ($f['createdAt'] ? \Carbon\Carbon::parse($f['createdAt']) : null);
+            $rawTotal = (float) ($f['totalAmount'] ?? $f['grandTotal'] ?? $f['subtotal'] ?? $inv->total_amount ?? 0);
+            $isPaise = isset($f['grandTotal']) || isset($f['subtotalPaise']) || isset($f['grandTotalPaise']) || $rawTotal >= 10000;
+            $grandTotalPaise = (int) ($isPaise ? $rawTotal : round($rawTotal * 100));
+
+            $purchasesCount++;
+            $totalPurchasesPaise += $grandTotalPaise;
+
+            if ($invDate) {
+                if ($latestInvoiceDate === null || $invDate->greaterThan($latestInvoiceDate)) {
+                    $latestInvoiceDate = $invDate;
+                }
+                if ($invDate->greaterThanOrEqualTo($cutoff90Days)) {
+                    $recentPurchasesCount++;
+                }
+            }
+
+            $dueAmount = (int) ($f['dueAmount'] ?? $f['duePaise'] ?? 0);
+            if ($dueAmount > 0) {
+                $dueDate = isset($f['dueDate']) && ! empty($f['dueDate']) ? \Carbon\Carbon::parse($f['dueDate']) : null;
+                if ($dueDate && $dueDate->isPast()) {
+                    $hasOverdueInvoice = true;
+                } elseif ($invDate && $invDate->lessThan($creditPeriodCutoff)) {
+                    $hasOverdueInvoice = true;
+                }
+            }
+        }
+
+        $creditLimit = isset($fields['creditLimitPaise']) ? (int) $fields['creditLimitPaise'] : null;
+        $isFrequent = $recentPurchasesCount >= 3 || $purchasesCount >= 3;
+        $isOverdue = $duePaise > 0 && (
+            $hasOverdueInvoice ||
+            ($latestInvoiceDate && $latestInvoiceDate->lessThan($creditPeriodCutoff)) ||
+            ($creditLimit !== null && $duePaise > $creditLimit) ||
+            (! $latestInvoiceDate && $row->created_at && \Carbon\Carbon::parse($row->created_at)->lessThan($creditPeriodCutoff))
+        );
+        $isHighPurchase = $totalPurchasesPaise >= 5000000;
+
         $customer = [
             'customerId' => $id,
             'businessId' => $businessId,
@@ -188,10 +365,16 @@ class CustomerController extends Controller
             'gstin' => $fields['gstin'] ?? null,
             'address' => $fields['address'] ?? null,
             'stateCode' => $fields['stateCode'] ?? null,
-            'creditLimitPaise' => isset($fields['creditLimitPaise']) ? (int) $fields['creditLimitPaise'] : null,
+            'creditLimitPaise' => $creditLimit,
             'duePaise' => $duePaise,
             'advancePaise' => $advancePaise,
             'status' => (string) ($fields['status'] ?? 'ACTIVE'),
+            'totalPurchasesPaise' => $totalPurchasesPaise,
+            'purchasesCount' => $purchasesCount,
+            'recentPurchasesCount' => $recentPurchasesCount,
+            'isFrequent' => $isFrequent,
+            'isOverdue' => $isOverdue,
+            'isHighPurchase' => $isHighPurchase,
             'createdAt' => $fields['createdAt'] ?? $row->created_at,
             'updatedAt' => $fields['updatedAt'] ?? $row->updated_at,
         ];

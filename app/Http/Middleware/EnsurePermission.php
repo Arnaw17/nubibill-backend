@@ -72,6 +72,87 @@ class EnsurePermission
             }
         }
 
+        if ($authorization->isManager($user)) {
+            // Managers have operational outlet access but cannot alter global settings, tax schemas, or role configurations
+            if (($request->is('*businesses/*/settings*') || $request->is('*settings*') || $request->is('*roles*') || $request->is('*permissions*')) && ! $request->isMethod('GET')) {
+                return ApiResponse::error('Managers cannot alter global settings, tax schemas, or role configurations.', 403, null, 'PERMISSION_DENIED');
+            }
+        }
+
+        if ($authorization->isSalesManager($user)) {
+            // Sales Managers have retail & POS access but no access to supplier purchases or payroll
+            if ($request->is([
+                '*purchases*',
+                '*suppliers*',
+                '*supplier-refunds*',
+                '*payroll*',
+                '*salary*',
+            ])) {
+                return ApiResponse::error('Sales Managers are restricted from supplier purchases, vendor ledgers, and payroll.', 403, null, 'PERMISSION_DENIED');
+            }
+        }
+
+        if ($authorization->isPurchaseManager($user)) {
+            // Purchase Managers have procurement access but no retail billing or payroll
+            if ((($request->is('*invoices*') || $request->is('*bills*')) && ! $request->isMethod('GET'))
+                || $request->is('*payroll*') || $request->is('*salary*')) {
+                return ApiResponse::error('Purchase Managers are restricted from retail POS billing and payroll management.', 403, null, 'PERMISSION_DENIED');
+            }
+        }
+
+        if ($authorization->isInventoryStaff($user)) {
+            // Inventory Staff have stock adjustment access but no financial sales, khata, or supplier bills
+            if ($request->is([
+                '*invoices*',
+                '*bills*',
+                '*customers*',
+                '*purchases*',
+                '*suppliers*',
+                '*supplier-refunds*',
+                '*payments*',
+                '*financial*',
+                '*expenses*',
+                '*payroll*',
+                '*salary*',
+            ])) {
+                return ApiResponse::error('Inventory Staff are restricted from financial sales, customer khata, and supplier bills.', 403, null, 'PERMISSION_DENIED');
+            }
+        }
+
+        if ($authorization->isGodownManager($user)) {
+            // Godown Managers have warehouse logistics access but no retail billing counters or financial accounts
+            if ($request->is([
+                '*invoices*',
+                '*bills*',
+                '*customers*',
+                '*payments*',
+                '*financial*',
+                '*expenses*',
+                '*payroll*',
+                '*salary*',
+            ])) {
+                return ApiResponse::error('Godown Managers are restricted from retail billing counters and financial accounts.', 403, null, 'PERMISSION_DENIED');
+            }
+        }
+
+        if ($authorization->isSupplierManager($user)) {
+            // Supplier Managers have vendor CRUD & ledger access but no retail sales or inventory adjustments
+            if ($request->is([
+                '*invoices*',
+                '*bills*',
+                '*pos*',
+            ]) || ($request->is(['*inventory/adjust*', '*inventory/transfer*', '*storage*']) && ! $request->isMethod('GET'))) {
+                return ApiResponse::error('Supplier Managers are restricted from retail sales and physical inventory adjustments.', 403, null, 'PERMISSION_DENIED');
+            }
+        }
+
+        if ($authorization->isReportsViewer($user)) {
+            // Reports Viewers have strictly read-only access
+            if (! $request->isMethod('GET')) {
+                return ApiResponse::error('Reports Viewers have strictly read-only access and cannot modify or create records.', 403, null, 'PERMISSION_DENIED');
+            }
+        }
+
         if (! $authorization->isAuthorized($user, $permissions)) {
             return ApiResponse::error('You do not have permission to perform this operation.', 403, null, 'PERMISSION_DENIED');
         }

@@ -129,7 +129,7 @@ class EmployeePermissionService
         return false;
     }
 
-    public function isBillingStaff(User $user): bool
+    public function hasRole(User $user, array $aliases): bool
     {
         if (strtoupper((string) $user->role) !== 'STAFF') {
             return false;
@@ -144,8 +144,10 @@ class EmployeePermissionService
             $employee['fields']['roleIds'] ?? (isset($employee['fields']['roleId']) ? [$employee['fields']['roleId']] : [])
         );
         $roleIdsLower = array_map('strtolower', $roleIds);
+        $aliasesLower = array_map('strtolower', $aliases);
+
         foreach ($roleIdsLower as $id) {
-            if (in_array($id, ['role_billing_staff', 'billing_staff', 'role_billing', 'billing'], true)) {
+            if (in_array($id, $aliasesLower, true)) {
                 return true;
             }
         }
@@ -157,7 +159,7 @@ class EmployeePermissionService
             $roleId = strtolower((string) ($fields['roleId'] ?? $row->id));
             $roleName = strtolower(str_replace([' ', '-'], '_', (string) ($fields['roleName'] ?? $fields['name'] ?? '')));
             if (in_array($roleId, $roleIdsLower, true)) {
-                if (in_array($roleName, ['billing_staff', 'billing', 'role_billing_staff', 'role_billing'], true)) {
+                if (in_array($roleName, $aliasesLower, true)) {
                     return true;
                 }
             }
@@ -166,41 +168,49 @@ class EmployeePermissionService
         return false;
     }
 
+    public function isManager(User $user): bool
+    {
+        return $this->hasRole($user, ['role_manager', 'manager']);
+    }
+
+    public function isSalesManager(User $user): bool
+    {
+        return $this->hasRole($user, ['role_sales_manager', 'sales_manager']);
+    }
+
+    public function isPurchaseManager(User $user): bool
+    {
+        return $this->hasRole($user, ['role_purchase_manager', 'purchase_manager']);
+    }
+
+    public function isInventoryStaff(User $user): bool
+    {
+        return $this->hasRole($user, ['role_inventory_staff', 'inventory_staff']);
+    }
+
+    public function isGodownManager(User $user): bool
+    {
+        return $this->hasRole($user, ['role_godown_manager', 'godown_manager']);
+    }
+
+    public function isSupplierManager(User $user): bool
+    {
+        return $this->hasRole($user, ['role_supplier_manager', 'supplier_manager']);
+    }
+
+    public function isReportsViewer(User $user): bool
+    {
+        return $this->hasRole($user, ['role_reports_viewer', 'reports_viewer']);
+    }
+
+    public function isBillingStaff(User $user): bool
+    {
+        return $this->hasRole($user, ['role_billing_staff', 'billing_staff', 'role_billing', 'billing']);
+    }
+
     public function isAccountant(User $user): bool
     {
-        if (strtoupper((string) $user->role) !== 'STAFF') {
-            return false;
-        }
-
-        $employee = $this->employeeFor($user);
-        if ($employee === null) {
-            return false;
-        }
-
-        $roleIds = $this->stringList(
-            $employee['fields']['roleIds'] ?? (isset($employee['fields']['roleId']) ? [$employee['fields']['roleId']] : [])
-        );
-        $roleIdsLower = array_map('strtolower', $roleIds);
-        foreach ($roleIdsLower as $id) {
-            if (in_array($id, ['role_accountant', 'accountant'], true)) {
-                return true;
-            }
-        }
-
-        $roles = DB::table('roles')->where('is_deleted', 0)->get();
-        foreach ($roles as $row) {
-            $payload = json_decode((string) $row->payload, true) ?: [];
-            $fields = $payload['fields'] ?? $payload;
-            $roleId = strtolower((string) ($fields['roleId'] ?? $row->id));
-            $roleName = strtolower(str_replace([' ', '-'], '_', (string) ($fields['roleName'] ?? $fields['name'] ?? '')));
-            if (in_array($roleId, $roleIdsLower, true)) {
-                if (in_array($roleName, ['accountant', 'role_accountant'], true)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        return $this->hasRole($user, ['role_accountant', 'accountant']);
     }
 
     public function defaultOutletFor(User $user, ?string $businessId = null): ?string
@@ -364,7 +374,14 @@ class EmployeePermissionService
         foreach (DB::table('employees')->where('is_deleted', 0)->get() as $row) {
             $payload = json_decode((string) $row->payload, true) ?: [];
             $fields = $payload['fields'] ?? $payload;
-            if ((string) ($fields['uid'] ?? '') !== (string) $user->id) {
+            if (is_array($fields) && class_exists(\App\Http\Controllers\Api\V1\SyncController::class)) {
+                $fields = \App\Http\Controllers\Api\V1\SyncController::decodeFields($fields);
+            }
+            $empUid = $fields['uid'] ?? '';
+            if (is_array($empUid)) {
+                $empUid = $empUid['stringValue'] ?? '';
+            }
+            if ((string) $empUid !== (string) $user->id) {
                 continue;
             }
 
