@@ -48,6 +48,17 @@ class ReportController extends Controller
         $collectedPaise = 0;
         $receivablesOutstandingPaise = 0;
         $categorySales = [];
+        $productCategoryMap = [];
+        try {
+            $allProducts = DB::table('products')->where('business_id', $businessId)->where('is_deleted', 0)->get();
+            foreach ($allProducts as $pr) {
+                $p = json_decode($pr->payload ?? '{}', true) ?: [];
+                $fields = $p['fields'] ?? [];
+                $pId = (string) ($fields['productId'] ?? $pr->id);
+                $cat = $fields['category'] ?? $fields['categoryName'] ?? $pr->category ?? 'General Hardware';
+                $productCategoryMap[$pId] = $cat;
+            }
+        } catch (\Throwable $e) {}
 
         foreach ($invoices as $inv) {
             $p = json_decode($inv->payload ?? '{}', true) ?: [];
@@ -68,10 +79,40 @@ class ReportController extends Controller
             }
 
             $items = $fields['items'] ?? [];
-            if (is_array($items)) {
+            if (empty($items)) {
+                try {
+                    $itemRows = DB::table('invoice_items')
+                        ->where('business_id', $businessId)
+                        ->where(function ($q) use ($inv) {
+                            $q->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.invoiceId')) = ?", [$inv->id])
+                                ->orWhere('invoice_id', $inv->id);
+                        })
+                        ->get();
+                    foreach ($itemRows as $iRow) {
+                        $iPayload = json_decode($iRow->payload ?? '{}', true) ?: [];
+                        $items[] = $iPayload['fields'] ?? [];
+                    }
+                } catch (\Throwable $e) {}
+            }
+
+            if (is_array($items) && !empty($items)) {
                 foreach ($items as $item) {
-                    $cat = $item['category'] ?? $item['productCategory'] ?? 'General Hardware';
-                    $amt = (int) (($item['amount'] ?? ($item['quantity'] ?? 1) * ($item['unitPrice'] ?? 0)) * 100);
+                    $pId = (string) ($item['productId'] ?? $item['product_id'] ?? '');
+                    $cat = $item['category'] ?? $item['productCategory'] ?? ($pId && isset($productCategoryMap[$pId]) ? $productCategoryMap[$pId] : 'General Hardware');
+
+                    if (isset($item['lineTotalPaise']) && (int) $item['lineTotalPaise'] > 0) {
+                        $amt = (int) $item['lineTotalPaise'];
+                    } elseif (isset($item['totalPaise']) && (int) $item['totalPaise'] > 0) {
+                        $amt = (int) $item['totalPaise'];
+                    } elseif (isset($item['unitPricePaise']) && (int) $item['unitPricePaise'] > 0) {
+                        $amt = (int) (($item['quantity'] ?? 1) * $item['unitPricePaise']);
+                    } elseif (isset($item['lineTotal']) && (float) $item['lineTotal'] > 0) {
+                        $amt = (int) round((float) $item['lineTotal'] * 100);
+                    } elseif (isset($item['amount']) && (float) $item['amount'] > 0) {
+                        $amt = (int) round((float) $item['amount'] * 100);
+                    } else {
+                        $amt = (int) round((($item['quantity'] ?? 1) * ($item['unitPrice'] ?? 0)) * 100);
+                    }
                     $categorySales[$cat] = ($categorySales[$cat] ?? 0) + $amt;
                 }
             }
@@ -193,6 +234,10 @@ class ReportController extends Controller
         // Top categories
         $topCategories = [];
         $totalCatSales = array_sum($categorySales);
+        if ($totalCatSales == 0 && $netSalesPaise > 0) {
+            $categorySales['General Hardware'] = $netSalesPaise;
+            $totalCatSales = $netSalesPaise;
+        }
         foreach ($categorySales as $catName => $catPaise) {
             $pct = $totalCatSales > 0 ? round(($catPaise / $totalCatSales) * 100, 1) : 0;
             $topCategories[] = [
@@ -271,7 +316,7 @@ class ReportController extends Controller
 
         $invoices = $query->orderBy('created_at', 'desc')->get();
 
-        $rows = $invoices->map(function ($inv) {
+        $rows = $invoices->map(function ($inv) use ($businessId) {
             $p = json_decode($inv->payload ?? '{}', true) ?: [];
             $fields = $p['fields'] ?? [];
 
@@ -284,15 +329,45 @@ class ReportController extends Controller
             $taxRupees = ($rawTax > 100000 || isset($fields['grandTotal'])) ? round($rawTax / 100, 2) : round($rawTax, 2);
             $dueRupees = ($rawDue > 100000 || isset($fields['grandTotal'])) ? round($rawDue / 100, 2) : round($rawDue, 2);
 
+            $items = $fields['items'] ?? [];
+            if (empty($items)) {
+                try {
+                    $itemRows = DB::table('invoice_items')
+                        ->where('business_id', $businessId)
+                        ->where(function ($q) use ($inv) {
+                            $q->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.invoiceId')) = ?", [$inv->id])
+                                ->orWhere('invoice_id', $inv->id);
+                        })
+                        ->get();
+                    foreach ($itemRows as $iRow) {
+                        $iPayload = json_decode($iRow->payload ?? '{}', true) ?: [];
+                        $items[] = $iPayload['fields'] ?? [];
+                    }
+                } catch (\Throwable $e) {}
+            }
+
             return [
+                'id' => (string) $inv->id,
                 'invoiceId' => (string) ($fields['invoiceId'] ?? $inv->id),
                 'invoiceNumber' => (string) ($fields['invoiceNumber'] ?? $inv->invoice_number ?? $inv->id),
                 'customerName' => (string) ($fields['customerName'] ?? $inv->customer_name ?? 'Cash Customer'),
+                'customerPhone' => (string) ($fields['customerPhone'] ?? $inv->customer_phone ?? ''),
                 'totalAmount' => $totalRupees,
+                'grandTotal' => $rawTotal,
+                'grandTotalPaise' => (int) ($rawTotal > 100000 || isset($fields['grandTotal']) ? $rawTotal : $rawTotal * 100),
+                'subtotal' => (float) ($fields['subtotal'] ?? 0),
+                'subtotalPaise' => (int) (($fields['subtotal'] ?? $rawTotal) > 100000 ? ($fields['subtotal'] ?? $rawTotal) : ($fields['subtotal'] ?? $rawTotal) * 100),
                 'taxAmount' => $taxRupees,
+                'taxPaise' => (int) ($rawTax > 100000 ? $rawTax : $rawTax * 100),
                 'balanceDue' => $dueRupees,
+                'dueAmount' => (int) ($rawDue > 100000 ? $rawDue : $rawDue * 100),
+                'duePaise' => (int) ($rawDue > 100000 ? $rawDue : $rawDue * 100),
+                'paidPaise' => (int) (($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) > 100000 ? ($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) : ($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) * 100),
+                'paidAmount' => (int) (($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) > 100000 ? ($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) : ($fields['paidAmount'] ?? $fields['paidPaise'] ?? $rawTotal) * 100),
                 'paymentMode' => strtoupper((string) ($fields['paymentMode'] ?? $inv->payment_mode ?? 'CASH')),
                 'paymentStatus' => strtoupper((string) ($fields['paymentStatus'] ?? $inv->payment_status ?? 'PAID')),
+                'status' => strtoupper((string) ($fields['status'] ?? $inv->status ?? 'PAID')),
+                'items' => $items,
                 'createdAt' => $inv->created_at ? date('Y-m-d\TH:i:s\Z', strtotime($inv->created_at)) : null,
             ];
         });

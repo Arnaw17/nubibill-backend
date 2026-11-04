@@ -843,11 +843,22 @@ class EmployeeController extends Controller
         }
 
         $activePermissions = [...$activePermissions,
-            'staff.view', 'staff.manage',
-            'expenses.view', 'expenses.create', 'expenses.edit', 'expenses.delete',
+            'billing', 'reports', 'purchase', 'suppliers', 'supplier.payment',
+            'expenses', 'expenses.view', 'expenses.create', 'expenses.edit', 'expenses.delete',
+            'staff_salary', 'staff.view', 'staff.manage', 'inventory.opening_stock',
         ];
 
-        return array_diff([...$permissionIds, ...$revokedPermissionIds], $activePermissions) === [];
+        $normalizedActive = array_unique(array_map(
+            fn (string $p): string => $this->normalizePermissionIdentifier($p),
+            $activePermissions
+        ));
+
+        $candidateCheck = array_map(
+            fn (string $p): string => $this->normalizePermissionIdentifier($p),
+            [...$permissionIds, ...$revokedPermissionIds]
+        );
+
+        return array_diff($candidateCheck, $normalizedActive) === [];
     }
 
     /** @param list<string> $roleIds @return list<string> */

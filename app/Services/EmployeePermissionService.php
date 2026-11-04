@@ -9,6 +9,12 @@ class EmployeePermissionService
 {
     private const FALLBACK_PERMISSION_IDS = [
         'billing',
+        'reports',
+        'purchase',
+        'suppliers',
+        'supplier.payment',
+        'expenses',
+        'staff_salary',
         'staff.view', 'staff.manage',
         'expenses.view', 'expenses.create', 'expenses.edit', 'expenses.delete',
         'inventory.opening_stock',
