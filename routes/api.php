@@ -45,6 +45,7 @@ Route::prefix('v1')->group(function () {
         Route::post('/sync/documents:commit', [SyncController::class, 'commit']);
         Route::post('/sync/commit', [SyncController::class, 'commit']);
         Route::get('/sync/documents/{collection}/{id}', [SyncController::class, 'getDocument']);
+        Route::post('/sync/documents/{collection}/{id?}', [SyncController::class, 'createDocument']);
         Route::post('/sync/documents:runQuery', [SyncController::class, 'runQuery']);
         Route::post('/sync/runQuery', [SyncController::class, 'runQuery']);
     });

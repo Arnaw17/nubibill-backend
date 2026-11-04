@@ -8,6 +8,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 
 class SyncController extends Controller
 {
@@ -311,6 +312,105 @@ class SyncController extends Controller
             'createTime' => $createTime,
             'updateTime' => $updateTime,
         ]);
+    }
+
+    /**
+     * Create or upsert a single document into MySQL in Firestore wire format.
+     */
+    public function createDocument(Request $request, string $collection, ?string $id = null): JsonResponse
+    {
+        $id = $id ?: ($request->query('documentId') ?: $request->input('id'));
+        $rawFields = $request->input('fields', []);
+        $decoded = self::decodeFields($rawFields);
+        $table = $this->resolveTable($collection);
+
+        if (!$table && $collection === 'system_error_analytics') {
+            try {
+                if (!Schema::hasTable('system_error_analytics')) {
+                    Schema::create('system_error_analytics', function ($tableBlueprint) {
+                        $tableBlueprint->string('id', 255)->primary();
+                        $tableBlueprint->string('document_path', 500)->nullable();
+                        $tableBlueprint->string('business_id', 255)->nullable()->index();
+                        $tableBlueprint->string('outlet_id', 255)->nullable()->index();
+                        $tableBlueprint->string('tenant_id', 255)->nullable()->index();
+                        $tableBlueprint->string('status', 100)->default('ACTIVE')->index();
+                        $tableBlueprint->tinyInteger('is_deleted')->default(0)->index();
+                        $tableBlueprint->json('payload')->nullable();
+                        $tableBlueprint->timestamps();
+                    });
+                }
+                $table = 'system_error_analytics';
+            } catch (\Throwable $e) {
+                // Return success representation so error analytics never disrupts client flow
+                $id = $id ?: ($decoded['id'] ?? (string) Str::uuid());
+                $isoNow = now()->toIso8601String();
+                return response()->json([
+                    'name' => "projects/nubibilling-local/databases/(default)/documents/{$collection}/{$id}",
+                    'fields' => self::formatFirestoreFields($rawFields),
+                    'createTime' => $isoNow,
+                    'updateTime' => $isoNow,
+                ], 201);
+            }
+        }
+
+        if (!$table) {
+            return response()->json([
+                'error' => [
+                    'code' => 404,
+                    'message' => "Collection $collection not found.",
+                    'status' => 'NOT_FOUND',
+                ],
+            ], 404);
+        }
+
+        $id = $id ?: ($decoded['id'] ?? (string) Str::uuid());
+        $now = now();
+        $isoNow = $now->toIso8601String();
+        $docPath = "$collection/$id";
+
+        $businessId = $decoded['businessId'] ?? null;
+        $outletId = $decoded['outletId'] ?? null;
+        $tenantId = $decoded['tenantId'] ?? null;
+        $status = strtoupper((string) ($decoded['status'] ?? 'ACTIVE'));
+        $isDeleted = (!empty($decoded['isDeleted']) || $status === 'DELETED') ? 1 : 0;
+
+        $payload = [
+            '_documentId' => $id,
+            '_documentPath' => $docPath,
+            'fields' => $rawFields,
+        ];
+
+        $row = [
+            'id' => $id,
+            'document_path' => $docPath,
+            'business_id' => $businessId,
+            'outlet_id' => $outletId,
+            'status' => $status,
+            'is_deleted' => $isDeleted,
+            'payload' => json_encode($payload),
+            'updated_at' => $now,
+        ];
+
+        if (Schema::hasColumn($table, 'tenant_id')) {
+            $row['tenant_id'] = $tenantId;
+        }
+
+        $existing = DB::table($table)->where('id', $id)->first();
+        if ($existing) {
+            DB::table($table)->where('id', $id)->update($row);
+        } else {
+            $row['created_at'] = isset($decoded['createdAt']) ? Carbon::parse($decoded['createdAt']) : $now;
+            DB::table($table)->insert($row);
+        }
+
+        return response()->json([
+            'name' => "projects/nubibilling-local/databases/(default)/documents/{$collection}/{$id}",
+            'fields' => self::formatFirestoreFields($rawFields),
+            'createTime' => isset($row['created_at']) && $row['created_at'] instanceof \DateTimeInterface
+                ? $row['created_at']->format('Y-m-d\TH:i:s.u\Z')
+                : $isoNow,
+            'updateTime' => $isoNow,
+        ], 201);
     }
 
     /**
