@@ -207,10 +207,16 @@ class AttendanceController extends Controller
         $employee = DB::table('employees')->where('id', $employeeId)->where('is_deleted', 0)->first();
         $employeePayload = json_decode((string) ($employee->payload ?? null), true) ?: [];
         $employeeFields = $employeePayload['fields'] ?? $employeePayload;
+        if (is_array($employeeFields)) {
+            $employeeFields = SyncController::decodeFields($employeeFields);
+        }
+        $empBizIds = (array) ($employeeFields['businessIds'] ?? (isset($employeeFields['businessId']) ? [$employeeFields['businessId']] : []));
+        $empOutletIds = (array) ($employeeFields['outletIds'] ?? (isset($employeeFields['outletId']) ? [$employeeFields['outletId']] : []));
+        $empOwnerUid = (string) ($employeeFields['ownerUid'] ?? '');
         if (! $outlet || ! $employee ||
-            (isset($employeeFields['businessIds']) && ! in_array($businessId, $employeeFields['businessIds'], true)) ||
-            (isset($employeeFields['outletIds']) && ! in_array($outletId, $employeeFields['outletIds'], true)) ||
-            (isset($employeeFields['ownerUid']) && $employeeFields['ownerUid'] !== $tenantId)) {
+            ! in_array($businessId, array_map('strval', $empBizIds), true) ||
+            ! in_array($outletId, array_map('strval', $empOutletIds), true) ||
+            ($empOwnerUid !== '' && $empOwnerUid !== $tenantId)) {
             return ApiResponse::error('The employee and outlet must be assigned to the authorized business.', 422, null, 'ATTENDANCE_SCOPE_MISMATCH');
         }
 

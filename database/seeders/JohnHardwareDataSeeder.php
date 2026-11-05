@@ -707,6 +707,31 @@ class JohnHardwareDataSeeder extends Seeder
         ];
 
         foreach ($employees as $emp) {
+            $empUid = null;
+            if (! empty($emp['loginEnabled']) && ! empty($emp['email'])) {
+                $email = strtolower(trim($emp['email']));
+                $staffUser = \App\Models\User::firstOrNew(['email' => $email]);
+                if (! $staffUser->exists) {
+                    $staffUser->id = (string) \Illuminate\Support\Str::uuid();
+                    $staffUser->name = $emp['name'];
+                    $staffUser->email = $email;
+                    $staffUser->phone = $emp['mobile'] ?? '9876543210';
+                    $staffUser->password = \Illuminate\Support\Facades\Hash::make('Password123!');
+                    $staffUser->role = 'STAFF';
+                    $staffUser->status = 'ACTIVE';
+                    $staffUser->email_verified_at = now();
+                    $staffUser->activated_at = now();
+                    $staffUser->business_id = $businessId;
+                    $staffUser->save();
+                } else {
+                    if (empty($staffUser->business_id)) {
+                        $staffUser->business_id = $businessId;
+                        $staffUser->save();
+                    }
+                }
+                $empUid = (string) $staffUser->id;
+            }
+
             DB::table('employees')->updateOrInsert(
                 ['id' => $emp['id']],
                 [
@@ -722,6 +747,7 @@ class JohnHardwareDataSeeder extends Seeder
                         '_documentId' => $emp['id'],
                         'fields' => [
                             'employeeId' => $emp['id'],
+                            'uid' => $empUid,
                             'name' => $emp['name'],
                             'email' => $emp['email'],
                             'mobile' => $emp['mobile'],

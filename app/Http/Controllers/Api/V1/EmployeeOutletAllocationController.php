@@ -215,8 +215,12 @@ class EmployeeOutletAllocationController extends Controller
     private function fields(?string $payload): array
     {
         $decoded = json_decode((string) $payload, true) ?: [];
+        $fields = $decoded['fields'] ?? $decoded;
+        if (is_array($fields)) {
+            $fields = SyncController::decodeFields($fields);
+        }
 
-        return $decoded['fields'] ?? $decoded;
+        return $fields;
     }
 
     /** @param array<string, mixed> $fields */

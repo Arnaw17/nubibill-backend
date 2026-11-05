@@ -23,17 +23,8 @@ class BusinessController extends Controller
     {
         $user = $request->user();
         $userId = (string) $user->id;
-        $assignedBusinessIds = [];
-        if (strtoupper((string) $user->role) === 'STAFF') {
-            foreach (DB::table('employees')->where('is_deleted', 0)->get() as $employeeRow) {
-                $employeePayload = json_decode($employeeRow->payload, true) ?: [];
-                $employeeFields = $employeePayload['fields'] ?? $employeePayload;
-                if ((string) ($employeeFields['uid'] ?? '') === $userId) {
-                    $assignedBusinessIds = $employeeFields['businessIds'] ?? [];
-                    break;
-                }
-            }
-        }
+        $isStaff = strtoupper((string) $user->role) === 'STAFF';
+        $assignedBusinessIds = $isStaff ? $user->accessibleBusinessIds() : [];
 
         $rows = DB::table('businesses')
             ->where('is_deleted', 0)
@@ -41,12 +32,15 @@ class BusinessController extends Controller
 
         $businesses = [];
         foreach ($rows as $row) {
-            $payload = json_decode($row->payload, true) ?: [];
-            $fields = $payload['fields'] ?? [];
+            $payload = json_decode((string) $row->payload, true) ?: [];
+            $fields = $payload['fields'] ?? $payload;
+            if (is_array($fields)) {
+                $fields = SyncController::decodeFields($fields);
+            }
 
             $ownerUid = (string) ($fields['ownerUid'] ?? $row->owner_uid ?? '');
 
-            // Non-admin users only see businesses they own
+            // Non-admin users only see businesses they own or are assigned to
             $businessId = (string) ($fields['businessId'] ?? $row->business_id ?? $row->id);
             if (! $user->isAdmin() && $ownerUid !== $userId && ! in_array($businessId, $assignedBusinessIds, true)) {
                 continue;
@@ -251,10 +245,14 @@ class BusinessController extends Controller
             return ApiResponse::error('Business not found.', 404);
         }
 
-        $payload = json_decode($row->payload, true) ?: [];
-        $fields = $payload['fields'] ?? [];
+        $payload = json_decode((string) $row->payload, true) ?: [];
+        $fields = $payload['fields'] ?? $payload;
+        if (is_array($fields)) {
+            $fields = SyncController::decodeFields($fields);
+        }
 
-        if (! $user->isAdmin() && ($fields['ownerUid'] ?? '') !== (string) $user->id
+        $ownerUid = (string) ($fields['ownerUid'] ?? $row->owner_uid ?? '');
+        if (! $user->isAdmin() && $ownerUid !== (string) $user->id
             && ! $this->employeeHasBusiness($user, $id)) {
             return ApiResponse::error('Unauthorized access to this business.', 403);
         }
@@ -280,12 +278,17 @@ class BusinessController extends Controller
             return ApiResponse::error('Business not found.', 404);
         }
 
-        $bPayload = json_decode($businessRow->payload, true) ?: [];
+        $bPayload = json_decode((string) $businessRow->payload, true) ?: [];
+        $bFields = $bPayload['fields'] ?? $bPayload;
+        if (is_array($bFields)) {
+            $bFields = SyncController::decodeFields($bFields);
+        }
         $employee = $this->employeeFieldsForBusiness($user, $businessId);
-        if (! $user->isAdmin() && ($bPayload['fields']['ownerUid'] ?? '') !== $userId && $employee === null) {
+        $bOwnerUid = (string) ($bFields['ownerUid'] ?? $businessRow->owner_uid ?? '');
+        if (! $user->isAdmin() && $bOwnerUid !== $userId && $employee === null) {
             return ApiResponse::error('Unauthorized access to this business.', 403);
         }
-        $businessOwnerUid = (string) ($bPayload['fields']['ownerUid'] ?? $businessRow->owner_uid ?? $userId);
+        $businessOwnerUid = $bOwnerUid ?: (string) ($businessRow->owner_uid ?? $userId);
 
         if (! \Illuminate\Support\Facades\Schema::hasTable('outlets')) {
             return ApiResponse::success([], 'Outlets retrieved successfully.');
@@ -298,16 +301,23 @@ class BusinessController extends Controller
 
         $outlets = [];
         foreach ($rows as $row) {
-            $p = json_decode($row->payload, true) ?: [];
-            $f = $p['fields'] ?? [];
-            if ($employee !== null && ! in_array((string) ($f['outletId'] ?? $row->outlet_id ?? $row->id), $employee['outletIds'] ?? [], true)) {
-                continue;
+            $p = json_decode((string) $row->payload, true) ?: [];
+            $f = $p['fields'] ?? $p;
+            if (is_array($f)) {
+                $f = SyncController::decodeFields($f);
+            }
+            $outletId = (string) ($f['outletId'] ?? $row->outlet_id ?? $row->id);
+            if ($employee !== null) {
+                $empOutletIds = (array) ($employee['outletIds'] ?? (isset($employee['outletId']) ? [$employee['outletId']] : []));
+                if (! in_array($outletId, array_map('strval', $empOutletIds), true)) {
+                    continue;
+                }
             }
             $statusVal = strtolower((string) ($f['status'] ?? $row->status ?? 'active'));
             $isActive = $f['isActive'] ?? ($statusVal === 'active');
             if ($isActive) {
                 $outlets[] = [
-                    'outletId' => (string) ($f['outletId'] ?? $row->outlet_id ?? $row->id),
+                    'outletId' => $outletId,
                     'businessId' => $businessId,
                     'ownerUid' => (string) ($f['ownerUid'] ?? $businessOwnerUid),
                     'tenantId' => (string) ($f['tenantId'] ?? $businessOwnerUid),
@@ -340,10 +350,14 @@ class BusinessController extends Controller
         }
 
         foreach (DB::table('employees')->where('is_deleted', 0)->get() as $employeeRow) {
-            $payload = json_decode($employeeRow->payload, true) ?: [];
+            $payload = json_decode((string) $employeeRow->payload, true) ?: [];
             $fields = $payload['fields'] ?? $payload;
-            if ((string) ($fields['uid'] ?? '') === (string) $user->id
-                && in_array($businessId, $fields['businessIds'] ?? [], true)) {
+            if (is_array($fields)) {
+                $fields = SyncController::decodeFields($fields);
+            }
+            $empUid = (string) ($fields['uid'] ?? '');
+            $empBizIds = (array) ($fields['businessIds'] ?? (isset($fields['businessId']) ? [$fields['businessId']] : []));
+            if ($empUid === (string) $user->id && in_array($businessId, array_map('strval', $empBizIds), true)) {
                 return $fields;
             }
         }

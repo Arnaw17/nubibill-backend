@@ -170,10 +170,24 @@ class SyncController extends Controller
                         $isDeleted = (!empty($decoded['isDeleted']) || $status === 'DELETED') ? 1 : 0;
                         $docPath = "$collection/$id";
 
+                        $existing = DB::table($collection)->where('id', $id)->first();
+                        $existingPayload = $existing ? (json_decode($existing->payload, true) ?: []) : [];
+                        $mergedFields = array_merge($existingPayload['fields'] ?? [], $rawFields);
+
+                        if (!$businessId) {
+                            $businessId = $decoded['businessId'] ?? ($existing->business_id ?? null);
+                        }
+                        if (!$outletId) {
+                            $outletId = $decoded['outletId'] ?? ($existing->outlet_id ?? null);
+                        }
+                        if (!$tenantId) {
+                            $tenantId = $decoded['tenantId'] ?? ($existing->tenant_id ?? null);
+                        }
+
                         $payload = [
                             '_documentId' => $id,
                             '_documentPath' => $docPath,
-                            'fields' => $rawFields,
+                            'fields' => $mergedFields,
                         ];
 
                         $row = [
@@ -191,7 +205,6 @@ class SyncController extends Controller
                             $row['tenant_id'] = $tenantId;
                         }
 
-                        $existing = DB::table($collection)->where('id', $id)->first();
                         if ($existing) {
                             DB::table($collection)->where('id', $id)->update($row);
                         } else {
@@ -481,7 +494,20 @@ class SyncController extends Controller
                 if ($col) {
                     switch ($op) {
                         case 'EQUAL':
-                            $query->where($col, '=', $val);
+                            if (Schema::hasColumn($table, 'payload') && is_string($val)) {
+                                $query->where(function ($sub) use ($col, $val, $fieldPath) {
+                                    $sub->where($col, '=', $val)
+                                        ->orWhere(function ($fallback) use ($col, $val, $fieldPath) {
+                                            $fallback->whereNull($col)
+                                                ->whereRaw(
+                                                    "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.{$fieldPath}.stringValue')), JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.{$fieldPath}'))) = ?",
+                                                    [$val]
+                                                );
+                                        });
+                                });
+                            } else {
+                                $query->where($col, '=', $val);
+                            }
                             break;
                         case 'NOT_EQUAL':
                             $query->where($col, '!=', $val);
