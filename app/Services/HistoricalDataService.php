@@ -71,10 +71,18 @@ class HistoricalDataService
                 throw new InvalidArgumentException("Quantity for item {$index} must be greater than zero.");
             }
             // Support both paise and rupees
-            $rawRate = (float) ($item['sale_rate'] ?? $item['rate'] ?? $item['unit_price_paise'] ?? 0);
-            $unitPricePaise = $rawRate > 0 && $rawRate < 1000 && ! isset($item['unit_price_paise']) ? (int) round($rawRate * 100) : (int) round($rawRate);
+            $rawRate = (float) ($item['sale_rate'] ?? $item['rate'] ?? 0);
+            if (isset($item['unit_price_paise'])) {
+                $unitPricePaise = (int) $item['unit_price_paise'];
+            } elseif (isset($item['rate_paise'])) {
+                $unitPricePaise = (int) $item['rate_paise'];
+            } elseif ($rawRate > 0 && $rawRate < 100000) {
+                $unitPricePaise = (int) round($rawRate * 100);
+            } else {
+                $unitPricePaise = (int) round($rawRate);
+            }
             $rawDiscount = (float) ($item['discount'] ?? $item['discount_paise'] ?? 0);
-            $discountPaise = $rawDiscount > 0 && $rawDiscount < 1000 && ! isset($item['discount_paise']) ? (int) round($rawDiscount * 100) : (int) round($rawDiscount);
+            $discountPaise = isset($item['discount_paise']) ? (int) $item['discount_paise'] : (int) round($rawDiscount * 100);
 
             $grossPaise = (int) round($qty * $unitPricePaise);
             $discountPaise = min($discountPaise, $grossPaise);
@@ -555,7 +563,15 @@ class HistoricalDataService
             }
 
             $rawRate = (float) ($item['rate'] ?? $item['purchase_rate'] ?? 0);
-            $ratePaise = $rawRate > 0 && $rawRate < 1000 && ! isset($item['rate_paise']) ? (int) round($rawRate * 100) : (int) round($rawRate);
+            if (isset($item['rate_paise'])) {
+                $ratePaise = (int) $item['rate_paise'];
+            } elseif (isset($item['unit_price_paise'])) {
+                $ratePaise = (int) $item['unit_price_paise'];
+            } elseif ($rawRate > 0 && $rawRate < 100000) {
+                $ratePaise = (int) round($rawRate * 100);
+            } else {
+                $ratePaise = (int) round($rawRate);
+            }
 
             $gstRateBps = (int) ($item['gst_rate_bps'] ?? $item['gst_percentage'] ?? 18);
             if ($gstRateBps < 100) {

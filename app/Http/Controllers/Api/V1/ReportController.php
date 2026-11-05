@@ -31,12 +31,18 @@ class ReportController extends Controller
 
         $startDt = date('Y-m-d 00:00:00', strtotime($startDate));
         $endDt = date('Y-m-d 23:59:59', strtotime($endDate));
+        $recordScope = strtolower($request->query('record_scope', 'all'));
 
         // Invoices in range
         $invQuery = DB::table('invoices')
             ->where('business_id', $businessId)
             ->where('is_deleted', 0)
             ->whereBetween('created_at', [$startDt, $endDt]);
+        if (in_array($recordScope, ['old_only', 'historical', 'old'])) {
+            $invQuery->where('is_historical', 1);
+        } elseif (in_array($recordScope, ['new_only', 'current', 'new'])) {
+            $invQuery->where('is_historical', 0);
+        }
         if ($outletId && $outletId !== 'ALL') {
             $invQuery->where('outlet_id', $outletId);
         }
@@ -150,6 +156,11 @@ class ReportController extends Controller
             ->where('business_id', $businessId)
             ->where('is_deleted', 0)
             ->whereBetween('created_at', [$startDt, $endDt]);
+        if (in_array($recordScope, ['old_only', 'historical', 'old'])) {
+            $purQuery->where('is_historical', 1);
+        } elseif (in_array($recordScope, ['new_only', 'current', 'new'])) {
+            $purQuery->where('is_historical', 0);
+        }
         if ($outletId && $outletId !== 'ALL') {
             $purQuery->where('outlet_id', $outletId);
         }
@@ -346,9 +357,9 @@ class ReportController extends Controller
             ->where('is_deleted', 0)
             ->whereBetween('created_at', [$startDt, $endDt]);
 
-        if ($recordScope === 'old_only') {
+        if (in_array($recordScope, ['old_only', 'historical', 'old'])) {
             $query->where('is_historical', 1);
-        } elseif ($recordScope === 'new_only') {
+        } elseif (in_array($recordScope, ['new_only', 'current', 'new'])) {
             $query->where('is_historical', 0);
         }
 
@@ -481,9 +492,9 @@ class ReportController extends Controller
             ->where('is_deleted', 0)
             ->whereBetween('created_at', [$startDt, $endDt]);
 
-        if ($recordScope === 'old_only') {
+        if (in_array($recordScope, ['old_only', 'historical', 'old'])) {
             $query->where('is_historical', 1);
-        } elseif ($recordScope === 'new_only') {
+        } elseif (in_array($recordScope, ['new_only', 'current', 'new'])) {
             $query->where('is_historical', 0);
         }
 
@@ -881,9 +892,15 @@ class ReportController extends Controller
 
         $startDt = date('Y-m-d 00:00:00', strtotime($startDate));
         $endDt = date('Y-m-d 23:59:59', strtotime($endDate));
+        $recordScope = strtolower($request->query('record_scope', 'all'));
 
         // Invoices
         $invQuery = DB::table('invoices')->where('business_id', $businessId)->where('is_deleted', 0);
+        if (in_array($recordScope, ['old_only', 'historical', 'old'])) {
+            $invQuery->where('is_historical', 1);
+        } elseif (in_array($recordScope, ['new_only', 'current', 'new'])) {
+            $invQuery->where('is_historical', 0);
+        }
         if ($outletId && $outletId !== 'ALL') {
             $invQuery->where('outlet_id', $outletId);
         }
@@ -1003,6 +1020,11 @@ class ReportController extends Controller
 
         // Purchases
         $purQuery = DB::table('purchase_bills')->where('business_id', $businessId)->where('is_deleted', 0);
+        if (in_array($recordScope, ['old_only', 'historical', 'old'])) {
+            $purQuery->where('is_historical', 1);
+        } elseif (in_array($recordScope, ['new_only', 'current', 'new'])) {
+            $purQuery->where('is_historical', 0);
+        }
         if ($outletId && $outletId !== 'ALL') {
             $purQuery->where('outlet_id', $outletId);
         }
