@@ -739,6 +739,45 @@ class InvoiceController extends Controller
                         'updated_at' => $dbNow,
                         'payload' => json_encode($sbPayload),
                     ]);
+
+                    $balanceAfterUnits = $newStock >= 1000 ? ($newStock / 1000.0) : (float) $newStock;
+                    $movementId = 'STM-'.strtoupper(\Illuminate\Support\Str::random(24));
+                    DB::table('stock_movements')->insert([
+                        'id' => $movementId,
+                        'document_path' => "stock_movements/{$movementId}",
+                        'business_id' => $businessId,
+                        'outlet_id' => $outletId,
+                        'product_id' => $pId ?: $vId,
+                        'variant_id' => $vId ?: $pId,
+                        'type' => 'sale',
+                        'qty_change' => -$qty,
+                        'balance_after' => $balanceAfterUnits,
+                        'reference_type' => 'invoice',
+                        'reference_id' => $invoiceId,
+                        'condition' => 'good',
+                        'note' => "Sale {$invoiceNumber} ({$qty} sold)",
+                        'created_by' => $userId,
+                        'created_at' => $dbNow,
+                        'updated_at' => $dbNow,
+                        'payload' => json_encode([
+                            'fields' => [
+                                'movementId' => $movementId,
+                                'businessId' => $businessId,
+                                'outletId' => $outletId,
+                                'productId' => $pId ?: $vId,
+                                'variantId' => $vId ?: $pId,
+                                'type' => 'SALE',
+                                'qtyBase' => -$qty,
+                                'quantity' => -$qty,
+                                'balanceAfter' => (int) round($balanceAfterUnits),
+                                'reason' => "Sale {$invoiceNumber}",
+                                'referenceId' => $invoiceId,
+                                'userId' => $userId,
+                                'createdAt' => $nowStr,
+                                'immutable' => true,
+                            ],
+                        ]),
+                    ]);
                 }
             }
 

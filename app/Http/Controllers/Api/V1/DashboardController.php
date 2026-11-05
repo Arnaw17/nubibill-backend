@@ -117,6 +117,26 @@ class DashboardController extends Controller
             }
         }
 
+        // Sales returns aggregation
+        $salesReturnsRupees = 0.0;
+        $salesReturnsCount = 0;
+        if (\Illuminate\Support\Facades\Schema::hasTable('returns')) {
+            $retQuery = DB::table('returns')
+                ->where('business_id', $businessId)
+                ->where('status', 'completed')
+                ->whereNull('deleted_at')
+                ->where('type', 'sale_return');
+            if ($outletId && $outletId !== 'ALL') {
+                $retQuery->where('outlet_id', $outletId);
+            }
+            $allReturns = $retQuery->get();
+            $salesReturnsCount = $allReturns->count();
+            foreach ($allReturns as $ret) {
+                $salesReturnsRupees += (float) $ret->grand_total;
+            }
+        }
+        $netSalesTotalRupees = max(0, $salesTotalRupees - $salesReturnsRupees);
+
         // Top 10 recent sales
         foreach ($sortedInvoices->take(10) as $inv) {
             $p = json_decode($inv->payload ?? '{}', true) ?: [];
@@ -364,7 +384,11 @@ class DashboardController extends Controller
         $todayExpensePaise = $todayExpensesQuery->sum('amount_paise');
 
         $summary = [
-            'salesTotal' => round($salesTotalRupees, 2),
+            'grossSalesTotal' => round($salesTotalRupees, 2),
+            'salesReturnsTotal' => round($salesReturnsRupees, 2),
+            'salesReturnsCount' => $salesReturnsCount,
+            'salesTotal' => round($netSalesTotalRupees, 2),
+            'netSalesTotal' => round($netSalesTotalRupees, 2),
             'salesCount' => $allInvoices->count(),
             'purchaseTotal' => round($purchaseTotalRupees, 2),
             'purchaseCount' => $allPurchases->count(),

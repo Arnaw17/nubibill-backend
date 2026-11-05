@@ -393,29 +393,70 @@ class InventoryController extends Controller
         }
 
         $query = DB::table('stock_movements')
-            ->where('business_id', $businessId)
-            ->where('is_deleted', 0);
+            ->where('business_id', $businessId);
 
-        if ($outletId) {
+        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_movements', 'is_deleted')) {
+            $query->where('is_deleted', 0);
+        }
+
+        if ($outletId && $outletId !== 'ALL') {
             $query->where('outlet_id', $outletId);
         }
 
         $rows = $query->orderBy('created_at', 'desc')->limit($limit)->get();
+
+        $variantsMap = [];
+        try {
+            $varRows = DB::table('product_variants')->where('business_id', $businessId)->get();
+            foreach ($varRows as $vr) {
+                $vp = json_decode($vr->payload ?? '{}', true) ?: [];
+                $vf = $vp['fields'] ?? [];
+                $pName = $vf['productName'] ?? 'Ace Suprema';
+                $vName = $vf['variantName'] ?? $vf['name'] ?? '';
+                $displayName = $vName ? "$pName ($vName)" : $pName;
+                $variantsMap[$vr->id] = $displayName;
+            }
+            $prodRows = DB::table('products')->where('business_id', $businessId)->get();
+            foreach ($prodRows as $pr) {
+                $pp = json_decode($pr->payload ?? '{}', true) ?: [];
+                $pf = $pp['fields'] ?? [];
+                $pName = $pf['productName'] ?? $pf['name'] ?? $pr->product_name ?? 'Ace Suprema 20L';
+                if (! isset($variantsMap[$pr->id])) {
+                    $variantsMap[$pr->id] = $pName;
+                }
+            }
+        } catch (\Throwable $e) {}
 
         $movements = [];
         foreach ($rows as $row) {
             $payload = json_decode($row->payload, true) ?: [];
             $fields = $payload['fields'] ?? $payload;
 
-            $vId = $fields['variantId'] ?? $fields['productId'] ?? null;
+            $vId = $fields['variantId'] ?? $row->variant_id ?? $fields['productId'] ?? $row->product_id ?? null;
             if ($variantId && $vId !== $variantId) {
                 continue;
             }
 
-            $mType = $fields['type'] ?? $row->status ?? '';
-            if ($type && strtoupper($type) !== strtoupper($mType)) {
+            $mType = strtoupper((string) ($fields['type'] ?? $row->type ?? 'MOVEMENT'));
+            if ($mType === 'SALE_RETURN') {
+                $mType = 'RETURN';
+            }
+            if ($type && strtoupper($type) !== $mType) {
                 continue;
             }
+
+            $qty = (float) ($row->qty_change ?? $fields['qty_change'] ?? 0);
+            if ($qty == 0 && isset($fields['qtyBase'])) {
+                $rawQty = (float) $fields['qtyBase'];
+                $qty = abs($rawQty) >= 1000 ? ($rawQty / 1000.0) : $rawQty;
+            }
+            $bal = (float) ($row->balance_after ?? $fields['balance_after'] ?? 0);
+            if ($bal == 0 && isset($fields['balanceAfter'])) {
+                $rawBal = (float) $fields['balanceAfter'];
+                $bal = $rawBal >= 1000 ? ($rawBal / 1000.0) : $rawBal;
+            }
+
+            $reason = (string) ($fields['reason'] ?? $row->note ?? $fields['note'] ?? $row->reference_id ?? '—');
 
             $movements[] = [
                 'movementId' => (string) $row->id,
@@ -423,15 +464,18 @@ class InventoryController extends Controller
                 'businessId' => (string) $row->business_id,
                 'outletId' => (string) $row->outlet_id,
                 'variantId' => $vId,
-                'productId' => $fields['productId'] ?? $vId,
+                'productId' => $fields['productId'] ?? $row->product_id ?? $vId,
+                'productName' => $variantsMap[$vId] ?? ($fields['productName'] ?? 'Ace Suprema 20L'),
                 'type' => $mType,
-                'qtyBase' => (int) ($fields['qtyBase'] ?? 0),
-                'balanceAfter' => (int) ($fields['balanceAfter'] ?? 0),
+                'qtyBase' => (int) round($qty),
+                'quantity' => $qty,
+                'balanceAfter' => (int) round($bal),
+                'balance' => $bal,
                 'unitCostPaise' => isset($fields['unitCostPaise']) ? (int) $fields['unitCostPaise'] : null,
-                'reason' => $fields['reason'] ?? '',
-                'referenceId' => $fields['referenceId'] ?? null,
-                'userId' => $fields['userId'] ?? null,
-                'createdAt' => $row->created_at,
+                'reason' => $reason,
+                'referenceId' => $fields['referenceId'] ?? $row->reference_id ?? null,
+                'userId' => $fields['userId'] ?? $row->created_by ?? null,
+                'createdAt' => $row->created_at ? date('Y-m-d\TH:i:s\Z', strtotime($row->created_at)) : null,
             ];
         }
 

@@ -718,6 +718,46 @@ class PurchaseController extends Controller
                         ]);
                     }
 
+                    $qtyUnits = $qty >= 1000 ? ($qty / 1000.0) : (float) $qty;
+                    $balUnits = (isset($newStock) ? $newStock : $qty) >= 1000 ? ((isset($newStock) ? $newStock : $qty) / 1000.0) : (float) (isset($newStock) ? $newStock : $qty);
+                    $movementId = 'STM-'.strtoupper(\Illuminate\Support\Str::random(24));
+                    DB::table('stock_movements')->insert([
+                        'id' => $movementId,
+                        'document_path' => "stock_movements/{$movementId}",
+                        'business_id' => $businessId,
+                        'outlet_id' => $outletId,
+                        'product_id' => $pId ?: $vId,
+                        'variant_id' => $vId ?: $pId,
+                        'type' => 'purchase',
+                        'qty_change' => $qtyUnits,
+                        'balance_after' => $balUnits,
+                        'reference_type' => 'purchase_bill',
+                        'reference_id' => $billId,
+                        'condition' => 'good',
+                        'note' => "Purchase {$billNumber} inwarded ({$qtyUnits} received)",
+                        'created_by' => $userId,
+                        'created_at' => $dbNow,
+                        'updated_at' => $dbNow,
+                        'payload' => json_encode([
+                            'fields' => [
+                                'movementId' => $movementId,
+                                'businessId' => $businessId,
+                                'outletId' => $outletId,
+                                'productId' => $pId ?: $vId,
+                                'variantId' => $vId ?: $pId,
+                                'type' => 'PURCHASE',
+                                'qtyBase' => (int) round($qtyUnits),
+                                'quantity' => $qtyUnits,
+                                'balanceAfter' => (int) round($balUnits),
+                                'reason' => "Purchase {$billNumber}",
+                                'referenceId' => $billId,
+                                'userId' => $userId,
+                                'createdAt' => $now,
+                                'immutable' => true,
+                            ],
+                        ]),
+                    ]);
+
                     // Auto-reflect purchase selling price, MRP, and rate to variant and product
                     if (! empty($vId)) {
                         $vRow = DB::table('product_variants')

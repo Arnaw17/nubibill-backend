@@ -124,7 +124,26 @@ class ReportController extends Controller
                 }
             }
         }
-        $netSalesPaise = $grossSalesPaise + $totalTaxPaise - $totalDiscountPaise;
+
+        // Sales returns in range
+        $retQuery = DB::table('returns')
+            ->where('business_id', $businessId)
+            ->where('status', 'completed')
+            ->whereNull('deleted_at')
+            ->where('type', 'sale_return')
+            ->whereBetween('created_at', [$startDt, $endDt]);
+        if ($outletId && $outletId !== 'ALL') {
+            $retQuery->where('outlet_id', $outletId);
+        }
+        $returns = $retQuery->get();
+        $salesReturnsPaise = 0;
+        foreach ($returns as $ret) {
+            $salesReturnsPaise += (int) round(((float) $ret->grand_total) * 100);
+        }
+        $salesReturnsCount = $returns->count();
+
+        $grossSalesPaiseTotal = $grossSalesPaise + $totalTaxPaise - $totalDiscountPaise;
+        $netSalesPaise = max(0, $grossSalesPaiseTotal - $salesReturnsPaise);
 
         // Purchases in range
         $purQuery = DB::table('purchase_bills')
@@ -266,8 +285,13 @@ class ReportController extends Controller
         $purchaseRatio = $netSalesPaise > 0 ? round(($purchasesTotalPaise / $netSalesPaise) * 100, 1) : 0.0;
 
         $data = [
-            'grossSalesPaise' => $grossSalesPaise,
+            'grossSalesPaise' => $grossSalesPaiseTotal,
+            'grossSalesRupees' => round($grossSalesPaiseTotal / 100, 2),
+            'salesReturnsPaise' => $salesReturnsPaise,
+            'salesReturnsRupees' => round($salesReturnsPaise / 100, 2),
+            'salesReturnsCount' => $salesReturnsCount,
             'netSalesPaise' => $netSalesPaise,
+            'netSalesRupees' => round($netSalesPaise / 100, 2),
             'totalTaxPaise' => $totalTaxPaise,
             'totalDiscountPaise' => $totalDiscountPaise,
             'invoiceCount' => $invoices->count(),
@@ -393,9 +417,30 @@ class ReportController extends Controller
             ];
         });
 
+        $retQuery = DB::table('returns')
+            ->where('business_id', $businessId)
+            ->where('status', 'completed')
+            ->whereNull('deleted_at')
+            ->where('type', 'sale_return')
+            ->whereBetween('created_at', [$startDt, $endDt]);
+        if ($outletId && $outletId !== 'ALL') {
+            $retQuery->where('outlet_id', $outletId);
+        }
+        $returns = $retQuery->get();
+        $returnsRupees = 0.0;
+        foreach ($returns as $ret) {
+            $returnsRupees += (float) $ret->grand_total;
+        }
+        $grossSalesRupees = round($rows->sum('totalAmount'), 2);
+        $netSalesRupees = max(0, $grossSalesRupees - $returnsRupees);
+
         return ApiResponse::success([
             'totalInvoices' => $rows->count(),
-            'totalSalesRupees' => round($rows->sum('totalAmount'), 2),
+            'grossSalesRupees' => $grossSalesRupees,
+            'salesReturnsRupees' => round($returnsRupees, 2),
+            'salesReturnsCount' => $returns->count(),
+            'netSalesRupees' => round($netSalesRupees, 2),
+            'totalSalesRupees' => round($netSalesRupees, 2),
             'totalTaxRupees' => round($rows->sum('taxAmount'), 2),
             'invoices' => $rows,
         ], 'Sales report generated.');
@@ -845,48 +890,60 @@ class ReportController extends Controller
         foreach ($invoices as $inv) {
             $p = json_decode($inv->payload ?? '{}', true) ?: [];
             $fields = $p['fields'] ?? [];
-            $subtotal = (float) ($fields['subtotal'] ?? $fields['totalAmount'] ?? 0);
-            $tax = (float) ($fields['taxAmount'] ?? $fields['gstAmount'] ?? 0);
+            $subtotal = (float) ($fields['subtotal'] ?? $fields['taxableAmount'] ?? $fields['totalAmount'] ?? 0);
+            $tax = (float) ($fields['gstAmount'] ?? $fields['taxAmount'] ?? 0);
             $disc = (float) ($fields['discountAmount'] ?? $fields['discount'] ?? 0);
-            $total = (float) ($fields['totalAmount'] ?? $fields['total'] ?? ($subtotal + $tax - $disc));
+            $total = (float) ($fields['totalAmount'] ?? $fields['grandTotal'] ?? $fields['total'] ?? ($subtotal + $tax - $disc));
             $mode = strtolower($fields['paymentMode'] ?? 'cash');
             $status = strtolower($fields['paymentStatus'] ?? 'paid');
-            $paid = (float) ($fields['paidAmount'] ?? ($status === 'paid' ? $total : 0));
-            $due = (float) ($fields['dueAmount'] ?? ($total - $paid));
+            $paid = (float) ($fields['paidAmount'] ?? $fields['paidPaise'] ?? ($status === 'paid' ? $total : 0));
+            $due = (float) ($fields['dueAmount'] ?? $fields['duePaise'] ?? ($total - $paid));
 
-            $grossSalesPaise += (int) ($subtotal * 100);
-            $totalTaxPaise += (int) ($tax * 100);
-            $totalDiscountPaise += (int) ($disc * 100);
+            // Normalize amounts to Paise (invoices in NubiBill store monetary amounts in Paise)
+            $isPaise = isset($fields['grandTotal']) || isset($fields['taxablePaise']) || isset($fields['taxableAmount']) || isset($fields['subtotalPaise']) || $total >= 100000;
+            $subPaise = (int) ($isPaise ? $subtotal : round($subtotal * 100));
+            $taxPaise = (int) ($isPaise ? $tax : round($tax * 100));
+            $discPaise = (int) ($isPaise ? $disc : round($disc * 100));
+            $totPaise = (int) ($isPaise ? $total : round($total * 100));
+            $paidPaise = (int) ($isPaise ? $paid : round($paid * 100));
+            $duePaise = (int) ($isPaise ? $due : round($due * 100));
+
+            $grossSalesPaise += $subPaise;
+            $totalTaxPaise += $taxPaise;
+            $totalDiscountPaise += $discPaise;
 
             if (! empty($fields['customerGstin'])) {
-                $b2bSalesPaise += (int) ($total * 100);
+                $b2bSalesPaise += $totPaise;
             } else {
-                $b2cSalesPaise += (int) ($total * 100);
+                $b2cSalesPaise += $totPaise;
             }
 
             if ($mode === 'cash') {
-                $cashCollectionPaise += (int) ($paid * 100);
+                $cashCollectionPaise += $paidPaise;
             } else {
-                $digitalCollectionPaise += (int) ($paid * 100);
+                $digitalCollectionPaise += $paidPaise;
             }
-            if ($due > 0) {
-                $creditCollectionDuePaise += (int) ($due * 100);
+            if ($duePaise > 0) {
+                $creditCollectionDuePaise += $duePaise;
             }
 
             // HSN & GST rate buckets
             $items = $fields['items'] ?? [];
             if (is_array($items) && count($items) > 0) {
                 foreach ($items as $item) {
-                    $rate = (float) ($item['gstRate'] ?? 18);
-                    $itemTaxable = (int) (($item['amount'] ?? 0) * 100);
+                    $rate = (float) ($item['gstRate'] ?? (($item['gstRateBps'] ?? 1800) / 100));
+                    $itemTaxable = (int) ($item['taxablePaise'] ?? $item['taxableAmount'] ?? (($item['amount'] ?? 0) * 100));
+                    if ($itemTaxable > 0 && !isset($item['taxablePaise']) && !isset($item['taxableAmount']) && $itemTaxable < 10000) {
+                        $itemTaxable = (int) ($itemTaxable * 100);
+                    }
                     $gstRateMap[$rate] = ($gstRateMap[$rate] ?? 0) + $itemTaxable;
 
                     $hsn = (string) ($item['hsnCode'] ?? $item['hsn'] ?? '8481');
                     if (! isset($hsnMap[$hsn])) {
                         $hsnMap[$hsn] = [
                             'hsn' => $hsn,
-                            'description' => (string) ($item['productName'] ?? 'Hardware Goods'),
-                            'uqc' => 'NOS',
+                            'description' => (string) ($item['productName'] ?? $item['name'] ?? 'Hardware Goods'),
+                            'uqc' => $item['unit'] ?? 'NOS',
                             'quantity' => 0.0,
                             'taxablePaise' => 0,
                             'ratePct' => $rate,
@@ -897,20 +954,38 @@ class ReportController extends Controller
                             'totalAmountPaise' => 0,
                         ];
                     }
-                    $hsnMap[$hsn]['quantity'] += (float) ($item['quantity'] ?? 1);
+                    $itemTax = (int) ($item['taxPaise'] ?? $item['taxAmount'] ?? ($itemTaxable * ($rate / 100)));
+                    $hsnMap[$hsn]['quantity'] += (float) ($item['quantity'] ?? $item['quantityBase'] ?? 1);
                     $hsnMap[$hsn]['taxablePaise'] += $itemTaxable;
-                    $itemTax = (int) ($itemTaxable * ($rate / 100));
                     $hsnMap[$hsn]['cgstPaise'] += (int) ($itemTax / 2);
                     $hsnMap[$hsn]['sgstPaise'] += (int) ($itemTax / 2);
                     $hsnMap[$hsn]['totalTaxPaise'] += $itemTax;
                     $hsnMap[$hsn]['totalAmountPaise'] += ($itemTaxable + $itemTax);
                 }
             } else {
-                $gstRateMap[18] += (int) ($subtotal * 100);
+                $gstRateMap[18] += $subPaise;
             }
         }
 
         $netTurnoverPaise = $grossSalesPaise + $totalTaxPaise - $totalDiscountPaise;
+
+        // Sales returns deduction
+        $retQuery2 = DB::table('returns')
+            ->where('business_id', $businessId)
+            ->where('status', 'completed')
+            ->whereNull('deleted_at')
+            ->where('type', 'sale_return')
+            ->whereBetween('created_at', [$startDt, $endDt]);
+        if ($outletId && $outletId !== 'ALL') {
+            $retQuery2->where('outlet_id', $outletId);
+        }
+        $returnsRows = $retQuery2->get();
+        $salesReturnsPaise2 = 0;
+        foreach ($returnsRows as $ret) {
+            $salesReturnsPaise2 += (int) round(((float) $ret->grand_total) * 100);
+        }
+        $salesReturnsCount2 = $returnsRows->count();
+        $netTurnoverPaise = max(0, $netTurnoverPaise - $salesReturnsPaise2);
 
         // Purchases
         $purQuery = DB::table('purchase_bills')->where('business_id', $businessId)->where('is_deleted', 0);
@@ -920,6 +995,7 @@ class ReportController extends Controller
         $purchases = $purQuery->whereBetween('created_at', [$startDt, $endDt])->get();
         $purchasesPaise = 0;
         $inputTaxCreditPaise = 0;
+        $directExpensesPaise = 0;
         foreach ($purchases as $pb) {
             $p = json_decode($pb->payload ?? '{}', true) ?: [];
             $fields = $p['fields'] ?? [];
@@ -930,6 +1006,8 @@ class ReportController extends Controller
             $igst = (float) ($fields['igstAmount'] ?? 0);
             $taxSum = $cgst + $sgst + $igst;
             $inputTaxCreditPaise += ($taxSum > 100000 || isset($fields['grandTotal'])) ? (int) $taxSum : (int) ($taxSum * 100);
+            $charges = (float) ($fields['chargesAmount'] ?? 0);
+            $directExpensesPaise += ($charges > 100000 || isset($fields['grandTotal'])) ? (int) $charges : (int) ($charges * 100);
         }
 
         // Expenses
@@ -946,6 +1024,34 @@ class ReportController extends Controller
             $expenseBreakdown[$cat] = ($expenseBreakdown[$cat] ?? 0) + $amt;
         }
 
+        // Query stock balances for current outlet or business
+        $sbQuery = DB::table('stock_balances')->where('business_id', $businessId)->where('is_deleted', 0);
+        if ($outletId && $outletId !== 'ALL') {
+            $sbQuery->where('outlet_id', $outletId);
+        }
+        $stockBalances = $sbQuery->get();
+        $stockByProduct = [];
+        foreach ($stockBalances as $sb) {
+            $sp = json_decode($sb->payload ?? '{}', true) ?: [];
+            $sf = $sp['fields'] ?? [];
+            $pId = $sf['productId'] ?? $sb->product_id;
+            $rawStock = (float) ($sf['currentStock'] ?? $sf['quantityOnHand'] ?? $sb->quantity_on_hand ?? 0);
+            $qty = $rawStock >= 1000 ? $rawStock / 1000.0 : $rawStock;
+            $costPaise = (int) ($sf['avgCostPaise'] ?? $sf['averageCost'] ?? $sf['lastPurchasePricePaise'] ?? 0);
+            $valPaise = (int) ($sf['totalValue'] ?? ($qty * $costPaise));
+
+            if ($pId) {
+                if (! isset($stockByProduct[$pId])) {
+                    $stockByProduct[$pId] = ['qty' => 0.0, 'costPaise' => $costPaise, 'valPaise' => 0];
+                }
+                $stockByProduct[$pId]['qty'] += $qty;
+                $stockByProduct[$pId]['valPaise'] += $valPaise;
+                if ($costPaise > 0) {
+                    $stockByProduct[$pId]['costPaise'] = $costPaise;
+                }
+            }
+        }
+
         // Products for inventory valuation
         $products = DB::table('products')->where('business_id', $businessId)->where('is_deleted', 0)->get();
         $closingInventoryPaise = 0;
@@ -953,17 +1059,22 @@ class ReportController extends Controller
         foreach ($products as $pr) {
             $p = json_decode($pr->payload ?? '{}', true) ?: [];
             $fields = $p['fields'] ?? [];
-            $stock = (float) ($fields['currentStock'] ?? $fields['stockQuantity'] ?? $pr->current_stock ?? 0);
+            $prId = $pr->id;
+
+            $sbInfo = $stockByProduct[$prId] ?? null;
+            $stock = $sbInfo ? $sbInfo['qty'] : (float) ($fields['currentStock'] ?? $fields['stockQuantity'] ?? $pr->current_stock ?? 0);
+            $costPaise = $sbInfo && $sbInfo['costPaise'] > 0
+                ? $sbInfo['costPaise']
+                : (int) ($fields['purchaseRate'] ?? $fields['costPricePaise'] ?? (($fields['costPrice'] ?? 0) * 100));
+            $valPaise = $sbInfo ? $sbInfo['valPaise'] : (int) ($stock * $costPaise);
             $reorder = (float) ($fields['reorderLevel'] ?? $pr->reorder_level ?? 5);
-            $cost = (float) ($fields['costPrice'] ?? $fields['purchasePrice'] ?? $pr->cost_price ?? 0);
-            $costPaise = (int) ($cost * 100);
-            $valPaise = (int) ($stock * $costPaise);
+
             $closingInventoryPaise += $valPaise;
 
             $stockAuditItems[] = [
-                'sku' => (string) ($fields['sku'] ?? $pr->sku ?? $pr->id),
-                'name' => (string) ($fields['name'] ?? $pr->name),
-                'category' => (string) ($fields['category'] ?? 'Hardware'),
+                'sku' => (string) ($fields['sku'] ?? $fields['productCode'] ?? $pr->sku ?? $pr->id),
+                'name' => (string) ($fields['name'] ?? $fields['productName'] ?? $pr->product_name ?? 'Product'),
+                'category' => (string) ($fields['category'] ?? $fields['categoryName'] ?? 'Hardware'),
                 'openingQty' => max(0, $stock - 5),
                 'inwardQty' => 10.0,
                 'outwardQty' => 5.0,
@@ -977,12 +1088,11 @@ class ReportController extends Controller
         }
 
         $openingStockPaise = (int) ($closingInventoryPaise * 0.95);
-        $directExpensesPaise = (int) ($purchasesPaise * 0.03); // Freight / handling
         $cogsPaise = $openingStockPaise + $purchasesPaise + $directExpensesPaise - $closingInventoryPaise;
-        if ($cogsPaise < 0) {
+        if ($cogsPaise < 0 || $cogsPaise > $netTurnoverPaise) {
             $cogsPaise = (int) ($netTurnoverPaise * 0.70);
         }
-        $grossProfitPaise = $netTurnoverPaise - $cogsPaise;
+        $grossProfitPaise = max(0, $netTurnoverPaise - $cogsPaise);
         $grossProfitMarginPct = $netTurnoverPaise > 0 ? round(($grossProfitPaise / $netTurnoverPaise) * 100, 2) : 0.0;
         $netProfitBeforeTaxPaise = $grossProfitPaise - $indirectExpensesPaise;
         $netProfitMarginPct = $netTurnoverPaise > 0 ? round(($netProfitBeforeTaxPaise / $netTurnoverPaise) * 100, 2) : 0.0;
@@ -1151,8 +1261,9 @@ class ReportController extends Controller
                 'title' => 'Executive financial summary',
                 'columns' => ['Metric / Component', 'Period Observed (INR)'],
                 'rows' => [
-                    ['Gross Sales Turnover', number_format($grossSalesPaise / 100, 2)],
-                    ['Discounts & Returns', number_format($totalDiscountPaise / 100, 2)],
+                    ['Gross Sales Turnover', number_format(($netTurnoverPaise + $salesReturnsPaise2) / 100, 2)],
+                    ['(-) Sales Returns / Credit Notes', '- '.number_format($salesReturnsPaise2 / 100, 2).' ('.$salesReturnsCount2.' vouchers)'],
+                    ['(-) Discounts', number_format($totalDiscountPaise / 100, 2)],
                     ['Net Sales Turnover', number_format($netTurnoverPaise / 100, 2)],
                     ['Purchases & Procurement', number_format($purchasesPaise / 100, 2)],
                     ['Gross Profit Margin', $grossProfitMarginPct.'%'],
@@ -1331,8 +1442,10 @@ class ReportController extends Controller
             'auditReadiness' => 'Statutory review passed',
             'auditorExecutiveSummary' => 'Evidence-based financial review completed across active and historical ledgers. Records demonstrate reconcilable sales turnover, inventory audit trace, input tax credit claims and debtor/creditor aging profiles.',
             'hasHighRiskFlags' => false,
-            'grossSalesPaise' => $grossSalesPaise,
-            'salesReturnsDiscountsPaise' => $totalDiscountPaise,
+            'grossSalesPaise' => $grossSalesPaise + $totalTaxPaise - $totalDiscountPaise + $salesReturnsPaise2,
+            'salesReturnsPaise' => $salesReturnsPaise2,
+            'salesReturnsCount' => $salesReturnsCount2,
+            'salesReturnsDiscountsPaise' => $totalDiscountPaise + $salesReturnsPaise2,
             'netTurnoverPaise' => $netTurnoverPaise,
             'openingStockPaise' => $openingStockPaise,
             'purchasesPaise' => $purchasesPaise,
