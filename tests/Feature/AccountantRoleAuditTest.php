@@ -192,6 +192,19 @@ class AccountantRoleAuditTest extends TestCase
         $res->assertOk();
 
         // 5. Create Purchase Order/Bill
+        DB::table('suppliers')->updateOrInsert(
+            ['id' => 'SUP_TEST_01'],
+            [
+                'business_id' => $this->businessId,
+                'outlet_id' => $this->outletId,
+                'status' => 'active',
+                'is_deleted' => 0,
+                'payload' => json_encode(['fields' => ['name' => 'Test Supplier', 'supplierId' => 'SUP_TEST_01']]),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]
+        );
+
         $purchasePayload = [
             'business_id' => $this->businessId,
             'outlet_id' => $this->outletId,

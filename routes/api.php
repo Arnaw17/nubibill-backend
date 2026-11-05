@@ -13,6 +13,7 @@ use App\Http\Controllers\Api\V1\EmployeeController;
 use App\Http\Controllers\Api\V1\EmployeeOutletAllocationController;
 use App\Http\Controllers\Api\V1\ExpenseController;
 use App\Http\Controllers\Api\V1\FinancialTransactionController;
+use App\Http\Controllers\Api\V1\HistoricalDataController;
 use App\Http\Controllers\Api\V1\InventoryController;
 use App\Http\Controllers\Api\V1\InvoiceController;
 use App\Http\Controllers\Api\V1\PayrollController;
@@ -312,6 +313,44 @@ Route::prefix('v1')->group(function () {
         // Stock History Timeline
         Route::get('/products/{id}/stock-history', [ProductController::class, 'stockHistory'])
             ->middleware('permission:inventory,inventory.view,products,products.view,product.read');
+
+        // Historical Data Management & Previous Records System Routes
+        Route::prefix('historical')->group(function () {
+            Route::get('/cutoff-date', [HistoricalDataController::class, 'getCutoffDate'])
+                ->middleware('permission:settings.view,settings');
+            Route::post('/cutoff-date', [HistoricalDataController::class, 'setCutoffDate'])
+                ->middleware('permission:settings.edit,settings');
+
+            Route::get('/batches', [HistoricalDataController::class, 'listBatches'])
+                ->middleware('permission:settings.view,reports,reports.read');
+            Route::post('/batches', [HistoricalDataController::class, 'createBatch'])
+                ->middleware('permission:settings.edit,settings');
+            Route::post('/batches/{id}/approve', [HistoricalDataController::class, 'approveBatch'])
+                ->middleware('permission:settings.edit,settings');
+            Route::post('/batches/{id}/rollback', [HistoricalDataController::class, 'rollbackBatch'])
+                ->middleware('permission:settings.edit,settings');
+
+            Route::post('/sales', [HistoricalDataController::class, 'storeSale'])
+                ->middleware('permission:sales.create,sales,billing');
+            Route::post('/purchases', [HistoricalDataController::class, 'storePurchase'])
+                ->middleware('permission:purchase.create,purchase');
+            Route::post('/opening-stock', [HistoricalDataController::class, 'storeOpeningStock'])
+                ->middleware('permission:inventory.adjust,inventory.opening_stock');
+
+            Route::get('/reconciliation/stock', [HistoricalDataController::class, 'stockReconciliation'])
+                ->middleware('permission:reports.read,reports.view,reports,inventory.view');
+
+            Route::get('/reports/sales', [HistoricalDataController::class, 'salesReport'])
+                ->middleware('permission:reports.read,reports.view,reports');
+            Route::get('/reports/purchases', [HistoricalDataController::class, 'purchaseReport'])
+                ->middleware('permission:reports.read,reports.view,reports');
+            Route::get('/reports/customer-ledger', [HistoricalDataController::class, 'customerLedgerReport'])
+                ->middleware('permission:customer.read,CUSTOMER_LEDGER_VIEW,reports');
+            Route::get('/reports/supplier-ledger', [HistoricalDataController::class, 'supplierLedgerReport'])
+                ->middleware('permission:supplier.read,supplier.ledger.view,reports');
+            Route::get('/reports/stock-movements', [HistoricalDataController::class, 'stockMovementsReport'])
+                ->middleware('permission:stock_movement.read,inventory.read,reports');
+        });
     });
 
     // Super User / Developer Portal (Live Screening, approvals & remote controls).
