@@ -1053,11 +1053,12 @@ class ReturnService
         }
 
         $row = $query->where(function ($q) use ($productId, $variantId) {
-            if ($variantId) {
+            if (!empty($variantId)) {
                 $q->where('id', 'LIKE', "%_{$variantId}")
                     ->orWhere('payload->fields->variantId', $variantId);
+            } elseif (!empty($productId)) {
+                $q->where('payload->fields->productId', $productId);
             }
-            $q->orWhere('payload->fields->productId', $productId);
         })->lockForUpdate()->first();
 
         if ($row) {
@@ -1165,11 +1166,12 @@ class ReturnService
         }
 
         $row = $query->where(function ($q) use ($productId, $variantId) {
-            if ($variantId) {
+            if (!empty($variantId)) {
                 $q->where('id', 'LIKE', "%_{$variantId}")
                     ->orWhere('payload->fields->variantId', $variantId);
+            } elseif (!empty($productId)) {
+                $q->where('payload->fields->productId', $productId);
             }
-            $q->orWhere('payload->fields->productId', $productId);
         })->first();
 
         if ($row) {

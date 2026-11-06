@@ -182,6 +182,7 @@ class ProductController extends Controller
                 'commercialUnitId' => $vFields['commercialUnitId'] ?? null,
                 'commercialUnitName' => $vFields['commercialUnitName'] ?? null,
                 'baseQuantityPerCommercialUnit' => (float) ($vFields['baseQuantityPerCommercialUnit'] ?? 1),
+                'packSize' => $vFields['packSize'] ?? ($vFields['attributeValues']['packSize'] ?? null),
                 'purchaseRate' => $vPurchaseRate,
                 'sellingPrice' => $vSellingPrice,
                 'mrp' => $vMrp,
@@ -426,6 +427,7 @@ class ProductController extends Controller
                     'commercialUnitId' => $vFields['commercialUnitId'] ?? null,
                     'commercialUnitName' => $vCommUnitName,
                     'baseQuantityPerCommercialUnit' => (float) ($vFields['baseQuantityPerCommercialUnit'] ?? 1),
+                    'packSize' => $vFields['packSize'] ?? ($vAttrs['packSize'] ?? null),
                     'purchaseRate' => $vPurchaseRate,
                     'sellingPrice' => $vSellingPrice,
                     'mrp' => $vMrp,
@@ -762,12 +764,17 @@ class ProductController extends Controller
                 'sku' => $vSku,
                 'barcode' => $vBarcode,
                 'baseUnitId' => $vUnit,
+                'packUnitId' => $v['packUnitId'] ?? $v['pack_unit_id'] ?? null,
+                'commercialUnitId' => $v['commercialUnitId'] ?? $v['commercial_unit_id'] ?? null,
                 'commercialUnitName' => $vCommUnitName,
+                'baseQuantityPerCommercialUnit' => (float) ($v['baseQuantityPerCommercialUnit'] ?? 1),
+                'packSize' => $v['packSize'] ?? ($v['attributeValues']['packSize'] ?? null),
                 'purchaseRate' => $vPurchase,
                 'sellingPrice' => $vSelling,
                 'mrp' => $vMrp,
                 'defaultGstRateBps' => $defaultGstRateBps,
                 'quantitySlabs' => $v['quantitySlabs'] ?? $v['quantity_slabs'] ?? $quantitySlabs,
+                'attributeValues' => $v['attributeValues'] ?? $v['attribute_values'] ?? [],
                 'status' => 'ACTIVE',
                 'createdAt' => $now,
                 'updatedAt' => $now,
@@ -913,6 +920,8 @@ class ProductController extends Controller
             'hsn_code' => ['nullable', 'string'],
             'quantity_slabs' => ['nullable', 'array'],
             'quantitySlabs' => ['nullable', 'array'],
+            'variants' => ['nullable', 'array'],
+            'attributeValues' => ['nullable', 'array'],
         ]);
 
         $payload = json_decode($prodRow->payload, true) ?: [];
@@ -934,6 +943,10 @@ class ProductController extends Controller
         if ($request->has('category') || $request->has('categoryId')) {
             $fields['category'] = $request->input('category') ?? ($fields['category'] ?? null);
             $fields['categoryId'] = $request->input('categoryId') ?? ($fields['categoryId'] ?? null);
+        }
+        if ($request->has('subcategoryId') || $request->has('subcategory')) {
+            $fields['subcategoryId'] = $request->input('subcategoryId') ?? ($fields['subcategoryId'] ?? null);
+            $fields['subcategory'] = $request->input('subcategory') ?? ($fields['subcategory'] ?? null);
         }
         if ($request->has('description')) {
             $fields['description'] = $request->input('description');
@@ -958,6 +971,9 @@ class ProductController extends Controller
         if ($request->has('quantitySlabs') || $request->has('quantity_slabs')) {
             $fields['quantitySlabs'] = (array) ($request->input('quantitySlabs') ?? $request->input('quantity_slabs') ?? []);
         }
+        if ($request->has('attributeValues')) {
+            $fields['attributeValues'] = (array) $request->input('attributeValues');
+        }
         if ($request->has('status')) {
             $status = strtoupper((string) $request->input('status'));
             $fields['status'] = $status;
@@ -966,14 +982,203 @@ class ProductController extends Controller
         $fields['updatedAt'] = $nowIso;
         $payload['fields'] = $fields;
 
-        DB::transaction(function () use ($id, $payload, $now, $fields, $request): void {
+        $businessId = (string) $prodRow->business_id;
+        $userId = $user ? (string) $user->id : (string) ($prodRow->tenant_id ?? '');
+
+        DB::transaction(function () use ($id, $payload, $now, $nowIso, $fields, $request, $prodRow, $businessId, $userId): void {
             DB::table('products')->where('id', $id)->update([
                 'status' => $fields['status'] ?? 'ACTIVE',
                 'updated_at' => $now,
                 'payload' => json_encode($payload),
             ]);
 
-            if ($request->has('quantitySlabs') || $request->has('quantity_slabs')) {
+            if ($request->has('variants')) {
+                $inputVariants = (array) $request->input('variants', []);
+                $existingVariants = DB::table('product_variants')
+                    ->where('is_deleted', 0)
+                    ->where(function ($q) use ($id, $businessId) {
+                        $q->where(function ($sub) use ($id) {
+                            $sub->where('payload->fields->productId', $id)
+                                ->orWhere('id', 'like', "%{$id}%");
+                        });
+                        if (!empty($businessId)) {
+                            $q->where(function ($bSub) use ($businessId) {
+                                $bSub->where('business_id', $businessId)
+                                     ->orWhereNull('business_id');
+                            });
+                        }
+                    })
+                    ->get()
+                    ->keyBy('id');
+
+                $processedVariantIds = [];
+
+                foreach ($inputVariants as $idx => $v) {
+                    if (!is_array($v)) {
+                        continue;
+                    }
+                    $vId = $v['variantId'] ?? $v['id'] ?? null;
+                    if ($vId && isset($existingVariants[$vId])) {
+                        // Existing variant - UPDATE
+                        $existingRow = $existingVariants[$vId];
+                        $vPayload = json_decode($existingRow->payload, true) ?: [];
+                        $vFields = $vPayload['fields'] ?? [];
+
+                        $vFields['productId'] = $id;
+                        $vFields['businessId'] = $businessId;
+                        $vFields['productName'] = $fields['productName'] ?? $prodRow->name ?? ($vFields['productName'] ?? '');
+
+                        $vName = trim((string) ($v['name'] ?? $v['variantName'] ?? $v['displayName'] ?? ''));
+                        if ($vName !== '') {
+                            $vFields['name'] = $vName;
+                            $vFields['variantName'] = $vName;
+                            $vFields['displayName'] = $vName;
+                        }
+
+                        if (array_key_exists('barcode', $v)) {
+                            $vFields['barcode'] = !empty($v['barcode']) ? $v['barcode'] : null;
+                        }
+                        if (!empty($v['sku'])) {
+                            $vFields['sku'] = $v['sku'];
+                        }
+                        if (isset($v['baseUnitId']) || isset($v['unitId']) || isset($v['base_unit_id'])) {
+                            $vFields['baseUnitId'] = (string) ($v['baseUnitId'] ?? $v['unitId'] ?? $v['base_unit_id']);
+                        }
+                        if (array_key_exists('packUnitId', $v) || array_key_exists('pack_unit_id', $v)) {
+                            $vFields['packUnitId'] = $v['packUnitId'] ?? $v['pack_unit_id'] ?? null;
+                        }
+                        if (array_key_exists('commercialUnitId', $v) || array_key_exists('commercial_unit_id', $v)) {
+                            $vFields['commercialUnitId'] = $v['commercialUnitId'] ?? $v['commercial_unit_id'] ?? null;
+                        }
+                        if (array_key_exists('commercialUnitName', $v) || array_key_exists('commercial_unit_name', $v)) {
+                            $vFields['commercialUnitName'] = $v['commercialUnitName'] ?? $v['commercial_unit_name'] ?? null;
+                        }
+                        if (isset($v['baseQuantityPerCommercialUnit'])) {
+                            $vFields['baseQuantityPerCommercialUnit'] = (float) $v['baseQuantityPerCommercialUnit'];
+                        }
+                        if (array_key_exists('packSize', $v) || isset($v['attributeValues']['packSize'])) {
+                            $vFields['packSize'] = $v['packSize'] ?? ($v['attributeValues']['packSize'] ?? null);
+                        }
+                        if (isset($v['sellingPrice']) || isset($v['selling_price'])) {
+                            $vFields['sellingPrice'] = (int) ($v['sellingPrice'] ?? $v['selling_price']);
+                        }
+                        if (isset($v['purchaseRate']) || isset($v['purchase_rate'])) {
+                            $vFields['purchaseRate'] = (int) ($v['purchaseRate'] ?? $v['purchase_rate']);
+                        }
+                        if (isset($v['mrp'])) {
+                            $vFields['mrp'] = (int) $v['mrp'];
+                        }
+                        if (isset($v['defaultGstRateBps']) || isset($v['default_gst_rate_bps'])) {
+                            $vFields['defaultGstRateBps'] = (int) ($v['defaultGstRateBps'] ?? $v['default_gst_rate_bps']);
+                        }
+                        if (isset($v['quantitySlabs']) || isset($v['quantity_slabs'])) {
+                            $vFields['quantitySlabs'] = (array) ($v['quantitySlabs'] ?? $v['quantity_slabs']);
+                        } elseif (isset($fields['quantitySlabs'])) {
+                            $vFields['quantitySlabs'] = $fields['quantitySlabs'];
+                        }
+                        if (isset($v['attributeValues']) || isset($v['attribute_values'])) {
+                            $vFields['attributeValues'] = (array) ($v['attributeValues'] ?? $v['attribute_values']);
+                        }
+                        $vStatus = strtoupper((string) ($v['status'] ?? ($vFields['status'] ?? 'ACTIVE')));
+                        $vFields['status'] = $vStatus;
+                        $vFields['updatedAt'] = $nowIso;
+                        $vFields['updatedBy'] = $userId ?: ($vFields['updatedBy'] ?? null);
+
+                        $vPayload['fields'] = $vFields;
+
+                        DB::table('product_variants')->where('id', $vId)->update([
+                            'status' => $vStatus,
+                            'updated_at' => $now,
+                            'payload' => json_encode($vPayload),
+                        ]);
+
+                        $processedVariantIds[] = $vId;
+                    } else {
+                        // New variant - INSERT
+                        $variantId = 'VAR-'.strtoupper(Str::random(24));
+                        $vAttrs = (array) ($v['attributeValues'] ?? $v['attribute_values'] ?? []);
+                        $vName = trim((string) ($v['name'] ?? $v['variantName'] ?? $v['displayName'] ?? ''));
+                        if ($vName === '') {
+                            $parts = array_filter([
+                                $vAttrs['shade'] ?? null,
+                                $vAttrs['colourFamily'] ?? null,
+                                isset($v['packSize']) || isset($vAttrs['packSize']) ? (($v['packSize'] ?? $vAttrs['packSize']).' '.($v['packUnitId'] ?? '')) : null,
+                            ]);
+                            $vName = !empty($parts) ? implode(' - ', $parts) : ('Variant ' . ($idx + 1));
+                        }
+
+                        $vSelling = (int) ($v['selling_price'] ?? $v['sellingPrice'] ?? ($fields['sellingPrice'] ?? 0));
+                        $vMrp = (int) ($v['mrp'] ?? ($fields['mrp'] ?? 0));
+                        $vPurchase = (int) ($v['purchase_rate'] ?? $v['purchaseRate'] ?? ($fields['purchaseRate'] ?? 0));
+                        $vUnit = (string) ($v['base_unit_id'] ?? $v['baseUnitId'] ?? $v['unitId'] ?? ($fields['baseUnitId'] ?? 'UNIT'));
+                        $vCommUnitName = $v['commercial_unit_name'] ?? $v['commercialUnitName'] ?? null;
+                        $vBarcode = $v['barcode'] ?? null;
+                        $vSku = !empty($v['sku']) ? $v['sku'] : ('SKU-'.strtoupper(Str::random(6)));
+                        $vGst = isset($v['defaultGstRateBps']) ? (int) $v['defaultGstRateBps'] : ($fields['defaultGstRateBps'] ?? 0);
+                        $vSlabs = $v['quantitySlabs'] ?? $v['quantity_slabs'] ?? ($fields['quantitySlabs'] ?? []);
+
+                        $vFields = [
+                            'variantId' => $variantId,
+                            'productId' => $id,
+                            'businessId' => $businessId,
+                            'tenantId' => $userId ?: $prodRow->tenant_id,
+                            'name' => $vName,
+                            'variantName' => $vName,
+                            'productName' => $fields['productName'] ?? $prodRow->name ?? '',
+                            'displayName' => $vName,
+                            'sku' => $vSku,
+                            'barcode' => $vBarcode,
+                            'baseUnitId' => $vUnit,
+                            'packUnitId' => $v['packUnitId'] ?? $v['pack_unit_id'] ?? null,
+                            'commercialUnitId' => $v['commercialUnitId'] ?? $v['commercial_unit_id'] ?? null,
+                            'commercialUnitName' => $vCommUnitName,
+                            'baseQuantityPerCommercialUnit' => (float) ($v['baseQuantityPerCommercialUnit'] ?? 1),
+                            'packSize' => $v['packSize'] ?? ($vAttrs['packSize'] ?? null),
+                            'purchaseRate' => $vPurchase,
+                            'sellingPrice' => $vSelling,
+                            'mrp' => $vMrp,
+                            'defaultGstRateBps' => $vGst,
+                            'quantitySlabs' => $vSlabs,
+                            'attributeValues' => $vAttrs,
+                            'status' => 'ACTIVE',
+                            'createdAt' => $nowIso,
+                            'updatedAt' => $nowIso,
+                            'createdBy' => $userId ?: $prodRow->tenant_id,
+                            'updatedBy' => $userId ?: $prodRow->tenant_id,
+                        ];
+
+                        DB::table('product_variants')->insert([
+                            'id' => $variantId,
+                            'document_path' => "product_variants/$variantId",
+                            'business_id' => $businessId,
+                            'outlet_id' => $prodRow->outlet_id,
+                            'tenant_id' => $userId ?: $prodRow->tenant_id,
+                            'status' => 'ACTIVE',
+                            'is_deleted' => 0,
+                            'created_at' => $now,
+                            'updated_at' => $now,
+                            'payload' => json_encode([
+                                '_documentId' => $variantId,
+                                '_documentPath' => "product_variants/$variantId",
+                                'fields' => $vFields,
+                            ]),
+                        ]);
+
+                        $processedVariantIds[] = $variantId;
+                    }
+                }
+
+                // Soft-delete removed variants
+                foreach ($existingVariants as $oldId => $oldRow) {
+                    if (!in_array($oldId, $processedVariantIds, true)) {
+                        DB::table('product_variants')->where('id', $oldId)->update([
+                            'is_deleted' => 1,
+                            'status' => 'INACTIVE',
+                            'updated_at' => $now,
+                        ]);
+                    }
+                }
+            } elseif ($request->has('quantitySlabs') || $request->has('quantity_slabs')) {
                 $slabs = (array) ($request->input('quantitySlabs') ?? $request->input('quantity_slabs') ?? []);
                 $vRows = DB::table('product_variants')
                     ->where(function ($q) use ($id) {
@@ -992,6 +1197,68 @@ class ProductController extends Controller
                 }
             }
         });
+
+        $activeVariants = DB::table('product_variants')
+            ->where('is_deleted', 0)
+            ->where(function ($q) use ($id, $businessId) {
+                $q->where(function ($sub) use ($id) {
+                    $sub->where('payload->fields->productId', $id)
+                        ->orWhere('id', 'like', "%{$id}%");
+                });
+                if (!empty($businessId)) {
+                    $q->where(function ($bSub) use ($businessId) {
+                        $bSub->where('business_id', $businessId)
+                             ->orWhereNull('business_id');
+                    });
+                }
+            })
+            ->get();
+
+        $assembledVariants = [];
+        foreach ($activeVariants as $vRow) {
+            $vPayload = json_decode($vRow->payload, true) ?: [];
+            $vFields = $vPayload['fields'] ?? [];
+            $vAttrs = $vFields['attributeValues'] ?? [];
+            $vAttrsMap = !empty($vAttrs) ? (array) $vAttrs : [];
+
+            $vUnit = (string) ($vFields['baseUnitId'] ?? $vFields['unitId'] ?? $fields['baseUnitId'] ?? 'UNIT');
+            $vCommUnitName = $vFields['commercialUnitName'] ?? null;
+            $vSellingPrice = (int) ($vFields['sellingPrice'] ?? $vFields['selling_price'] ?? 0);
+            $vMrp = (int) ($vFields['mrp'] ?? 0);
+            $vPurchaseRate = (int) ($vFields['purchaseRate'] ?? $vFields['purchase_rate'] ?? 0);
+
+            $assembledVariants[] = [
+                'id' => $vRow->id,
+                'variantId' => $vFields['variantId'] ?? $vRow->id,
+                'productId' => $id,
+                'businessId' => (string) $vRow->business_id,
+                'tenantId' => (string) ($vFields['tenantId'] ?? ''),
+                'name' => (string) ($vFields['variantName'] ?? $vFields['name'] ?? 'Standard Variant'),
+                'variantName' => (string) ($vFields['variantName'] ?? $vFields['name'] ?? 'Standard Variant'),
+                'displayName' => (string) ($vFields['displayName'] ?? $vFields['name'] ?? ''),
+                'productName' => (string) ($fields['productName'] ?? $fields['name'] ?? $prodRow->name ?? ''),
+                'brand' => (string) ($fields['brand'] ?? ''),
+                'category' => (string) ($fields['categoryName'] ?? $fields['category'] ?? ''),
+                'sku' => $vFields['sku'] ?? $vFields['variantCode'] ?? null,
+                'barcode' => $vFields['barcode'] ?? null,
+                'hsnCode' => $vFields['hsnCode'] ?? $fields['hsnCode'] ?? null,
+                'baseUnitId' => $vUnit,
+                'packUnitId' => $vFields['packUnitId'] ?? null,
+                'commercialUnitId' => $vFields['commercialUnitId'] ?? null,
+                'commercialUnitName' => $vCommUnitName,
+                'baseQuantityPerCommercialUnit' => (float) ($vFields['baseQuantityPerCommercialUnit'] ?? 1),
+                'packSize' => $vFields['packSize'] ?? ($vAttrsMap['packSize'] ?? null),
+                'purchaseRate' => $vPurchaseRate,
+                'sellingPrice' => $vSellingPrice,
+                'mrp' => $vMrp,
+                'defaultGstRateBps' => (int) ($vFields['defaultGstRateBps'] ?? $fields['defaultGstRateBps'] ?? 0),
+                'status' => (string) ($vFields['status'] ?? 'ACTIVE'),
+                'isActive' => (($vFields['status'] ?? 'ACTIVE') === 'ACTIVE'),
+                'quantitySlabs' => $vFields['quantitySlabs'] ?? $vFields['quantity_slabs'] ?? ($fields['quantitySlabs'] ?? []),
+                'attributeValues' => !empty($vAttrsMap) ? $vAttrsMap : (object) [],
+            ];
+        }
+        $fields['variants'] = $assembledVariants;
 
         return ApiResponse::success($fields, 'Product updated successfully.');
     }

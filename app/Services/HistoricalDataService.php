@@ -596,9 +596,12 @@ class HistoricalDataService
                         ->where('business_id', $businessId)
                         ->where('outlet_id', $outletId)
                         ->where(function ($q) use ($vId, $pId) {
-                            $q->where('id', 'LIKE', "%_{$vId}")
-                                ->orWhere('payload->fields->variantId', $vId)
-                                ->orWhere('payload->fields->productId', $pId);
+                            if (!empty($vId)) {
+                                $q->where('id', 'LIKE', "%_{$vId}")
+                                    ->orWhere('payload->fields->variantId', $vId);
+                            } elseif (!empty($pId)) {
+                                $q->where('payload->fields->productId', $pId);
+                            }
                         })
                         ->lockForUpdate()
                         ->first();
@@ -1194,9 +1197,12 @@ class HistoricalDataService
                             ->where('business_id', $businessId)
                             ->where('outlet_id', $outletId)
                             ->where(function ($q) use ($vId, $pId) {
-                                $q->where('id', 'LIKE', "%_{$vId}")
-                                    ->orWhere('payload->fields->variantId', $vId)
-                                    ->orWhere('payload->fields->productId', $pId);
+                                if (!empty($vId)) {
+                                    $q->where('id', 'LIKE', "%_{$vId}")
+                                        ->orWhere('payload->fields->variantId', $vId);
+                                } elseif (!empty($pId)) {
+                                    $q->where('payload->fields->productId', $pId);
+                                }
                             })
                             ->lockForUpdate()
                             ->first();
@@ -1399,9 +1405,12 @@ class HistoricalDataService
                 ->where('business_id', $businessId)
                 ->where('outlet_id', $outletId)
                 ->where(function ($q) use ($stockBalId, $variantId, $productId) {
-                    $q->where('id', $stockBalId)
-                        ->orWhere('payload->fields->variantId', $variantId)
-                        ->orWhere('payload->fields->productId', $productId);
+                    if (!empty($variantId)) {
+                        $q->where('id', $stockBalId)
+                            ->orWhere('payload->fields->variantId', $variantId);
+                    } elseif (!empty($productId)) {
+                        $q->where('payload->fields->productId', $productId);
+                    }
                 })
                 ->lockForUpdate()
                 ->first();

@@ -713,12 +713,11 @@ class InvoiceController extends Controller
                     ->where('business_id', $businessId)
                     ->where('outlet_id', $outletId)
                     ->where(function ($q) use ($vId, $pId) {
-                        if ($vId) {
+                        if (!empty($vId)) {
                             $q->where('id', 'LIKE', "%_{$vId}")
                                 ->orWhere('payload->fields->variantId', $vId);
-                        }
-                        if ($pId) {
-                            $q->orWhere('payload->fields->productId', $pId);
+                        } elseif (!empty($pId)) {
+                            $q->where('payload->fields->productId', $pId);
                         }
                     })
                     ->lockForUpdate()
