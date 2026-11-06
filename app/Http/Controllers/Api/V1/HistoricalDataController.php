@@ -11,6 +11,7 @@ use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Throwable;
 
@@ -236,6 +237,36 @@ class HistoricalDataController extends Controller
     }
 
     /**
+     * Check stock availability and batches on a historical date.
+     */
+    public function stockAvailability(Request $request): JsonResponse
+    {
+        $businessId = $this->resolveBusinessId($request);
+        if (! $businessId) {
+            return ApiResponse::error('Unauthorized access.', 403, null, 'FORBIDDEN');
+        }
+
+        $validated = $request->validate([
+            'product_id' => 'required|string',
+            'date' => 'required|date',
+            'outlet_id' => 'nullable|string',
+        ]);
+
+        try {
+            $data = $this->historicalService->getStockAvailabilityOnDate(
+                $businessId,
+                $validated['outlet_id'] ?? null,
+                $validated['product_id'],
+                $validated['date']
+            );
+
+            return ApiResponse::success($data, 'Historical stock availability retrieved.');
+        } catch (Throwable $e) {
+            return ApiResponse::error($e->getMessage(), 422);
+        }
+    }
+
+    /**
      * Record Historical Sale ("Old Sale Entry").
      */
     public function storeSale(Request $request): JsonResponse
@@ -259,6 +290,11 @@ class HistoricalDataController extends Controller
             'payment_mode' => 'nullable|string|in:CASH,UPI,CARD,CHEQUE,BANK_TRANSFER,CREDIT',
             'payment_date' => 'nullable|date',
             'amount_received' => 'nullable|numeric|min:0',
+            'amount_received_paise' => 'nullable|integer|min:0',
+            'paid_amount' => 'nullable|numeric|min:0',
+            'paid_paise' => 'nullable|integer|min:0',
+            'grand_total' => 'nullable|numeric|min:0',
+            'grand_total_paise' => 'nullable|integer|min:0',
             'impact_current_stock' => 'nullable|boolean',
             'lines' => 'required|array|min:1',
             'lines.*.product_id' => 'nullable|string',
@@ -304,6 +340,10 @@ class HistoricalDataController extends Controller
             'tax_type' => 'nullable|string|in:INTRA_STATE,INTER_STATE',
             'payment_method' => 'nullable|string',
             'paid_amount' => 'nullable|numeric|min:0',
+            'paid_paise' => 'nullable|integer|min:0',
+            'paid_amount_paise' => 'nullable|integer|min:0',
+            'grand_total' => 'nullable|numeric|min:0',
+            'grand_total_paise' => 'nullable|integer|min:0',
             'status' => 'nullable|string|in:APPROVED,DRAFT',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'nullable|string',
@@ -668,13 +708,18 @@ class HistoricalDataController extends Controller
         $productId = $request->query('product_id');
 
         $query = DB::table('stock_movements')
-            ->where('business_id', $businessId)
-            ->where('is_deleted', 0);
+            ->where('business_id', $businessId);
 
-        if ($scope === 'old_only') {
-            $query->where('is_historical', 1);
-        } elseif ($scope === 'new_only') {
-            $query->where('is_historical', 0);
+        if (Schema::hasColumn('stock_movements', 'is_deleted')) {
+            $query->where('is_deleted', 0);
+        }
+
+        if (Schema::hasColumn('stock_movements', 'is_historical')) {
+            if ($scope === 'old_only') {
+                $query->where('is_historical', 1);
+            } elseif ($scope === 'new_only') {
+                $query->where('is_historical', 0);
+            }
         }
 
         if ($outletId && $outletId !== 'ALL') {
@@ -688,21 +733,46 @@ class HistoricalDataController extends Controller
 
         $rows = $query->orderBy('created_at', 'desc')->get();
 
+        // Pre-fetch product names for readability
+        $prodMap = [];
+        $pIds = $rows->pluck('product_id')->filter()->unique()->values()->all();
+        if (! empty($pIds)) {
+            $prods = DB::table('products')->whereIn('id', $pIds)->get(['id', 'payload']);
+            foreach ($prods as $p) {
+                $pPayload = json_decode($p->payload, true) ?: [];
+                $prodMap[$p->id] = $pPayload['fields']['name'] ?? $p->id;
+            }
+        }
+
         $entries = [];
         foreach ($rows as $r) {
+            $transDate = $r->original_transaction_date ?? Carbon::parse($r->created_at)->toDateString();
+            $pName = $prodMap[$r->product_id] ?? $r->product_id;
             $entries[] = [
                 'id' => $r->id,
                 'productId' => $r->product_id,
+                'product_id' => $r->product_id,
+                'productName' => $pName,
+                'product_name' => $pName,
                 'variantId' => $r->variant_id,
+                'variant_id' => $r->variant_id,
                 'type' => $r->type,
                 'qtyChange' => (float) $r->qty_change,
+                'qty_change' => (float) $r->qty_change,
                 'balanceAfter' => (float) $r->balance_after,
+                'balance_after' => (float) $r->balance_after,
                 'referenceType' => $r->reference_type,
+                'reference_type' => $r->reference_type,
                 'referenceId' => $r->reference_id,
+                'reference_id' => $r->reference_id,
                 'note' => $r->note,
-                'isHistorical' => (bool) $r->is_historical,
-                'entrySource' => $r->entry_source,
-                'transactionDate' => $r->original_transaction_date ?? Carbon::parse($r->created_at)->toDateString(),
+                'isHistorical' => (bool) ($r->is_historical ?? false),
+                'is_historical' => (bool) ($r->is_historical ?? false),
+                'entrySource' => $r->entry_source ?? 'new',
+                'entry_source' => $r->entry_source ?? 'new',
+                'transactionDate' => $transDate,
+                'original_transaction_date' => $transDate,
+                'created_at' => Carbon::parse($r->created_at)->toIso8601String(),
             ];
         }
 
@@ -710,6 +780,7 @@ class HistoricalDataController extends Controller
             'scope' => $scope,
             'count' => count($entries),
             'records' => $entries,
+            'movements' => $entries,
         ], 'Stock movements report retrieved.');
     }
 }

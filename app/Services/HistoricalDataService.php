@@ -9,6 +9,7 @@ use App\Models\MigrationLog;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 
@@ -24,6 +25,11 @@ class HistoricalDataService
         $batchId = $data['batch_id'] ?? null;
         $originalInvoiceNumber = trim((string) $data['original_invoice_number']);
         $originalInvoiceDate = Carbon::parse($data['original_invoice_date'])->toDateString();
+
+        $yesterdayStr = Carbon::yesterday()->toDateString();
+        if ($originalInvoiceDate > $yesterdayStr) {
+            throw new InvalidArgumentException("Old bill date must be strictly prior to today (maximum allowed date: {$yesterdayStr}). Selected date: {$originalInvoiceDate}.");
+        }
         $customerId = $data['customer_id'] ?? null;
         $customerName = $data['customer_name'] ?? 'Walk-in Customer';
         $customerPhone = ! empty($data['customer_phone']) ? preg_replace('/\D/', '', $data['customer_phone']) : null;
@@ -33,6 +39,58 @@ class HistoricalDataService
         $paymentMode = strtoupper($data['payment_mode'] ?? 'CASH');
         $paymentDate = ! empty($data['payment_date']) ? Carbon::parse($data['payment_date'])->toDateString() : $originalInvoiceDate;
         $impactCurrentStock = (bool) ($data['impact_current_stock'] ?? false);
+
+        // Auto-link or register customer if name is provided but customerId was omitted
+        if (empty($customerId) && ! empty($customerName) && $customerName !== 'Walk-in Customer') {
+            $custQuery = DB::table('customers')->where('business_id', $businessId);
+            if (\Illuminate\Support\Facades\Schema::hasColumn('customers', 'is_deleted')) {
+                $custQuery->where('is_deleted', 0);
+            }
+            $foundCust = null;
+            if (! empty($customerPhone)) {
+                $foundCust = (clone $custQuery)->where(function ($q) use ($customerPhone) {
+                    if (\Illuminate\Support\Facades\Schema::hasColumn('customers', 'phone')) {
+                        $q->where('phone', $customerPhone);
+                    }
+                    $q->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.phone')) = ?", [$customerPhone]);
+                })->first();
+            }
+            if (! $foundCust) {
+                $foundCust = (clone $custQuery)->where(function ($q) use ($customerName) {
+                    if (\Illuminate\Support\Facades\Schema::hasColumn('customers', 'name')) {
+                        $q->where('name', $customerName);
+                    }
+                    $q->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.name')) = ?", [$customerName]);
+                })->first();
+            }
+            if ($foundCust) {
+                $customerId = $foundCust->id;
+            } else {
+                $newCustId = 'CUST-'.strtoupper(Str::random(24));
+                $custFields = [
+                    'customerId' => $newCustId,
+                    'tenantId' => $user->id,
+                    'businessId' => $businessId,
+                    'name' => $customerName,
+                    'phone' => $customerPhone,
+                    'gstin' => $customerGstin,
+                    'duePaise' => 0,
+                    'advancePaise' => 0,
+                    'createdAt' => now()->toIso8601String(),
+                    'updatedAt' => now()->toIso8601String(),
+                ];
+                DB::table('customers')->insert([
+                    'id' => $newCustId,
+                    'document_path' => "customers/{$newCustId}",
+                    'business_id' => $businessId,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                    'is_deleted' => 0,
+                    'payload' => json_encode(['fields' => $custFields]),
+                ]);
+                $customerId = $newCustId;
+            }
+        }
 
         // 1. Duplicate invoice prevention
         $existingInvoice = DB::table('invoices')
@@ -60,6 +118,7 @@ class HistoricalDataService
         }
 
         $calculatedLines = [];
+        $consumedInThisBill = [];
         $grossTotal = 0;
         $discountTotal = 0;
         $taxableTotal = 0;
@@ -110,6 +169,29 @@ class HistoricalDataService
             $pId = $item['product_id'] ?? 'SYS_PROD_HIST_'.Str::random(8);
             $vId = $item['variant_id'] ?? $pId;
 
+            // Validate against date-wise available old inventory stock
+            if (! str_starts_with($pId, 'SYS_PROD_HIST_')) {
+                $alreadyConsumedInBill = $consumedInThisBill[$pId] ?? 0.0;
+                $prodName = $item['product_name'] ?? $item['name'] ?? 'Product';
+                $availData = $this->getStockAvailabilityOnDate($businessId, $outletId, $pId, $originalInvoiceDate);
+
+                if ($availData['hasHistoricalInward']) {
+                    if ($availData['status'] === 'NOT_YET_PURCHASED') {
+                        throw new InvalidArgumentException("Cannot create old sale for '{$prodName}' on {$originalInvoiceDate}. {$availData['message']}");
+                    }
+
+                    $remainingOnDate = max(0.0, $availData['availableQuantity'] - $alreadyConsumedInBill);
+                    if ($remainingOnDate <= 0) {
+                        throw new InvalidArgumentException("No stock available: No historical stock available for '{$prodName}' on {$originalInvoiceDate}. {$availData['message']}");
+                    }
+
+                    if ($qty > ($remainingOnDate + 0.0001)) {
+                        throw new InvalidArgumentException("Quantity for '{$prodName}' exceeds available historical stock on {$originalInvoiceDate} (exceeds available old inventory stock). Available: {$remainingOnDate}, Requested: {$qty}.");
+                    }
+                    $consumedInThisBill[$pId] = $alreadyConsumedInBill + $qty;
+                }
+            }
+
             $calculatedLines[] = [
                 'itemId' => "HIST_{$invoiceId}_{$index}",
                 'productId' => $pId,
@@ -129,13 +211,35 @@ class HistoricalDataService
             ];
         }
 
-        $grandTotalPaise = (int) ($data['grand_total'] ?? ($taxableTotal + $taxTotal));
-        if ($grandTotalPaise < 1000 && ! isset($data['grand_total_paise']) && $taxableTotal + $taxTotal >= 1000) {
-            $grandTotalPaise = (int) round($grandTotalPaise * 100);
+        $computedPaise = (int) ($taxableTotal + $taxTotal);
+        if (isset($data['grand_total_paise'])) {
+            $grandTotalPaise = (int) $data['grand_total_paise'];
+        } elseif (isset($data['grand_total'])) {
+            $gtVal = (float) $data['grand_total'];
+            if ($computedPaise > 0 && $gtVal > 0 && $gtVal <= ($computedPaise / 100.0)) {
+                $grandTotalPaise = (int) round($gtVal * 100);
+            } else {
+                $grandTotalPaise = (int) round($gtVal);
+            }
+        } else {
+            $grandTotalPaise = $computedPaise;
         }
 
-        $rawPaid = (float) ($data['amount_received'] ?? $data['paid_amount'] ?? $data['paid_paise'] ?? 0);
-        $paidPaise = $rawPaid > 0 && $rawPaid < 1000 && ! isset($data['paid_paise']) && $grandTotalPaise >= 1000 ? (int) round($rawPaid * 100) : (int) round($rawPaid);
+        if (isset($data['paid_paise'])) {
+            $paidPaise = (int) $data['paid_paise'];
+        } elseif (isset($data['amount_received_paise'])) {
+            $paidPaise = (int) $data['amount_received_paise'];
+        } else {
+            $rawPaid = (float) ($data['amount_received'] ?? $data['paid_amount'] ?? 0);
+            $grandTotalRupees = $grandTotalPaise / 100.0;
+            if ($grandTotalPaise > 0 && $rawPaid > $grandTotalRupees && $rawPaid <= $grandTotalPaise) {
+                // Already in paise (e.g. from tests or paise-based payload)
+                $paidPaise = (int) round($rawPaid);
+            } else {
+                // In rupees (standard user input from UI)
+                $paidPaise = (int) round($rawPaid * 100);
+            }
+        }
         $duePaise = max(0, $grandTotalPaise - $paidPaise);
 
         $status = $duePaise == 0 ? 'PAID' : ($paidPaise > 0 ? 'PARTIALLY_PAID' : 'PENDING');
@@ -230,7 +334,7 @@ class HistoricalDataService
                 'payload' => json_encode(['fields' => $invoiceFields]),
             ]);
 
-            // 2. Insert invoice line items
+            // 2. Insert invoice line items and allocate batches via FIFO
             foreach ($calculatedLines as $line) {
                 DB::table('invoice_items')->insert([
                     'id' => $line['itemId'],
@@ -252,6 +356,91 @@ class HistoricalDataService
                         'isHistorical' => true,
                     ])]),
                 ]);
+
+                // FIFO Batch Allocation for historical sale
+                $pId = $line['productId'];
+                $qtyToDeduct = (float) $line['quantity'];
+
+                $allBatchRows = DB::table('inventory_batches')
+                    ->where('business_id', $businessId)
+                    ->when($outletId, fn ($q) => $q->where('outlet_id', $outletId))
+                    ->where('product_id', $pId)
+                    ->where('is_deleted', 0)
+                    ->get();
+
+                $availBatches = [];
+                foreach ($allBatchRows as $br) {
+                    $bPayload = json_decode($br->payload, true) ?: [];
+                    $bFields = $bPayload['fields'] ?? [];
+                    $bAvail = (float) (isset($br->quantity_available) ? $br->quantity_available : ($bFields['availableQuantity'] ?? $bFields['availableQty'] ?? 0));
+                    $bPurDate = isset($br->purchase_date) ? $br->purchase_date : ($bFields['purchaseDate'] ?? substr((string) $br->created_at, 0, 10));
+                    if ($bAvail > 0 && $bPurDate <= $originalInvoiceDate) {
+                        $availBatches[] = [
+                            'row' => $br,
+                            'fields' => $bFields,
+                            'available' => $bAvail,
+                            'purchaseDate' => $bPurDate,
+                        ];
+                    }
+                }
+                usort($availBatches, fn ($a, $b) => strcmp($a['purchaseDate'], $b['purchaseDate']));
+
+                foreach ($availBatches as $batchItem) {
+                    if ($qtyToDeduct <= 0) break;
+                    $batchRow = $batchItem['row'];
+                    $bFields = $batchItem['fields'];
+                    $batchAvail = $batchItem['available'];
+                    $deduct = min($qtyToDeduct, $batchAvail);
+                    $newAvail = max(0.0, $batchAvail - $deduct);
+                    $batchStatus = $newAvail <= 0 ? 'EXHAUSTED' : 'ACTIVE';
+
+                    $bFields['availableQuantity'] = $newAvail;
+                    $bFields['availableQty'] = $newAvail;
+                    $bFields['soldQuantity'] = (float) ($bFields['soldQuantity'] ?? 0) + $deduct;
+                    $bFields['status'] = $batchStatus;
+
+                    $batchUpdate = [
+                        'status' => $batchStatus,
+                        'updated_at' => $dbNow,
+                        'payload' => json_encode(['fields' => $bFields]),
+                    ];
+                    if (Schema::hasColumn('inventory_batches', 'quantity_available')) {
+                        $batchUpdate['quantity_available'] = $newAvail;
+                    }
+                    DB::table('inventory_batches')->where('id', $batchRow->id)->update($batchUpdate);
+
+                    // Record batch movement
+                    $ibmId = 'IBM-'.strtoupper(Str::random(24));
+                    $ibmSaleData = [
+                        'id' => $ibmId,
+                        'document_path' => "inventory_batch_movements/{$ibmId}",
+                        'business_id' => $businessId,
+                        'outlet_id' => $outletId,
+                        'product_id' => $pId,
+                        'status' => 'ACTIVE',
+                        'is_deleted' => 0,
+                        'created_at' => Carbon::parse($originalInvoiceDate),
+                        'updated_at' => $dbNow,
+                        'payload' => json_encode(['fields' => [
+                            'movementId' => $ibmId,
+                            'batchId' => $batchRow->id,
+                            'referenceType' => 'historical_invoice',
+                            'referenceId' => $invoiceId,
+                            'movementType' => 'SALE_OUTWARD',
+                            'quantityChanged' => -$deduct,
+                            'quantityAfter' => $newAvail,
+                        ]]),
+                    ];
+                    if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) $ibmSaleData['batch_id'] = $batchRow->id;
+                    if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) $ibmSaleData['reference_type'] = 'historical_invoice';
+                    if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) $ibmSaleData['reference_id'] = $invoiceId;
+                    if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) $ibmSaleData['movement_type'] = 'SALE_OUTWARD';
+                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) $ibmSaleData['quantity_changed'] = -$deduct;
+                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) $ibmSaleData['quantity_after'] = $newAvail;
+
+                    DB::table('inventory_batch_movements')->insert($ibmSaleData);
+                    $qtyToDeduct -= $deduct;
+                }
             }
 
             // 3. Customer balance and ledger entries
@@ -429,10 +618,20 @@ class HistoricalDataService
                         $sbFields['updatedAt'] = $nowStr;
                         $sbPayload['fields'] = $sbFields;
 
-                        DB::table('stock_balances')->where('id', $stockRow->id)->update([
+                        $sbUpData = [
                             'updated_at' => $dbNow,
                             'payload' => json_encode($sbPayload),
-                        ]);
+                        ];
+                        if (Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
+                            $sbUpData['quantity_on_hand'] = $newStock / 1000.0;
+                        }
+                        if (Schema::hasColumn('stock_balances', 'product_id') && empty($stockRow->product_id)) {
+                            $sbUpData['product_id'] = $pId;
+                        }
+                        if (Schema::hasColumn('stock_balances', 'variant_id') && empty($stockRow->variant_id)) {
+                            $sbUpData['variant_id'] = $vId;
+                        }
+                        DB::table('stock_balances')->where('id', $stockRow->id)->update($sbUpData);
 
                         $balAfterUnits = $newStock >= 1000 ? ($newStock / 1000.0) : (float) $newStock;
                         $movementId = 'STM-'.strtoupper(Str::random(24));
@@ -513,6 +712,11 @@ class HistoricalDataService
         }
 
         $invoiceDate = Carbon::parse($data['invoice_date'] ?? $data['purchase_date'] ?? $data['original_invoice_date'])->toDateString();
+
+        $yesterdayStr = Carbon::yesterday()->toDateString();
+        if ($invoiceDate > $yesterdayStr) {
+            throw new InvalidArgumentException("Old bill date must be strictly prior to today (maximum allowed date: {$yesterdayStr}). Selected date: {$invoiceDate}.");
+        }
         $purchaseDate = Carbon::parse($data['purchase_date'] ?? $invoiceDate)->toDateString();
         $taxType = $data['tax_type'] ?? 'INTRA_STATE';
         $paymentMethod = strtoupper($data['payment_method'] ?? 'CASH');
@@ -612,7 +816,9 @@ class HistoricalDataService
                 'variantId' => $vId,
                 'productName' => $item['product_name'] ?? 'Product',
                 'variantName' => $item['variant_name'] ?? 'Default',
-                'quantity' => $origQty, // Original purchased quantity is preserved!
+                'quantity' => (int) round($origQty * 1000), // Standard ERP milli-units for consistent PurchaseBillItemModel compatibility
+                'quantityUnits' => $origQty,
+                'quantity_units' => $origQty,
                 'rate' => $ratePaise,
                 'gstRateBps' => $gstRateBps,
                 'taxableAmount' => $lineTaxablePaise,
@@ -635,13 +841,35 @@ class HistoricalDataService
             ];
         }
 
-        $grandTotalPaise = (int) ($data['grand_total'] ?? ($subtotal + $totalTax));
-        if ($grandTotalPaise < 1000 && ! isset($data['grand_total_paise']) && $subtotal + $totalTax >= 1000) {
-            $grandTotalPaise = (int) round($grandTotalPaise * 100);
+        $computedPaise = (int) ($subtotal + $totalTax);
+        if (isset($data['grand_total_paise'])) {
+            $grandTotalPaise = (int) $data['grand_total_paise'];
+        } elseif (isset($data['grand_total'])) {
+            $gtVal = (float) $data['grand_total'];
+            if ($computedPaise > 0 && $gtVal > 0 && $gtVal <= ($computedPaise / 100.0)) {
+                $grandTotalPaise = (int) round($gtVal * 100);
+            } else {
+                $grandTotalPaise = (int) round($gtVal);
+            }
+        } else {
+            $grandTotalPaise = $computedPaise;
         }
 
-        $rawPaid = (float) ($data['paid_amount'] ?? $data['amount_paid'] ?? 0);
-        $paidPaise = $rawPaid > 0 && $rawPaid < 1000 && ! isset($data['paid_paise']) && $grandTotalPaise >= 1000 ? (int) round($rawPaid * 100) : (int) round($rawPaid);
+        if (isset($data['paid_paise'])) {
+            $paidPaise = (int) $data['paid_paise'];
+        } elseif (isset($data['paid_amount_paise'])) {
+            $paidPaise = (int) $data['paid_amount_paise'];
+        } else {
+            $rawPaid = (float) ($data['paid_amount'] ?? $data['amount_paid'] ?? 0);
+            $grandTotalRupees = $grandTotalPaise / 100.0;
+            if ($grandTotalPaise > 0 && $rawPaid > $grandTotalRupees && $rawPaid <= $grandTotalPaise) {
+                // Already in paise
+                $paidPaise = (int) round($rawPaid);
+            } else {
+                // In rupees
+                $paidPaise = (int) round($rawPaid * 100);
+            }
+        }
         $outstandingPaise = max(0, $grandTotalPaise - $paidPaise);
 
         return DB::transaction(function () use (
@@ -720,8 +948,9 @@ class HistoricalDataService
                 'payload' => json_encode(['fields' => $billFields]),
             ]);
 
-            // 2. Insert line items
+            // 2. Insert line items and create inventory batches
             foreach ($lineItems as $item) {
+                $lineQtyUnits = $item['quantityUnits'] ?? ($item['quantity'] >= 1000 ? $item['quantity'] / 1000.0 : $item['quantity']);
                 DB::table('purchase_bill_items')->insert([
                     'id' => $item['purchaseItemId'],
                     'document_path' => "purchase_bill_items/{$item['purchaseItemId']}",
@@ -729,7 +958,7 @@ class HistoricalDataService
                     'outlet_id' => $outletId,
                     'purchase_bill_id' => $purchaseBillId,
                     'product_id' => $item['productId'],
-                    'quantity' => $item['quantity'], // Preserves 100% original quantity
+                    'quantity' => $lineQtyUnits,
                     'status' => $status,
                     'created_at' => Carbon::parse($invoiceDate),
                     'updated_at' => $dbNow,
@@ -742,6 +971,83 @@ class HistoricalDataService
                         'isHistorical' => true,
                     ])]),
                 ]);
+
+                // Create Inventory Batch for historical purchase line
+                $batchNumber = !empty($item['batch_number']) ? trim((string) $item['batch_number']) : ('AUTO-BATCH-'.strtoupper(Str::random(8)));
+                $autoBatchId = 'BATCH-'.strtoupper(Str::random(24));
+                $batchMfgDate = !empty($item['manufacturing_date']) ? Carbon::parse($item['manufacturing_date'])->toDateString() : null;
+                $batchExpiryDate = !empty($item['expiry_date']) ? Carbon::parse($item['expiry_date'])->toDateString() : null;
+
+                $batchRowData = [
+                    'id' => $autoBatchId,
+                    'document_path' => "inventory_batches/{$autoBatchId}",
+                    'business_id' => $businessId,
+                    'outlet_id' => $outletId,
+                    'product_id' => $item['productId'],
+                    'status' => 'ACTIVE',
+                    'created_at' => Carbon::parse($invoiceDate),
+                    'updated_at' => $dbNow,
+                    'is_deleted' => 0,
+                    'payload' => json_encode(['fields' => [
+                        'batchId' => $autoBatchId,
+                        'batchNumber' => $batchNumber,
+                        'productId' => $item['productId'],
+                        'variantId' => $item['variantId'],
+                        'purchaseBillId' => $purchaseBillId,
+                        'originalInvoiceNumber' => $supplierInvoiceNumber,
+                        'originalQuantity' => $lineQtyUnits,
+                        'availableQuantity' => $lineQtyUnits,
+                        'soldQuantity' => 0,
+                        'purchaseDate' => $invoiceDate,
+                        'purchaseRate' => $item['rate'],
+                        'mfgDate' => $batchMfgDate,
+                        'expiryDate' => $batchExpiryDate,
+                        'isHistorical' => true,
+                        'status' => 'ACTIVE',
+                    ]]),
+                ];
+                if (Schema::hasColumn('inventory_batches', 'variant_id')) $batchRowData['variant_id'] = $item['variantId'];
+                if (Schema::hasColumn('inventory_batches', 'batch_number')) $batchRowData['batch_number'] = $batchNumber;
+                if (Schema::hasColumn('inventory_batches', 'mfg_date')) $batchRowData['mfg_date'] = $batchMfgDate;
+                if (Schema::hasColumn('inventory_batches', 'expiry_date')) $batchRowData['expiry_date'] = $batchExpiryDate;
+                if (Schema::hasColumn('inventory_batches', 'purchase_rate')) $batchRowData['purchase_rate'] = $item['rate'] >= 1000 ? ($item['rate'] / 100.0) : $item['rate'];
+                if (Schema::hasColumn('inventory_batches', 'quantity_initial')) $batchRowData['quantity_initial'] = $lineQtyUnits;
+                if (Schema::hasColumn('inventory_batches', 'quantity_available')) $batchRowData['quantity_available'] = $lineQtyUnits;
+                if (Schema::hasColumn('inventory_batches', 'is_historical')) $batchRowData['is_historical'] = 1;
+                if (Schema::hasColumn('inventory_batches', 'purchase_bill_id')) $batchRowData['purchase_bill_id'] = $purchaseBillId;
+                if (Schema::hasColumn('inventory_batches', 'purchase_date')) $batchRowData['purchase_date'] = $invoiceDate;
+
+                DB::table('inventory_batches')->insert($batchRowData);
+
+                $ibmId = 'IBM-'.strtoupper(Str::random(24));
+                $ibmRowData = [
+                    'id' => $ibmId,
+                    'document_path' => "inventory_batch_movements/{$ibmId}",
+                    'business_id' => $businessId,
+                    'outlet_id' => $outletId,
+                    'product_id' => $item['productId'],
+                    'status' => 'ACTIVE',
+                    'created_at' => Carbon::parse($invoiceDate),
+                    'updated_at' => $dbNow,
+                    'is_deleted' => 0,
+                    'payload' => json_encode(['fields' => [
+                        'movementId' => $ibmId,
+                        'batchId' => $autoBatchId,
+                        'referenceType' => 'historical_purchase_bill',
+                        'referenceId' => $purchaseBillId,
+                        'movementType' => 'PURCHASE_INWARD',
+                        'quantityChanged' => $lineQtyUnits,
+                        'quantityAfter' => $lineQtyUnits,
+                    ]]),
+                ];
+                if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) $ibmRowData['batch_id'] = $autoBatchId;
+                if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) $ibmRowData['reference_type'] = 'historical_purchase_bill';
+                if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) $ibmRowData['reference_id'] = $purchaseBillId;
+                if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) $ibmRowData['movement_type'] = 'PURCHASE_INWARD';
+                if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) $ibmRowData['quantity_changed'] = $lineQtyUnits;
+                if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) $ibmRowData['quantity_after'] = $lineQtyUnits;
+
+                DB::table('inventory_batch_movements')->insert($ibmRowData);
             }
 
             // 3. Supplier Balance and Ledger
@@ -934,18 +1240,29 @@ class HistoricalDataService
                                 'createdAt' => $nowStr,
                                 'updatedAt' => $nowStr,
                             ];
-                            DB::table('stock_balances')->insert([
+                                                        $sbInsertData = [
                                 'id' => "HIST_{$businessId}_{$outletId}_{$vId}",
-                                'document_path' => "stock_balances/HIST_{$businessId}_{$outletId}_{$vId}",
                                 'business_id' => $businessId,
                                 'outlet_id' => $outletId,
-                                'quantity_on_hand' => $qtyUnits,
                                 'status' => 'ACTIVE',
                                 'created_at' => $dbNow,
                                 'updated_at' => $dbNow,
                                 'is_deleted' => 0,
                                 'payload' => json_encode(['fields' => $sbFields]),
-                            ]);
+                            ];
+                            if (Schema::hasColumn('stock_balances', 'document_path')) {
+                                $sbInsertData['document_path'] = "stock_balances/HIST_{$businessId}_{$outletId}_{$vId}";
+                            }
+                            if (Schema::hasColumn('stock_balances', 'product_id')) {
+                                $sbInsertData['product_id'] = $pId;
+                            }
+                            if (Schema::hasColumn('stock_balances', 'variant_id')) {
+                                $sbInsertData['variant_id'] = $vId;
+                            }
+                            if (Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
+                                $sbInsertData['quantity_on_hand'] = $qtyUnits;
+                            }
+                            DB::table('stock_balances')->insert($sbInsertData);
                         }
 
                         $balAfterUnits = $newStock >= 1000 ? ($newStock / 1000.0) : (float) $newStock;
@@ -1182,6 +1499,75 @@ class HistoricalDataService
                 ]]),
             ]);
 
+            // Create Inventory Batch for opening stock
+            $batchNumber = 'OPENING-'.strtoupper(Str::random(6));
+            $autoBatchId = 'BATCH-'.strtoupper(Str::random(24));
+            $opBatchData = [
+                'id' => $autoBatchId,
+                'document_path' => "inventory_batches/{$autoBatchId}",
+                'business_id' => $businessId,
+                'outlet_id' => $outletId,
+                'product_id' => $productId,
+                'status' => 'ACTIVE',
+                'created_at' => Carbon::parse($openingDate),
+                'updated_at' => $dbNow,
+                'is_deleted' => 0,
+                'payload' => json_encode(['fields' => [
+                    'batchId' => $autoBatchId,
+                    'batchNumber' => $batchNumber,
+                    'productId' => $productId,
+                    'variantId' => $variantId,
+                    'purchaseBillId' => null,
+                    'originalInvoiceNumber' => 'OPENING-STOCK',
+                    'originalQuantity' => $quantity,
+                    'availableQuantity' => $quantity,
+                    'soldQuantity' => 0,
+                    'purchaseDate' => $openingDate,
+                    'purchaseRate' => $ratePaise,
+                    'isHistorical' => true,
+                    'status' => 'ACTIVE',
+                ]]),
+            ];
+            if (Schema::hasColumn('inventory_batches', 'variant_id')) $opBatchData['variant_id'] = $variantId;
+            if (Schema::hasColumn('inventory_batches', 'batch_number')) $opBatchData['batch_number'] = $batchNumber;
+            if (Schema::hasColumn('inventory_batches', 'purchase_rate')) $opBatchData['purchase_rate'] = $ratePaise >= 1000 ? ($ratePaise / 100.0) : $ratePaise;
+            if (Schema::hasColumn('inventory_batches', 'quantity_initial')) $opBatchData['quantity_initial'] = $quantity;
+            if (Schema::hasColumn('inventory_batches', 'quantity_available')) $opBatchData['quantity_available'] = $quantity;
+            if (Schema::hasColumn('inventory_batches', 'is_historical')) $opBatchData['is_historical'] = 1;
+            if (Schema::hasColumn('inventory_batches', 'purchase_date')) $opBatchData['purchase_date'] = $openingDate;
+
+            DB::table('inventory_batches')->insert($opBatchData);
+
+            $ibmId = 'IBM-'.strtoupper(Str::random(24));
+            $ibmOpData = [
+                'id' => $ibmId,
+                'document_path' => "inventory_batch_movements/{$ibmId}",
+                'business_id' => $businessId,
+                'outlet_id' => $outletId,
+                'product_id' => $productId,
+                'status' => 'ACTIVE',
+                'created_at' => Carbon::parse($openingDate),
+                'updated_at' => $dbNow,
+                'is_deleted' => 0,
+                'payload' => json_encode(['fields' => [
+                    'movementId' => $ibmId,
+                    'batchId' => $autoBatchId,
+                    'referenceType' => 'opening_stock',
+                    'referenceId' => $stockBalId,
+                    'movementType' => 'OPENING_INWARD',
+                    'quantityChanged' => $quantity,
+                    'quantityAfter' => $quantity,
+                ]]),
+            ];
+            if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) $ibmOpData['batch_id'] = $autoBatchId;
+            if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) $ibmOpData['reference_type'] = 'opening_stock';
+            if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) $ibmOpData['reference_id'] = $stockBalId;
+            if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) $ibmOpData['movement_type'] = 'OPENING_INWARD';
+            if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) $ibmOpData['quantity_changed'] = $quantity;
+            if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) $ibmOpData['quantity_after'] = $quantity;
+
+            DB::table('inventory_batch_movements')->insert($ibmOpData);
+
             return [
                 'stockBalanceId' => $stockBalId,
                 'movementId' => $movementId,
@@ -1232,32 +1618,37 @@ class HistoricalDataService
                 ->where('type', 'OPENING_STOCK')
                 ->sum('qty_change');
 
-            // 3. Historical purchases total
-            $histPurchasesQty = DB::table('purchase_bill_items')
+            // 3. Historical purchases total (net of purchase returns, excluding deleted and cancelled)
+            $histPurchasesQty = (float) DB::table('purchase_bill_items')
                 ->join('purchase_bills', 'purchase_bill_items.purchase_bill_id', '=', 'purchase_bills.id')
                 ->where('purchase_bills.business_id', $businessId)
                 ->when($outletId, fn ($q) => $q->where('purchase_bills.outlet_id', $outletId))
                 ->where('purchase_bills.is_historical', 1)
+                ->where('purchase_bills.is_deleted', 0)
+                ->where('purchase_bills.status', '!=', 'CANCELLED')
                 ->where('purchase_bill_items.product_id', $pId)
-                ->sum('purchase_bill_items.quantity');
+                ->sum(DB::raw('CASE WHEN purchase_bill_items.quantity > COALESCE(purchase_bill_items.returned_qty, 0) THEN purchase_bill_items.quantity - COALESCE(purchase_bill_items.returned_qty, 0) ELSE 0 END'));
 
-            // 4. Historical sales total
-            $histSalesQty = DB::table('invoice_items')
+            // 4. Historical sales total (net of sales returns, excluding deleted and cancelled)
+            $histSalesQty = (float) DB::table('invoice_items')
                 ->join('invoices', 'invoice_items.invoice_id', '=', 'invoices.id')
                 ->where('invoices.business_id', $businessId)
                 ->when($outletId, fn ($q) => $q->where('invoices.outlet_id', $outletId))
                 ->where('invoices.is_historical', 1)
+                ->where('invoices.is_deleted', 0)
+                ->where('invoices.status', '!=', 'CANCELLED')
                 ->where('invoice_items.product_id', $pId)
-                ->sum('invoice_items.quantity');
+                ->sum(DB::raw("CASE WHEN invoices.status = 'RETURN' THEN 0 WHEN invoice_items.quantity > COALESCE(invoice_items.returned_qty, 0) THEN invoice_items.quantity - COALESCE(invoice_items.returned_qty, 0) ELSE 0 END"));
 
             // 5. Historical stock adjustments applied
-            $adjustmentsApplied = DB::table('historical_stock_adjustments')
+            $adjustmentsApplied = (float) DB::table('historical_stock_adjustments')
                 ->where('business_id', $businessId)
                 ->when($outletId, fn ($q) => $q->where('outlet_id', $outletId))
                 ->where('product_id', $pId)
                 ->sum('actual_stock_adjustment_qty');
 
-            $calculatedHistoricalClosing = max(0, $histPurchasesQty - $histSalesQty);
+            $availableOldStock = max(0.0, ($openingStockQty + $histPurchasesQty) - $histSalesQty);
+            $calculatedHistoricalClosing = max(0.0, $histPurchasesQty - $histSalesQty);
             $discrepancy = $currBal - ($openingStockQty + $adjustmentsApplied);
 
             $reconciliations[] = [
@@ -1266,6 +1657,8 @@ class HistoricalDataService
                 'openingStockQty' => (float) $openingStockQty,
                 'historicalPurchasesQty' => (float) $histPurchasesQty,
                 'historicalSalesQty' => (float) $histSalesQty,
+                'availableOldStock' => (float) $availableOldStock,
+                'remainingOldStock' => (float) $availableOldStock,
                 'calculatedHistoricalClosing' => (float) $calculatedHistoricalClosing,
                 'adjustmentsAppliedToCurrentStock' => (float) $adjustmentsApplied,
                 'currentStockOnHand' => (float) $currBal,
@@ -1387,5 +1780,201 @@ class HistoricalDataService
                 'revertedAdjustmentsCount' => count($stockAdjustments),
             ];
         });
+    }
+
+    /**
+     * Calculate date-wise historical stock availability for a product.
+     * Historical Available Stock on date =
+     *   Opening Stock on or before date
+     *   + Historical Purchases received on or before date
+     *   + Historical Sales Returns routed to Old Inventory on or before date
+     *   - Historical Sales made on or before date
+     *   - Historical Purchase Returns made on or before date
+     */
+    public function getStockAvailabilityOnDate(
+        string $businessId,
+        ?string $outletId,
+        string $productId,
+        string $targetDate
+    ): array {
+        $targetDate = Carbon::parse($targetDate)->toDateString();
+
+        // 1. Check all-time historical inward to know if product has historical inventory
+        $allInwardPurchases = (float) DB::table('purchase_bill_items')
+            ->join('purchase_bills', 'purchase_bill_items.purchase_bill_id', '=', 'purchase_bills.id')
+            ->where('purchase_bills.business_id', $businessId)
+            ->when($outletId, fn ($q) => $q->where('purchase_bills.outlet_id', $outletId))
+            ->where('purchase_bills.is_historical', 1)
+            ->where('purchase_bills.is_deleted', 0)
+            ->where('purchase_bills.status', '!=', 'CANCELLED')
+            ->where('purchase_bill_items.product_id', $productId)
+            ->sum(DB::raw('CASE WHEN purchase_bill_items.quantity > COALESCE(purchase_bill_items.returned_qty, 0) THEN purchase_bill_items.quantity - COALESCE(purchase_bill_items.returned_qty, 0) ELSE 0 END'));
+
+        $allOpeningStock = (float) DB::table('stock_movements')
+            ->where('business_id', $businessId)
+            ->when($outletId, fn ($q) => $q->where('outlet_id', $outletId))
+            ->where(function ($q) use ($productId) {
+                $q->where('product_id', $productId)->orWhere('variant_id', $productId);
+            })
+            ->where('type', 'OPENING_STOCK')
+            ->sum('qty_change');
+
+        $hasHistoricalInward = ($allInwardPurchases + $allOpeningStock) > 0;
+
+        // Find earliest inward date
+        $firstPurchaseDate = DB::table('purchase_bills')
+            ->join('purchase_bill_items', 'purchase_bill_items.purchase_bill_id', '=', 'purchase_bills.id')
+            ->where('purchase_bills.business_id', $businessId)
+            ->when($outletId, fn ($q) => $q->where('purchase_bills.outlet_id', $outletId))
+            ->where('purchase_bills.is_historical', 1)
+            ->where('purchase_bills.is_deleted', 0)
+            ->where('purchase_bills.status', '!=', 'CANCELLED')
+            ->where('purchase_bill_items.product_id', $productId)
+            ->min(DB::raw('COALESCE(purchase_bills.original_invoice_date, DATE(purchase_bills.created_at))'));
+
+        $firstOpeningDate = DB::table('stock_movements')
+            ->where('business_id', $businessId)
+            ->when($outletId, fn ($q) => $q->where('outlet_id', $outletId))
+            ->where(function ($q) use ($productId) {
+                $q->where('product_id', $productId)->orWhere('variant_id', $productId);
+            })
+            ->where('type', 'OPENING_STOCK')
+            ->min(DB::raw('COALESCE(original_transaction_date, DATE(created_at))'));
+
+        $dates = array_filter([$firstPurchaseDate, $firstOpeningDate]);
+        $firstInwardDate = !empty($dates) ? min($dates) : null;
+
+        // 2. Inward on or before target date
+        $openingStockOnDate = (float) DB::table('stock_movements')
+            ->where('business_id', $businessId)
+            ->when($outletId, fn ($q) => $q->where('outlet_id', $outletId))
+            ->where(function ($q) use ($productId) {
+                $q->where('product_id', $productId)->orWhere('variant_id', $productId);
+            })
+            ->where('type', 'OPENING_STOCK')
+            ->where(function ($q) use ($targetDate) {
+                $q->where('original_transaction_date', '<=', $targetDate)
+                    ->orWhereDate('created_at', '<=', $targetDate);
+            })
+            ->sum('qty_change');
+
+        $purchasesOnDate = (float) DB::table('purchase_bill_items')
+            ->join('purchase_bills', 'purchase_bill_items.purchase_bill_id', '=', 'purchase_bills.id')
+            ->where('purchase_bills.business_id', $businessId)
+            ->when($outletId, fn ($q) => $q->where('purchase_bills.outlet_id', $outletId))
+            ->where('purchase_bills.is_historical', 1)
+            ->where('purchase_bills.is_deleted', 0)
+            ->where('purchase_bills.status', '!=', 'CANCELLED')
+            ->where('purchase_bill_items.product_id', $productId)
+            ->where(function ($q) use ($targetDate) {
+                $q->where('purchase_bills.original_invoice_date', '<=', $targetDate)
+                    ->orWhereDate('purchase_bills.created_at', '<=', $targetDate);
+            })
+            ->sum(DB::raw('CASE WHEN purchase_bill_items.quantity > COALESCE(purchase_bill_items.returned_qty, 0) THEN purchase_bill_items.quantity - COALESCE(purchase_bill_items.returned_qty, 0) ELSE 0 END'));
+
+        // Sales Returns routed back to Old Inventory on or before target date
+        $salesReturnsToOldOnDate = 0.0;
+        if (\Illuminate\Support\Facades\Schema::hasTable('returns') && \Illuminate\Support\Facades\Schema::hasTable('return_items')) {
+            $salesReturnsToOldOnDate = (float) DB::table('return_items')
+                ->join('returns', 'return_items.return_id', '=', 'returns.id')
+                ->where('returns.business_id', $businessId)
+                ->when($outletId, fn ($q) => $q->where('returns.outlet_id', $outletId))
+                ->where('returns.status', 'COMPLETED')
+                ->where('returns.inventory_destination', 'OLD_INVENTORY')
+                ->where('return_items.product_id', $productId)
+                ->whereDate('returns.return_date', '<=', $targetDate)
+                ->sum('return_items.qty_returned');
+        }
+
+        $totalInwardOnDate = $openingStockOnDate + $purchasesOnDate + $salesReturnsToOldOnDate;
+
+        // 3. Outward on or before target date
+        $salesOnDate = (float) DB::table('invoice_items')
+            ->join('invoices', 'invoice_items.invoice_id', '=', 'invoices.id')
+            ->where('invoices.business_id', $businessId)
+            ->when($outletId, fn ($q) => $q->where('invoices.outlet_id', $outletId))
+            ->where('invoices.is_historical', 1)
+            ->where('invoices.is_deleted', 0)
+            ->where('invoices.status', '!=', 'CANCELLED')
+            ->where('invoice_items.product_id', $productId)
+            ->where(function ($q) use ($targetDate) {
+                $q->where('invoices.original_invoice_date', '<=', $targetDate)
+                    ->orWhereDate('invoices.created_at', '<=', $targetDate);
+            })
+            ->sum(DB::raw("CASE WHEN invoices.status = 'RETURN' THEN 0 WHEN invoice_items.quantity > COALESCE(invoice_items.returned_qty, 0) THEN invoice_items.quantity - COALESCE(invoice_items.returned_qty, 0) ELSE 0 END"));
+
+        // Purchase returns made on or before target date
+        $purchaseReturnsOnDate = 0.0;
+        if (\Illuminate\Support\Facades\Schema::hasTable('returns') && \Illuminate\Support\Facades\Schema::hasTable('return_items')) {
+            $purchaseReturnsOnDate = (float) DB::table('return_items')
+                ->join('returns', 'return_items.return_id', '=', 'returns.id')
+                ->where('returns.business_id', $businessId)
+                ->when($outletId, fn ($q) => $q->where('returns.outlet_id', $outletId))
+                ->where('returns.status', 'COMPLETED')
+                ->where('returns.type', 'PURCHASE_RETURN')
+                ->where('return_items.product_id', $productId)
+                ->whereDate('returns.return_date', '<=', $targetDate)
+                ->sum('return_items.qty_returned');
+        }
+
+        $totalOutwardOnDate = $salesOnDate + $purchaseReturnsOnDate;
+        $availableOnDate = max(0.0, $totalInwardOnDate - $totalOutwardOnDate);
+
+        // Fetch active batch breakdown on or before target date
+        $allBatches = DB::table('inventory_batches')
+            ->where('business_id', $businessId)
+            ->when($outletId, fn ($q) => $q->where('outlet_id', $outletId))
+            ->where('product_id', $productId)
+            ->where('is_deleted', 0)
+            ->get();
+
+        $batches = [];
+        foreach ($allBatches as $b) {
+            $bFields = (json_decode($b->payload, true) ?: [])['fields'] ?? [];
+            $bAvail = (float) (isset($b->quantity_available) ? $b->quantity_available : ($bFields['availableQuantity'] ?? $bFields['availableQty'] ?? 0));
+            $bPurDate = isset($b->purchase_date) ? $b->purchase_date : ($bFields['purchaseDate'] ?? substr((string) $b->created_at, 0, 10));
+            if ($bAvail > 0 && $bPurDate <= $targetDate) {
+                $batches[] = [
+                    'batchId' => $b->id,
+                    'batchNumber' => $b->batch_number ?? ($bFields['batchNumber'] ?? 'AUTO-BATCH'),
+                    'purchaseDate' => $bPurDate,
+                    'originalQuantity' => (float) (isset($b->quantity_initial) ? $b->quantity_initial : ($bFields['originalQuantity'] ?? $bAvail)),
+                    'availableQuantity' => $bAvail,
+                    'purchaseRate' => (float) (isset($b->purchase_rate) ? $b->purchase_rate : ($bFields['purchaseRate'] ?? 0)),
+                    'expiryDate' => $b->expiry_date ?? ($bFields['expiryDate'] ?? null),
+                    'status' => $b->status ?? 'ACTIVE',
+                ];
+            }
+        }
+        usort($batches, fn ($a, $b) => strcmp($a['purchaseDate'], $b['purchaseDate']));
+
+        // Determine status and message
+        if ($hasHistoricalInward && $firstInwardDate && $targetDate < $firstInwardDate) {
+            $status = 'NOT_YET_PURCHASED';
+            $message = "No historical stock was available for this product on {$targetDate}. The first available stock was purchased on {$firstInwardDate}.";
+        } elseif ($totalInwardOnDate > 0 && $availableOnDate <= 0) {
+            $status = 'EXHAUSTED';
+            $message = "All {$totalInwardOnDate} units purchased on or before {$targetDate} have already been sold or returned.";
+        } elseif ($availableOnDate > 0) {
+            $status = 'AVAILABLE';
+            $message = "Available historical stock on {$targetDate}: {$availableOnDate} units.";
+        } else {
+            $status = $hasHistoricalInward ? 'EXHAUSTED' : 'UNTRACKED';
+            $message = $hasHistoricalInward
+                ? "No historical stock available on or before {$targetDate}."
+                : "Product does not have tracked historical stock.";
+        }
+
+        return [
+            'hasHistoricalInward' => $hasHistoricalInward,
+            'targetDate' => $targetDate,
+            'firstInwardDate' => $firstInwardDate,
+            'totalInwardOnDate' => $totalInwardOnDate,
+            'totalOutwardOnDate' => $totalOutwardOnDate,
+            'availableQuantity' => $availableOnDate,
+            'status' => $status,
+            'message' => $message,
+            'batches' => $batches,
+        ];
     }
 }

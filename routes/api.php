@@ -52,10 +52,10 @@ Route::prefix('v1')->group(function () {
     });
     // Public Authentication & Registration Routes
     Route::prefix('auth')->group(function () {
-        Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:30,1');
-        Route::post('/email-otp/resend', [AuthController::class, 'resendOtp'])->middleware('throttle:30,1');
-        Route::post('/email-otp/verify', [AuthController::class, 'verifyOtp'])->middleware('throttle:60,1');
-        Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:60,1')->name('login');
+        Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:10,1');
+        Route::post('/email-otp/resend', [AuthController::class, 'resendOtp'])->middleware('throttle:6,1');
+        Route::post('/email-otp/verify', [AuthController::class, 'verifyOtp'])->middleware('throttle:15,1');
+        Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:10,1')->name('login');
         Route::post('/forgot-password/send-otp', [AuthController::class, 'sendForgotPasswordOtp'])->middleware('throttle:10,1');
         Route::post('/forgot-password/reset', [AuthController::class, 'resetPasswordWithOtp'])->middleware('throttle:10,1');
 
@@ -330,6 +330,8 @@ Route::prefix('v1')->group(function () {
             Route::post('/batches/{id}/rollback', [HistoricalDataController::class, 'rollbackBatch'])
                 ->middleware('permission:settings.edit,settings');
 
+            Route::get('/stock-availability', [HistoricalDataController::class, 'stockAvailability'])
+                ->middleware('permission:sales.create,sales,billing,inventory.view,inventory');
             Route::post('/sales', [HistoricalDataController::class, 'storeSale'])
                 ->middleware('permission:sales.create,sales,billing');
             Route::post('/purchases', [HistoricalDataController::class, 'storePurchase'])

@@ -525,24 +525,41 @@ class InventoryController extends Controller
                 continue;
             }
 
+            $origQty = (float) ($row->quantity_initial ?? $fields['originalQuantity'] ?? ($fields['receivedQty'] ?? 0));
+            $availQty = (float) ($row->quantity_available ?? $fields['availableQuantity'] ?? ($fields['availableQty'] ?? 0));
+            $batchNo = $row->batch_number ?? $fields['batchNumber'] ?? $fields['internalBatchNo'] ?? $fields['supplierLotNo'] ?? null;
+            $purchaseDate = $row->purchase_date ?? $fields['purchaseDate'] ?? null;
+            $mfgDate = $row->mfg_date ?? $fields['mfgDate'] ?? $fields['manufacturingDate'] ?? null;
+            $expDate = $row->expiry_date ?? $fields['expiryDate'] ?? null;
+            $purchaseRate = (float) ($row->purchase_rate ?? $fields['purchaseRate'] ?? $fields['purchasePrice'] ?? 0);
+            $isHistorical = (bool) ($row->is_historical ?? $fields['isHistorical'] ?? false);
+
             $batches[] = [
                 'batchId' => (string) $row->id,
                 'id' => (string) $row->id,
                 'businessId' => (string) $row->business_id,
                 'outletId' => (string) $row->outlet_id,
                 'variantId' => $vId,
-                'productId' => $fields['productId'] ?? $vId,
-                'internalBatchNo' => $fields['internalBatchNo'] ?? null,
-                'supplierLotNo' => $fields['supplierLotNo'] ?? null,
+                'productId' => $fields['productId'] ?? $row->product_id ?? $vId,
+                'batchNumber' => $batchNo,
+                'internalBatchNo' => $batchNo,
+                'supplierLotNo' => $fields['supplierLotNo'] ?? $batchNo,
                 'barcode' => $fields['barcode'] ?? null,
-                'purchaseRate' => (int) ($fields['purchaseRate'] ?? $fields['purchasePrice'] ?? 0),
+                'purchaseRate' => $purchaseRate,
                 'mrp' => (int) ($fields['mrp'] ?? 0),
                 'sellingPrice' => (int) ($fields['sellingPrice'] ?? 0),
-                'receivedQty' => (int) ($fields['receivedQty'] ?? 0),
-                'availableQty' => (int) ($fields['availableQty'] ?? 0),
-                'status' => (string) ($row->status ?? $fields['status'] ?? 'AVAILABLE'),
-                'manufacturingDate' => $fields['manufacturingDate'] ?? null,
-                'expiryDate' => $fields['expiryDate'] ?? null,
+                'receivedQty' => $origQty,
+                'originalQuantity' => $origQty,
+                'availableQty' => $availQty,
+                'availableQuantity' => $availQty,
+                'soldQuantity' => (float) ($fields['soldQuantity'] ?? max(0, $origQty - $availQty)),
+                'purchaseDate' => $purchaseDate,
+                'purchaseBillId' => $row->purchase_bill_id ?? ($fields['purchaseBillId'] ?? null),
+                'isHistorical' => $isHistorical,
+                'is_historical' => $isHistorical ? 1 : 0,
+                'status' => (string) ($row->status ?? $fields['status'] ?? ($availQty <= 0 ? 'EXHAUSTED' : 'ACTIVE')),
+                'manufacturingDate' => $mfgDate,
+                'expiryDate' => $expDate,
                 'storageLocationId' => $fields['storageLocationId'] ?? null,
                 'rackId' => $fields['rackId'] ?? null,
                 'createdAt' => $row->created_at,

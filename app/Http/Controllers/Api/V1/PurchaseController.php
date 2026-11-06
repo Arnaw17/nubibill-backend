@@ -6,7 +6,9 @@ use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
 class PurchaseController extends Controller
@@ -58,10 +60,20 @@ class PurchaseController extends Controller
         }
 
         if ($statusFilter !== 'ALL') {
-            $query->where(function ($q) use ($statusFilter) {
-                $q->where('status', $statusFilter)
-                    ->orWhereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.status'))) = ?", [$statusFilter]);
-            });
+            if ($statusFilter === 'HISTORICAL') {
+                $query->where(function ($q) {
+                    $q->where('is_historical', 1)
+                        ->orWhere('entry_source', 'historical')
+                        ->orWhere('id', 'LIKE', 'HIST-%')
+                        ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.isHistorical')) = 'true'")
+                        ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.entrySource')) = 'historical'");
+                });
+            } else {
+                $query->where(function ($q) use ($statusFilter) {
+                    $q->where('status', $statusFilter)
+                        ->orWhereRaw("UPPER(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.status'))) = ?", [$statusFilter]);
+                });
+            }
         }
 
         $rows = $query->orderBy('created_at', 'desc')->get();
@@ -143,6 +155,9 @@ class PurchaseController extends Controller
                 'outstandingAmount' => (int) ($fields['outstandingAmount'] ?? 0),
                 'taxType' => $fields['taxType'] ?? 'INTRA_STATE',
                 'status' => $fields['status'] ?? $row->status ?? 'APPROVED',
+                'isHistorical' => (bool) ($fields['isHistorical'] ?? ($row->is_historical == 1) ?? false),
+                'is_historical' => (int) ($row->is_historical ?? ($fields['isHistorical'] ? 1 : 0)),
+                'entrySource' => (string) ($fields['entrySource'] ?? $row->entry_source ?? 'normal'),
                 'itemsCount' => count($items),
                 'items' => $items,
                 'createdAt' => $row->created_at,
@@ -461,7 +476,8 @@ class PurchaseController extends Controller
             $paymentMethod,
             $now,
             $dbNow,
-            $userId
+            $userId,
+            $purchaseDate
         ) {
             // 1. Insert into purchase_bills
             DB::table('purchase_bills')->insert([
@@ -759,6 +775,84 @@ class PurchaseController extends Controller
                             ],
                         ]),
                     ]);
+
+                    // Create Inventory Batch for new purchase line
+                    $batchNumber = !empty($item['batch_number']) ? trim((string) $item['batch_number']) : ('BATCH-'.strtoupper(Str::random(8)));
+                    $autoBatchId = 'BATCH-'.strtoupper(Str::random(24));
+                    $batchMfgDate = !empty($item['manufacturing_date']) ? Carbon::parse($item['manufacturing_date'])->toDateString() : null;
+                    $batchExpiryDate = !empty($item['expiry_date']) ? Carbon::parse($item['expiry_date'])->toDateString() : null;
+                    $purDateStr = Carbon::parse($purchaseDate ?: $now)->toDateString();
+
+                    $pcBatchData = [
+                        'id' => $autoBatchId,
+                        'document_path' => "inventory_batches/{$autoBatchId}",
+                        'business_id' => $businessId,
+                        'outlet_id' => $outletId,
+                        'product_id' => $pId ?: $vId,
+                        'status' => 'ACTIVE',
+                        'created_at' => $dbNow,
+                        'updated_at' => $dbNow,
+                        'is_deleted' => 0,
+                        'payload' => json_encode(['fields' => [
+                            'batchId' => $autoBatchId,
+                            'batchNumber' => $batchNumber,
+                            'productId' => $pId ?: $vId,
+                            'variantId' => $vId ?: $pId,
+                            'purchaseBillId' => $purchaseBillId,
+                            'originalInvoiceNumber' => $purchaseNumber,
+                            'originalQuantity' => $qtyUnits,
+                            'availableQuantity' => $qtyUnits,
+                            'soldQuantity' => 0,
+                            'purchaseDate' => $purDateStr,
+                            'purchaseRate' => $rate,
+                            'mfgDate' => $batchMfgDate,
+                            'expiryDate' => $batchExpiryDate,
+                            'isHistorical' => false,
+                            'status' => 'ACTIVE',
+                        ]]),
+                    ];
+                    if (Schema::hasColumn('inventory_batches', 'variant_id')) $pcBatchData['variant_id'] = $vId ?: $pId;
+                    if (Schema::hasColumn('inventory_batches', 'batch_number')) $pcBatchData['batch_number'] = $batchNumber;
+                    if (Schema::hasColumn('inventory_batches', 'mfg_date')) $pcBatchData['mfg_date'] = $batchMfgDate;
+                    if (Schema::hasColumn('inventory_batches', 'expiry_date')) $pcBatchData['expiry_date'] = $batchExpiryDate;
+                    if (Schema::hasColumn('inventory_batches', 'purchase_rate')) $pcBatchData['purchase_rate'] = $rate >= 1000 ? ($rate / 100.0) : $rate;
+                    if (Schema::hasColumn('inventory_batches', 'quantity_initial')) $pcBatchData['quantity_initial'] = $qtyUnits;
+                    if (Schema::hasColumn('inventory_batches', 'quantity_available')) $pcBatchData['quantity_available'] = $qtyUnits;
+                    if (Schema::hasColumn('inventory_batches', 'is_historical')) $pcBatchData['is_historical'] = 0;
+                    if (Schema::hasColumn('inventory_batches', 'purchase_bill_id')) $pcBatchData['purchase_bill_id'] = $purchaseBillId;
+                    if (Schema::hasColumn('inventory_batches', 'purchase_date')) $pcBatchData['purchase_date'] = $purDateStr;
+
+                    DB::table('inventory_batches')->insert($pcBatchData);
+
+                    $ibmId = 'IBM-'.strtoupper(Str::random(24));
+                    $pcIbmData = [
+                        'id' => $ibmId,
+                        'document_path' => "inventory_batch_movements/{$ibmId}",
+                        'business_id' => $businessId,
+                        'outlet_id' => $outletId,
+                        'product_id' => $pId ?: $vId,
+                        'status' => 'ACTIVE',
+                        'created_at' => $dbNow,
+                        'updated_at' => $dbNow,
+                        'is_deleted' => 0,
+                        'payload' => json_encode(['fields' => [
+                            'movementId' => $ibmId,
+                            'batchId' => $autoBatchId,
+                            'referenceType' => 'purchase_bill',
+                            'referenceId' => $purchaseBillId,
+                            'movementType' => 'PURCHASE_INWARD',
+                            'quantityChanged' => $qtyUnits,
+                            'quantityAfter' => $qtyUnits,
+                        ]]),
+                    ];
+                    if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) $pcIbmData['batch_id'] = $autoBatchId;
+                    if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) $pcIbmData['reference_type'] = 'purchase_bill';
+                    if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) $pcIbmData['reference_id'] = $purchaseBillId;
+                    if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) $pcIbmData['movement_type'] = 'PURCHASE_INWARD';
+                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) $pcIbmData['quantity_changed'] = $qtyUnits;
+                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) $pcIbmData['quantity_after'] = $qtyUnits;
+
+                    DB::table('inventory_batch_movements')->insert($pcIbmData);
 
                     // Auto-reflect purchase selling price, MRP, and rate to variant and product
                     if (! empty($vId)) {

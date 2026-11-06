@@ -4,6 +4,7 @@ use App\Http\Middleware\CheckAppMaintenance;
 use App\Http\Middleware\EnsureAdmin;
 use App\Http\Middleware\EnsurePermission;
 use App\Http\Middleware\EnsureUserIsActive;
+use App\Http\Middleware\SecurityHeaders;
 use App\Http\Responses\ApiResponse;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Auth\AuthenticationException;
@@ -28,9 +29,14 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->api(prepend: [
+            SecurityHeaders::class,
             CheckAppMaintenance::class,
         ], append: [
             'throttle:api',
+        ]);
+
+        $middleware->web(prepend: [
+            SecurityHeaders::class,
         ]);
 
         $middleware->alias([

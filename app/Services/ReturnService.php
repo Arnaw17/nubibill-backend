@@ -180,6 +180,7 @@ class ReturnService
                 'reason_id' => ! empty($data['reason_id']) ? $data['reason_id'] : null,
                 'reason_note' => $data['reason_note'] ?? null,
                 'refund_mode' => $refundMode,
+                'inventory_destination' => ! empty($data['inventory_destination']) ? strtoupper(trim($data['inventory_destination'])) : 'NEW_INVENTORY',
                 'idempotency_key' => $idempotencyKey,
                 'subtotal' => $subtotal,
                 'cgst_total' => $cgstTotal,
@@ -383,39 +384,119 @@ class ReturnService
             $restock = (bool) ($item['restock'] ?? false);
 
             if ($return->isSaleReturn()) {
-                if ($condition === 'resalable' && $restock) {
-                    // Restock inventory: +qty (converted to milli-units in adjustStockBalance)
-                    $newBalance = $this->adjustStockBalance($businessId, $outletId, $productId, $variantId, $qty);
+                $dest = strtoupper((string) ($return->inventory_destination ?? 'NEW_INVENTORY'));
+                $isOriginalHistorical = false;
+                if (! empty($return->original_bill_id)) {
+                    $origInv = DB::table('invoices')->where('id', $return->original_bill_id)->first();
+                    if ($origInv && ($origInv->is_historical || ($origInv->entry_source ?? '') === 'historical' || str_starts_with($origInv->id, 'HIST-INV-'))) {
+                        $isOriginalHistorical = true;
+                    }
+                }
 
-                    StockMovement::create([
-                        'id' => (string) Str::uuid(),
-                        'business_id' => $businessId,
-                        'outlet_id' => $outletId,
-                        'product_id' => $productId,
-                        'variant_id' => $variantId,
-                        'type' => 'sale_return',
-                        'qty_change' => $qty,
-                        'balance_after' => $newBalance / 1000.0,
-                        'reference_type' => 'return',
-                        'reference_id' => $return->id,
-                        'condition' => 'resalable',
-                        'note' => "Sales Return {$return->return_no} restocked",
-                        'created_by' => $user->id,
-                        'payload' => [
-                            'fields' => [
-                                'type' => 'RETURN',
-                                'reason' => "Sales Return {$return->return_no} restocked",
-                                'productId' => $variantId ?? $productId,
-                                'variantId' => $variantId,
-                                'qtyBase' => (int) round($qty * 1000.0),
-                                'balanceAfter' => (int) $newBalance,
-                                'outletId' => $outletId,
-                                'businessId' => $businessId,
-                                'referenceId' => $return->id,
-                                'createdAt' => now()->toIso8601String(),
+                if ($condition === 'resalable' && $restock) {
+                    if ($dest === 'OLD_INVENTORY' || ($isOriginalHistorical && $dest !== 'NEW_INVENTORY')) {
+                        // Option 1: Return to Old Inventory (Historical Stock)
+                        // DO NOT alter Current Inventory / stock_balances
+                        $currHistBal = (float) DB::table('stock_balances')
+                            ->where('business_id', $businessId)
+                            ->when($outletId, fn ($q) => $q->where('outlet_id', $outletId))
+                            ->where(function ($q) use ($productId, $variantId) {
+                                $q->where('product_id', $productId)->orWhere('variant_id', $variantId ?? $productId);
+                            })
+                            ->sum('quantity_on_hand');
+
+                        StockMovement::create([
+                            'id' => (string) Str::uuid(),
+                            'business_id' => $businessId,
+                            'outlet_id' => $outletId,
+                            'product_id' => $productId,
+                            'variant_id' => $variantId,
+                            'type' => 'sale_return',
+                            'qty_change' => $qty,
+                            'balance_after' => $currHistBal,
+                            'reference_type' => 'historical_sale_return',
+                            'reference_id' => $return->id,
+                            'condition' => 'resalable',
+                            'note' => "Old Sales Return {$return->return_no} returned to Old Inventory (Historical Stock)",
+                            'entry_source' => 'historical',
+                            'is_historical' => 1,
+                            'original_transaction_date' => $return->return_date ? Carbon::parse($return->return_date)->toDateString() : now()->toDateString(),
+                            'created_by' => $user->id,
+                            'payload' => [
+                                'fields' => [
+                                    'type' => 'HISTORICAL_RETURN',
+                                    'reason' => "Old Sales Return {$return->return_no} returned to Old Inventory",
+                                    'productId' => $variantId ?? $productId,
+                                    'variantId' => $variantId,
+                                    'qtyBase' => (int) round($qty * 1000.0),
+                                    'outletId' => $outletId,
+                                    'businessId' => $businessId,
+                                    'referenceId' => $return->id,
+                                    'isHistorical' => true,
+                                    'inventoryDestination' => 'OLD_INVENTORY',
+                                    'createdAt' => now()->toIso8601String(),
+                                ],
                             ],
-                        ],
-                    ]);
+                        ]);
+
+                        // Restore available quantity on historical inventory batch if exists
+                        $histBatch = DB::table('inventory_batches')
+                            ->where('business_id', $businessId)
+                            ->where('product_id', $productId)
+                            ->where('is_deleted', 0)
+                            ->orderBy('created_at', 'desc')
+                            ->first();
+                        if ($histBatch) {
+                            $hbPayload = json_decode($histBatch->payload, true) ?: [];
+                            $hbFields = $hbPayload['fields'] ?? [];
+                            $hbFields['availableQty'] = ($hbFields['availableQty'] ?? 0) + $qty;
+                            $hbFields['availableQuantity'] = ($hbFields['availableQuantity'] ?? 0) + $qty;
+                            $hbFields['soldQty'] = max(0, ($hbFields['soldQty'] ?? 0) - $qty);
+                            $hbFields['soldQuantity'] = max(0, ($hbFields['soldQuantity'] ?? 0) - $qty);
+                            $hbFields['status'] = 'ACTIVE';
+                            DB::table('inventory_batches')->where('id', $histBatch->id)->update([
+                                'status' => 'ACTIVE',
+                                'updated_at' => now(),
+                                'payload' => json_encode(['fields' => $hbFields]),
+                            ]);
+                        }
+                    } else {
+                        // Option 2: Return to New Inventory (Current Operational Stock)
+                        $newBalance = $this->adjustStockBalance($businessId, $outletId, $productId, $variantId, $qty);
+
+                        StockMovement::create([
+                            'id' => (string) Str::uuid(),
+                            'business_id' => $businessId,
+                            'outlet_id' => $outletId,
+                            'product_id' => $productId,
+                            'variant_id' => $variantId,
+                            'type' => 'sale_return',
+                            'qty_change' => $qty,
+                            'balance_after' => $newBalance / 1000.0,
+                            'reference_type' => 'return',
+                            'reference_id' => $return->id,
+                            'condition' => 'resalable',
+                            'note' => "Sales Return {$return->return_no} added to Current Operational Stock",
+                            'entry_source' => 'return',
+                            'is_historical' => 0,
+                            'created_by' => $user->id,
+                            'payload' => [
+                                'fields' => [
+                                    'type' => 'RETURN',
+                                    'reason' => "Sales Return {$return->return_no} restocked",
+                                    'productId' => $variantId ?? $productId,
+                                    'variantId' => $variantId,
+                                    'qtyBase' => (int) round($qty * 1000.0),
+                                    'balanceAfter' => (int) $newBalance,
+                                    'outletId' => $outletId,
+                                    'businessId' => $businessId,
+                                    'referenceId' => $return->id,
+                                    'inventoryDestination' => 'NEW_INVENTORY',
+                                    'createdAt' => now()->toIso8601String(),
+                                ],
+                            ],
+                        ]);
+                    }
                 } else {
                     // Damaged/Expired or no restock: log as wastage without increasing sellable stock
                     $currentBal = $this->getStockBalance($businessId, $outletId, $productId, $variantId);
@@ -451,38 +532,116 @@ class ReturnService
                     ]);
                 }
             } elseif ($return->isPurchaseReturn()) {
-                // Return to supplier: deduct stock (-qty)
-                $newBalance = $this->adjustStockBalance($businessId, $outletId, $productId, $variantId, -$qty);
+                // Return to supplier
+                $isHistPur = false;
+                if (! empty($return->original_bill_id)) {
+                    $origPB = DB::table('purchase_bills')->where('id', $return->original_bill_id)->first();
+                    if ($origPB && ($origPB->is_historical || ($origPB->entry_source ?? '') === 'historical' || str_starts_with($origPB->id, 'HIST-PB-'))) {
+                        $isHistPur = true;
+                    }
+                }
 
-                StockMovement::create([
-                    'id' => (string) Str::uuid(),
-                    'business_id' => $businessId,
-                    'outlet_id' => $outletId,
-                    'product_id' => $productId,
-                    'variant_id' => $variantId,
-                    'type' => 'purchase_return',
-                    'qty_change' => -$qty,
-                    'balance_after' => $newBalance / 1000.0,
-                    'reference_type' => 'return',
-                    'reference_id' => $return->id,
-                    'condition' => $condition,
-                    'note' => "Purchase Return {$return->return_no} returned to supplier",
-                    'created_by' => $user->id,
-                    'payload' => [
-                        'fields' => [
-                            'type' => 'ADJUST_OUT',
-                            'reason' => "Purchase Return {$return->return_no} returned to supplier",
-                            'productId' => $variantId ?? $productId,
-                            'variantId' => $variantId,
-                            'qtyBase' => (int) round($qty * 1000.0),
-                            'balanceAfter' => (int) $newBalance,
-                            'outletId' => $outletId,
-                            'businessId' => $businessId,
-                            'referenceId' => $return->id,
-                            'createdAt' => now()->toIso8601String(),
+                if ($isHistPur) {
+                    // Historical purchase return: reduce historical stock, do NOT reduce current operational inventory
+                    $currHistBal = (float) DB::table('stock_balances')
+                        ->where('business_id', $businessId)
+                        ->when($outletId, fn ($q) => $q->where('outlet_id', $outletId))
+                        ->where(function ($q) use ($productId, $variantId) {
+                            $q->where('product_id', $productId)->orWhere('variant_id', $variantId ?? $productId);
+                        })
+                        ->sum('quantity_on_hand');
+
+                    StockMovement::create([
+                        'id' => (string) Str::uuid(),
+                        'business_id' => $businessId,
+                        'outlet_id' => $outletId,
+                        'product_id' => $productId,
+                        'variant_id' => $variantId,
+                        'type' => 'purchase_return',
+                        'qty_change' => -$qty,
+                        'balance_after' => $currHistBal,
+                        'reference_type' => 'historical_purchase_return',
+                        'reference_id' => $return->id,
+                        'condition' => $condition,
+                        'note' => "Historical Purchase Return {$return->return_no} returned to supplier",
+                        'entry_source' => 'historical',
+                        'is_historical' => 1,
+                        'original_transaction_date' => $return->return_date ? Carbon::parse($return->return_date)->toDateString() : now()->toDateString(),
+                        'created_by' => $user->id,
+                        'payload' => [
+                            'fields' => [
+                                'type' => 'HISTORICAL_PURCHASE_RETURN',
+                                'reason' => "Historical Purchase Return {$return->return_no} returned to supplier",
+                                'productId' => $variantId ?? $productId,
+                                'variantId' => $variantId,
+                                'qtyBase' => (int) round($qty * 1000.0),
+                                'outletId' => $outletId,
+                                'businessId' => $businessId,
+                                'referenceId' => $return->id,
+                                'isHistorical' => true,
+                                'createdAt' => now()->toIso8601String(),
+                            ],
                         ],
-                    ],
-                ]);
+                    ]);
+
+                    // Deduct available quantity from corresponding historical batch
+                    $histBatch = DB::table('inventory_batches')
+                        ->where('business_id', $businessId)
+                        ->where('product_id', $productId)
+                        ->where('is_deleted', 0)
+                        ->where(function ($q) use ($return) {
+                            $q->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.purchaseBillId')) = ?", [$return->original_bill_id])
+                              ->orWhere('id', 'LIKE', "%{$return->original_bill_id}%");
+                        })
+                        ->first();
+                    if ($histBatch) {
+                        $hbPayload = json_decode($histBatch->payload, true) ?: [];
+                        $hbFields = $hbPayload['fields'] ?? [];
+                        $hbFields['availableQty'] = max(0, ($hbFields['availableQty'] ?? 0) - $qty);
+                        $hbFields['availableQuantity'] = max(0, ($hbFields['availableQuantity'] ?? 0) - $qty);
+                        if ($hbFields['availableQty'] <= 0) {
+                            $hbFields['status'] = 'DEPLETED';
+                        }
+                        DB::table('inventory_batches')->where('id', $histBatch->id)->update([
+                            'status' => $hbFields['status'],
+                            'updated_at' => now(),
+                            'payload' => json_encode(['fields' => $hbFields]),
+                        ]);
+                    }
+                } else {
+                    // Regular current purchase return: deduct current stock (-qty)
+                    $newBalance = $this->adjustStockBalance($businessId, $outletId, $productId, $variantId, -$qty);
+
+                    StockMovement::create([
+                        'id' => (string) Str::uuid(),
+                        'business_id' => $businessId,
+                        'outlet_id' => $outletId,
+                        'product_id' => $productId,
+                        'variant_id' => $variantId,
+                        'type' => 'purchase_return',
+                        'qty_change' => -$qty,
+                        'balance_after' => $newBalance / 1000.0,
+                        'reference_type' => 'return',
+                        'reference_id' => $return->id,
+                        'condition' => $condition,
+                        'note' => "Purchase Return {$return->return_no} returned to supplier",
+                        'created_by' => $user->id,
+                        'payload' => [
+                            'fields' => [
+                                'type' => 'ADJUST_OUT',
+                                'reason' => "Purchase Return {$return->return_no} returned to supplier",
+                                'productId' => $variantId ?? $productId,
+                                'variantId' => $variantId,
+                                'qtyBase' => (int) round($qty * 1000.0),
+                                'balanceAfter' => (int) $newBalance,
+                                'outletId' => $outletId,
+                                'businessId' => $businessId,
+                                'referenceId' => $return->id,
+                                'createdAt' => now()->toIso8601String(),
+                            ],
+                        ],
+                    ]);
+                }
             }
         }
     }
@@ -593,10 +752,87 @@ class ReturnService
             $qty = (float) $item->qty_returned;
 
             if ($return->isSaleReturn()) {
+                $dest = strtoupper((string) ($return->inventory_destination ?? 'NEW_INVENTORY'));
                 if ($item->condition === 'resalable' && $item->restock) {
-                    // Deduct the restocked stock (-qty)
-                    $newBalance = $this->adjustStockBalance($businessId, $outletId, $productId, $variantId, -$qty);
+                    if ($dest === 'OLD_INVENTORY') {
+                        // Reverse Old Inventory return: do not alter current operational stock
+                        StockMovement::create([
+                            'id' => (string) Str::uuid(),
+                            'business_id' => $businessId,
+                            'outlet_id' => $outletId,
+                            'product_id' => $productId,
+                            'variant_id' => $variantId,
+                            'type' => 'adjustment',
+                            'qty_change' => -$qty,
+                            'balance_after' => 0,
+                            'reference_type' => 'historical_sale_return',
+                            'reference_id' => $return->id,
+                            'condition' => 'resalable',
+                            'note' => "Cancellation of Sales Return {$return->return_no} (Old Inventory reversed)",
+                            'entry_source' => 'historical',
+                            'is_historical' => 1,
+                            'created_by' => $user->id,
+                            'payload' => [
+                                'fields' => [
+                                    'type' => 'HISTORICAL_ADJUST_OUT',
+                                    'reason' => "Cancellation of Sales Return {$return->return_no} (Old Inventory reversed)",
+                                    'productId' => $variantId ?? $productId,
+                                    'variantId' => $variantId,
+                                    'qtyBase' => (int) round($qty * 1000.0),
+                                    'outletId' => $outletId,
+                                    'businessId' => $businessId,
+                                    'referenceId' => $return->id,
+                                    'isHistorical' => true,
+                                    'createdAt' => now()->toIso8601String(),
+                                ],
+                            ],
+                        ]);
+                    } else {
+                        // Deduct the restocked stock (-qty) from current operational stock
+                        $newBalance = $this->adjustStockBalance($businessId, $outletId, $productId, $variantId, -$qty);
 
+                        StockMovement::create([
+                            'id' => (string) Str::uuid(),
+                            'business_id' => $businessId,
+                            'outlet_id' => $outletId,
+                            'product_id' => $productId,
+                            'variant_id' => $variantId,
+                            'type' => 'adjustment',
+                            'qty_change' => -$qty,
+                            'balance_after' => $newBalance / 1000.0,
+                            'reference_type' => 'return',
+                            'reference_id' => $return->id,
+                            'condition' => 'resalable',
+                            'note' => "Cancellation of Sales Return {$return->return_no} (Stock reversed)",
+                            'created_by' => $user->id,
+                            'payload' => [
+                                'fields' => [
+                                    'type' => 'ADJUST_OUT',
+                                    'reason' => "Cancellation of Sales Return {$return->return_no} (Stock reversed)",
+                                    'productId' => $variantId ?? $productId,
+                                    'variantId' => $variantId,
+                                    'qtyBase' => (int) round($qty * 1000.0),
+                                    'balanceAfter' => (int) $newBalance,
+                                    'outletId' => $outletId,
+                                    'businessId' => $businessId,
+                                    'referenceId' => $return->id,
+                                    'createdAt' => now()->toIso8601String(),
+                                ],
+                            ],
+                        ]);
+                    }
+                }
+            } elseif ($return->isPurchaseReturn()) {
+                $isHistPur = false;
+                if (! empty($return->original_bill_id)) {
+                    $origPB = DB::table('purchase_bills')->where('id', $return->original_bill_id)->first();
+                    if ($origPB && ($origPB->is_historical || ($origPB->entry_source ?? '') === 'historical' || str_starts_with($origPB->id, 'HIST-PB-'))) {
+                        $isHistPur = true;
+                    }
+                }
+
+                if ($isHistPur) {
+                    // Re-add stock to historical stock
                     StockMovement::create([
                         'id' => (string) Str::uuid(),
                         'business_id' => $businessId,
@@ -604,32 +840,33 @@ class ReturnService
                         'product_id' => $productId,
                         'variant_id' => $variantId,
                         'type' => 'adjustment',
-                        'qty_change' => -$qty,
-                        'balance_after' => $newBalance / 1000.0,
-                        'reference_type' => 'return',
+                        'qty_change' => $qty,
+                        'balance_after' => 0,
+                        'reference_type' => 'historical_purchase_return',
                         'reference_id' => $return->id,
-                        'condition' => 'resalable',
-                        'note' => "Cancellation of Sales Return {$return->return_no} (Stock reversed)",
+                        'condition' => $item->condition,
+                        'note' => "Cancellation of Historical Purchase Return {$return->return_no} (Historical Stock restored)",
+                        'entry_source' => 'historical',
+                        'is_historical' => 1,
                         'created_by' => $user->id,
                         'payload' => [
                             'fields' => [
-                                'type' => 'ADJUST_OUT',
-                                'reason' => "Cancellation of Sales Return {$return->return_no} (Stock reversed)",
+                                'type' => 'HISTORICAL_RETURN',
+                                'reason' => "Cancellation of Historical Purchase Return {$return->return_no} (Historical Stock restored)",
                                 'productId' => $variantId ?? $productId,
                                 'variantId' => $variantId,
                                 'qtyBase' => (int) round($qty * 1000.0),
-                                'balanceAfter' => (int) $newBalance,
                                 'outletId' => $outletId,
                                 'businessId' => $businessId,
                                 'referenceId' => $return->id,
+                                'isHistorical' => true,
                                 'createdAt' => now()->toIso8601String(),
                             ],
                         ],
                     ]);
-                }
-            } elseif ($return->isPurchaseReturn()) {
-                // Re-add stock that was returned to supplier (+qty)
-                $newBalance = $this->adjustStockBalance($businessId, $outletId, $productId, $variantId, $qty);
+                } else {
+                    // Re-add stock that was returned to supplier (+qty)
+                    $newBalance = $this->adjustStockBalance($businessId, $outletId, $productId, $variantId, $qty);
 
                 StockMovement::create([
                     'id' => (string) Str::uuid(),
@@ -663,6 +900,7 @@ class ReturnService
             }
         }
     }
+}
 
     /**
      * Compensating ledger reversals on cancellation.
@@ -841,10 +1079,20 @@ class ReturnService
             $fields['updatedAt'] = Carbon::now()->toIso8601String();
             $payload['fields'] = $fields;
 
-            DB::table('stock_balances')->where('id', $row->id)->update([
+                        $sbUp = [
                 'updated_at' => Carbon::now()->toDateTimeString(),
                 'payload' => json_encode($payload),
-            ]);
+            ];
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
+                $sbUp['quantity_on_hand'] = $newStock / 1000.0;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'product_id') && empty($row->product_id)) {
+                $sbUp['product_id'] = $productId;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'variant_id') && empty($row->variant_id)) {
+                $sbUp['variant_id'] = $variantId ?? $productId;
+            }
+            DB::table('stock_balances')->where('id', $row->id)->update($sbUp);
 
             return $newStock;
         }
@@ -892,7 +1140,7 @@ class ReturnService
             $insertData['variant_id'] = $vId;
         }
         if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
-            $insertData['quantity_on_hand'] = (int) round($newStock);
+            $insertData['quantity_on_hand'] = $newStock / 1000.0;
         }
 
         DB::table('stock_balances')->insert($insertData);

@@ -108,6 +108,7 @@ class HistoricalDataManagementTest extends TestCase
         ];
 
         $res = $this->actingAs($this->user)->postJson('/api/v1/purchases', $payload, $this->headers);
+        if (!in_array($res->status(), [200, 201])) { $this->fail('API Error in test_01: ' . json_encode($res->json())); }
         $this->assertContains($res->status(), [200, 201]);
 
         // Verify purchase_bills is_historical is 0 / new
@@ -161,8 +162,8 @@ class HistoricalDataManagementTest extends TestCase
         ];
 
         $res = $this->actingAs($this->user)->postJson('/api/v1/historical/purchases', $payload, $this->headers);
+        if ($res->status() !== 200) { $this->fail('API Error: ' . json_encode($res->json())); }
         $res->assertStatus(200);
-
         $data = $res->json('data');
         $this->assertEquals('HIST-SUP-FULL-100', $data['supplierInvoiceNumber']);
         $this->assertTrue($data['isHistorical']);
@@ -638,5 +639,508 @@ class HistoricalDataManagementTest extends TestCase
         $numbers = collect($allRes->json('data.records'))->pluck('invoiceNumber')->all();
         // Verify unique invoice numbers (no duplicates)
         $this->assertEquals(count($numbers), count(array_unique($numbers)));
+    }
+
+    /**
+     * Test 13 – Historical Sale with large amount received in Rupees (e.g. ₹12,000)
+     * Verifies that amount_received > 1000 is correctly treated as Rupees (1200000 paise)
+     * and does not result in ₹120 paid and ₹11880 due.
+     */
+    public function test_13_historical_sale_amount_received_treated_correctly_as_rupees(): void
+    {
+        $payload = [
+            'original_invoice_number' => 'HIST-TEST-12000',
+            'original_invoice_date' => '2026-10-06',
+            'customer_name' => 'Aditya Test',
+            'outlet_id' => $this->outletId,
+            'amount_received' => 12000,
+            'lines' => [
+                [
+                    'product_id' => 'PROD_BAGS_01',
+                    'quantity' => 20,
+                    'sale_rate' => 600, // 20 * 600 = 12000.00
+                    'gst_percentage' => 0,
+                ],
+            ],
+            'impact_current_stock' => false,
+        ];
+
+        $res = $this->actingAs($this->user)->postJson('/api/v1/historical/sales', $payload, $this->headers);
+        $res->assertStatus(200);
+
+        $data = $res->json('data');
+        $this->assertEquals(1200000, $data['grandTotal']);
+        $this->assertEquals(1200000, $data['paidAmount']);
+        $this->assertEquals(0, $data['dueAmount']);
+        $this->assertEquals('PAID', $data['status']);
+
+        // Check customer ledger entry has credit for 1,200,000 paise (full 12,000 paid)
+        $this->assertDatabaseHas('customer_ledger_entries', [
+            'business_id' => $this->businessId,
+            'is_historical' => 1,
+            'entry_source' => 'historical',
+        ]);
+        $entry = DB::table('customer_ledger_entries')
+            ->where('business_id', $this->businessId)
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.transactionType')) = 'PAYMENT'")
+            ->first();
+        $this->assertNotNull($entry);
+        $entryPayload = json_decode($entry->payload, true);
+        $this->assertEquals(1200000, $entryPayload['fields']['amountPaise']);
+        $this->assertEquals(1200000, $entryPayload['fields']['creditPaise']);
+    }
+
+    /**
+     * Test 14 – Old Sale cannot exceed Old Inventory inward stock, and returns restore stock.
+     */
+    public function test_14_historical_sale_cannot_exceed_old_inventory_stock_and_restores_on_return(): void
+    {
+        // 1. Record historical purchase of 50 units
+        $purRes = $this->actingAs($this->user)->postJson('/api/v1/historical/purchases', [
+            'supplier_id' => 'SUP_01',
+            'supplier_invoice_number' => 'HIST-STOCK-PUR-50',
+            'invoice_date' => '2026-01-10',
+            'outlet_id' => $this->outletId,
+            'items' => [
+                [
+                    'product_id' => 'PROD_BAGS_01',
+                    'quantity' => 50,
+                    'rate' => 200,
+                    'consumed_quantity' => 0,
+                    'included_in_opening_stock' => 0,
+                ],
+            ],
+        ], $this->headers);
+        $purRes->assertStatus(200);
+
+        // Check stock reconciliation shows 50 available
+        $recRes = $this->actingAs($this->user)->getJson('/api/v1/historical/reconciliation/stock?outlet_id='.$this->outletId, $this->headers);
+        $recRes->assertStatus(200);
+        $prodRecon = collect($recRes->json('data'))->firstWhere('productId', 'PROD_BAGS_01');
+        $this->assertEquals(50.0, $prodRecon['availableOldStock']);
+        $this->assertEquals(50.0, $prodRecon['historicalPurchasesQty']);
+        $this->assertEquals(0.0, $prodRecon['historicalSalesQty']);
+
+        // 2. Attempt historical sale of 51 units -> must fail
+        $oversellRes = $this->actingAs($this->user)->postJson('/api/v1/historical/sales', [
+            'original_invoice_number' => 'HIST-OVERSELL-51',
+            'original_invoice_date' => '2026-02-01',
+            'customer_name' => 'Over Buyer',
+            'outlet_id' => $this->outletId,
+            'lines' => [
+                [
+                    'product_id' => 'PROD_BAGS_01',
+                    'quantity' => 51,
+                    'sale_rate' => 300,
+                ],
+            ],
+        ], $this->headers);
+        $oversellRes->assertStatus(422);
+        $this->assertStringContainsString('exceeds available old inventory stock', $oversellRes->json('message'));
+
+        // 3. Record historical sale of 50 units -> must succeed
+        $exactRes = $this->actingAs($this->user)->postJson('/api/v1/historical/sales', [
+            'original_invoice_number' => 'HIST-EXACT-50',
+            'original_invoice_date' => '2026-02-01',
+            'customer_name' => 'Exact Buyer',
+            'outlet_id' => $this->outletId,
+            'lines' => [
+                [
+                    'product_id' => 'PROD_BAGS_01',
+                    'quantity' => 50,
+                    'sale_rate' => 300,
+                ],
+            ],
+        ], $this->headers);
+        $exactRes->assertStatus(200);
+
+        // Check stock reconciliation shows 0 remaining
+        $recRes2 = $this->actingAs($this->user)->getJson('/api/v1/historical/reconciliation/stock?outlet_id='.$this->outletId, $this->headers);
+        $prodRecon2 = collect($recRes2->json('data'))->firstWhere('productId', 'PROD_BAGS_01');
+        $this->assertEquals(0.0, $prodRecon2['availableOldStock']);
+        $this->assertEquals(50.0, $prodRecon2['historicalSalesQty']);
+
+        // 4. Attempt 1 more unit -> must fail with no stock
+        $noStockRes = $this->actingAs($this->user)->postJson('/api/v1/historical/sales', [
+            'original_invoice_number' => 'HIST-NO-STOCK-01',
+            'original_invoice_date' => '2026-02-02',
+            'customer_name' => 'Late Buyer',
+            'outlet_id' => $this->outletId,
+            'lines' => [
+                [
+                    'product_id' => 'PROD_BAGS_01',
+                    'quantity' => 1,
+                    'sale_rate' => 300,
+                ],
+            ],
+        ], $this->headers);
+        $noStockRes->assertStatus(422);
+        $this->assertStringContainsString('No stock available', $noStockRes->json('message'));
+
+        // 5. Simulate return of 10 units on the sale invoice item
+        $saleItem = DB::table('invoice_items')
+            ->where('product_id', 'PROD_BAGS_01')
+            ->first();
+        $this->assertNotNull($saleItem);
+        DB::table('invoice_items')->where('id', $saleItem->id)->update(['returned_qty' => 10]);
+
+        // Verify stock reconciliation now has 10 available
+        $recRes3 = $this->actingAs($this->user)->getJson('/api/v1/historical/reconciliation/stock?outlet_id='.$this->outletId, $this->headers);
+        $prodRecon3 = collect($recRes3->json('data'))->firstWhere('productId', 'PROD_BAGS_01');
+        $this->assertEquals(10.0, $prodRecon3['availableOldStock']);
+        $this->assertEquals(40.0, $prodRecon3['historicalSalesQty']);
+
+        // 6. Record sale of 10 units -> must succeed now that 10 units were returned
+        $restoredSaleRes = $this->actingAs($this->user)->postJson('/api/v1/historical/sales', [
+            'original_invoice_number' => 'HIST-RESTORED-10',
+            'original_invoice_date' => '2026-02-05',
+            'customer_name' => 'Restored Buyer',
+            'outlet_id' => $this->outletId,
+            'lines' => [
+                [
+                    'product_id' => 'PROD_BAGS_01',
+                    'quantity' => 10,
+                    'sale_rate' => 300,
+                ],
+            ],
+        ], $this->headers);
+        $restoredSaleRes->assertStatus(200);
+    }
+
+    /**
+     * Test 15: Old bills strictly reject today's date and future dates (Backend validation).
+     */
+    public function test_15_old_bills_reject_today_and_future_dates(): void
+    {
+        $todayStr = \Carbon\Carbon::today()->toDateString();
+        $tomorrowStr = \Carbon\Carbon::tomorrow()->toDateString();
+        $yesterdayStr = \Carbon\Carbon::yesterday()->toDateString();
+
+        // 1. Old Purchase with today's date -> rejected
+        $purTodayRes = $this->actingAs($this->user)->postJson('/api/v1/historical/purchases', [
+            'supplier_id' => 'SUP_01',
+            'supplier_invoice_number' => 'HIST-PUR-TODAY',
+            'invoice_date' => $todayStr,
+            'outlet_id' => $this->outletId,
+            'items' => [
+                [
+                    'product_id' => 'PROD_DATE_TEST',
+                    'quantity' => 10,
+                    'rate' => 100,
+                ],
+            ],
+        ], $this->headers);
+        $purTodayRes->assertStatus(422);
+        $this->assertStringContainsString('Old bill date must be strictly prior to today', $purTodayRes->json('message'));
+
+        // 2. Old Purchase with future date -> rejected
+        $purFutureRes = $this->actingAs($this->user)->postJson('/api/v1/historical/purchases', [
+            'supplier_id' => 'SUP_01',
+            'supplier_invoice_number' => 'HIST-PUR-FUTURE',
+            'invoice_date' => $tomorrowStr,
+            'outlet_id' => $this->outletId,
+            'items' => [
+                [
+                    'product_id' => 'PROD_DATE_TEST',
+                    'quantity' => 10,
+                    'rate' => 100,
+                ],
+            ],
+        ], $this->headers);
+        $purFutureRes->assertStatus(422);
+        $this->assertStringContainsString('Old bill date must be strictly prior to today', $purFutureRes->json('message'));
+
+        // 3. Old Sale with today's date -> rejected
+        $saleTodayRes = $this->actingAs($this->user)->postJson('/api/v1/historical/sales', [
+            'original_invoice_number' => 'HIST-SALE-TODAY',
+            'original_invoice_date' => $todayStr,
+            'customer_name' => 'Date Test Customer',
+            'outlet_id' => $this->outletId,
+            'lines' => [
+                [
+                    'product_id' => 'PROD_DATE_TEST',
+                    'quantity' => 5,
+                    'sale_rate' => 150,
+                ],
+            ],
+        ], $this->headers);
+        $saleTodayRes->assertStatus(422);
+        $this->assertStringContainsString('Old bill date must be strictly prior to today', $saleTodayRes->json('message'));
+
+        // 4. Old Sale with future date -> rejected
+        $saleFutureRes = $this->actingAs($this->user)->postJson('/api/v1/historical/sales', [
+            'original_invoice_number' => 'HIST-SALE-FUTURE',
+            'original_invoice_date' => $tomorrowStr,
+            'customer_name' => 'Date Test Customer',
+            'outlet_id' => $this->outletId,
+            'lines' => [
+                [
+                    'product_id' => 'PROD_DATE_TEST',
+                    'quantity' => 5,
+                    'sale_rate' => 150,
+                ],
+            ],
+        ], $this->headers);
+        $saleFutureRes->assertStatus(422);
+        $this->assertStringContainsString('Old bill date must be strictly prior to today', $saleFutureRes->json('message'));
+    }
+
+    /**
+     * Test 16: Date-wise historical stock availability, first purchase validation, and FIFO batch allocation.
+     */
+    public function test_16_date_wise_stock_availability_and_fifo_batch_allocation(): void
+    {
+        $productId = 'PROD_ACE_SUPREMA_20L';
+
+        // 1. Create Old Purchase 1: 70 units on 2026-01-10
+        $p1Res = $this->actingAs($this->user)->postJson('/api/v1/historical/purchases', [
+            'supplier_id' => 'SUP_01',
+            'supplier_invoice_number' => 'HIST-ACE-P1',
+            'invoice_date' => '2026-01-10',
+            'outlet_id' => $this->outletId,
+            'items' => [
+                [
+                    'product_id' => $productId,
+                    'quantity' => 70,
+                    'rate' => 500,
+                ],
+            ],
+        ], $this->headers);
+        $p1Res->assertStatus(200);
+
+        // 2. Create Old Purchase 2: 30 units on 2026-01-20
+        $p2Res = $this->actingAs($this->user)->postJson('/api/v1/historical/purchases', [
+            'supplier_id' => 'SUP_01',
+            'supplier_invoice_number' => 'HIST-ACE-P2',
+            'invoice_date' => '2026-01-20',
+            'outlet_id' => $this->outletId,
+            'items' => [
+                [
+                    'product_id' => $productId,
+                    'quantity' => 30,
+                    'rate' => 520,
+                ],
+            ],
+        ], $this->headers);
+        $p2Res->assertStatus(200);
+
+        // 3. Query stock availability endpoint before first purchase date (2026-01-05)
+        $availPreRes = $this->actingAs($this->user)->getJson(
+            "/api/v1/historical/stock-availability?product_id={$productId}&date=2026-01-05&outlet_id={$this->outletId}",
+            $this->headers
+        );
+        $availPreRes->assertStatus(200);
+        $this->assertEquals('NOT_YET_PURCHASED', $availPreRes->json('data.status'));
+        $this->assertEquals(0.0, $availPreRes->json('data.availableQuantity'));
+        $this->assertStringContainsString('The first available stock was purchased on 2026-01-10', $availPreRes->json('data.message'));
+
+        // 4. Attempt old sale on 2026-01-05 -> must fail with clear message
+        $salePreRes = $this->actingAs($this->user)->postJson('/api/v1/historical/sales', [
+            'original_invoice_number' => 'HIST-ACE-S-PRE',
+            'original_invoice_date' => '2026-01-05',
+            'customer_name' => 'Early Customer',
+            'outlet_id' => $this->outletId,
+            'lines' => [
+                [
+                    'product_id' => $productId,
+                    'quantity' => 10,
+                    'sale_rate' => 600,
+                ],
+            ],
+        ], $this->headers);
+        $salePreRes->assertStatus(422);
+        $this->assertStringContainsString('The first available stock was purchased on 2026-01-10', $salePreRes->json('message'));
+
+        // 5. Query stock availability between P1 and P2 (2026-01-15) -> only P1's 70 units available
+        $availMidRes = $this->actingAs($this->user)->getJson(
+            "/api/v1/historical/stock-availability?product_id={$productId}&date=2026-01-15&outlet_id={$this->outletId}",
+            $this->headers
+        );
+        $availMidRes->assertStatus(200);
+        $this->assertEquals('AVAILABLE', $availMidRes->json('data.status'));
+        $this->assertEquals(70.0, $availMidRes->json('data.availableQuantity'));
+
+        // 6. Attempt sale of 75 units on 2026-01-15 -> fails because only 70 units purchased by 2026-01-15
+        $saleExcessRes = $this->actingAs($this->user)->postJson('/api/v1/historical/sales', [
+            'original_invoice_number' => 'HIST-ACE-S-EXCESS',
+            'original_invoice_date' => '2026-01-15',
+            'customer_name' => 'Mid Customer',
+            'outlet_id' => $this->outletId,
+            'lines' => [
+                [
+                    'product_id' => $productId,
+                    'quantity' => 75,
+                    'sale_rate' => 600,
+                ],
+            ],
+        ], $this->headers);
+        $saleExcessRes->assertStatus(422);
+        $this->assertStringContainsString('exceeds available historical stock on 2026-01-15', $saleExcessRes->json('message'));
+
+        // 7. Record valid sale 1: 30 units on 2026-01-15 -> succeeds and deducts from P1 (FIFO)
+        $s1Res = $this->actingAs($this->user)->postJson('/api/v1/historical/sales', [
+            'original_invoice_number' => 'HIST-ACE-S1',
+            'original_invoice_date' => '2026-01-15',
+            'customer_name' => 'Customer One',
+            'outlet_id' => $this->outletId,
+            'lines' => [
+                [
+                    'product_id' => $productId,
+                    'quantity' => 30,
+                    'sale_rate' => 600,
+                ],
+            ],
+        ], $this->headers);
+        $s1Res->assertStatus(200);
+
+        // Verify batches via Inventory API:
+        // P1 batch: initial 70, available 40, sold 30
+        // P2 batch: initial 30, available 30, sold 0
+        $batchRes = $this->actingAs($this->user)->getJson(
+            "/api/v1/inventory/batches?product_id={$productId}&outlet_id={$this->outletId}",
+            $this->headers
+        );
+        $batchRes->assertStatus(200);
+        $batches = $batchRes->json('data');
+        $this->assertCount(2, $batches);
+
+        $b1 = collect($batches)->firstWhere('purchaseDate', '2026-01-10');
+        $b2 = collect($batches)->firstWhere('purchaseDate', '2026-01-20');
+
+        $this->assertNotNull($b1);
+        $this->assertNotNull($b2);
+        $this->assertEquals(40.0, (float) $b1['availableQuantity']);
+        $this->assertEquals(30.0, (float) $b1['soldQuantity']);
+        $this->assertEquals(30.0, (float) $b2['availableQuantity']);
+        $this->assertEquals(0.0, (float) $b2['soldQuantity']);
+    }
+
+    /**
+     * Test 17: Old Sales Return inventory destination (Old Inventory vs New Inventory).
+     */
+    public function test_17_old_sales_return_inventory_destination(): void
+    {
+        $productId = 'PROD_RETURN_DEST_TEST';
+
+        // 1. Inward 20 units historical purchase
+        $pRes = $this->actingAs($this->user)->postJson('/api/v1/historical/purchases', [
+            'supplier_id' => 'SUP_01',
+            'supplier_invoice_number' => 'HIST-RET-P1',
+            'invoice_date' => '2026-02-01',
+            'outlet_id' => $this->outletId,
+            'items' => [
+                [
+                    'product_id' => $productId,
+                    'quantity' => 20,
+                    'rate' => 200,
+                ],
+            ],
+        ], $this->headers);
+        $pRes->assertStatus(200);
+
+        // 2. Sell 10 units via old sale
+        $sRes = $this->actingAs($this->user)->postJson('/api/v1/historical/sales', [
+            'original_invoice_number' => 'HIST-RET-S1',
+            'original_invoice_date' => '2026-02-05',
+            'customer_name' => 'Return Customer',
+            'outlet_id' => $this->outletId,
+            'lines' => [
+                [
+                    'product_id' => $productId,
+                    'quantity' => 10,
+                    'sale_rate' => 300,
+                ],
+            ],
+        ], $this->headers);
+        $sRes->assertStatus(200);
+        $invoiceId = $sRes->json('data.invoiceId');
+
+        $batchBefore = DB::table('inventory_batches')
+            ->where('product_id', $productId)
+            ->first();
+        $bPayloadBefore = json_decode($batchBefore->payload, true) ?: [];
+        $availBefore = (float) (isset($batchBefore->quantity_available) ? $batchBefore->quantity_available : ($bPayloadBefore['fields']['availableQuantity'] ?? 0));
+        $this->assertEquals(10.0, $availBefore);
+
+        // Check current operational stock before return
+        $currentStockBefore = (float) (DB::table('stock_balances')
+            ->where('business_id', $this->businessId)
+            ->where('outlet_id', $this->outletId)
+            ->where('product_id', $productId)
+            ->value('quantity_on_hand') ?? 0);
+
+        // 3. Process Return with destination = OLD_INVENTORY (3 units)
+        $itemRow = DB::table('invoice_items')->where('invoice_id', $invoiceId)->first();
+        $retOldRes = $this->actingAs($this->user)->postJson('/api/v1/returns', [
+            'type' => 'sale_return',
+            'business_id' => $this->businessId,
+            'outlet_id' => $this->outletId,
+            'party_id' => 'walk_in',
+            'party_name' => 'Return Customer',
+            'original_bill_id' => $invoiceId,
+            'inventory_destination' => 'OLD_INVENTORY',
+            'items' => [
+                [
+                    'original_bill_item_id' => $itemRow->id,
+                    'product_id' => $productId,
+                    'product_name' => 'Return Product',
+                    'qty_returned' => 3,
+                    'unit_price' => 300,
+                    'condition' => 'resalable',
+                    'restock' => true,
+                ],
+            ],
+        ], $this->headers);
+        $retOldRes->assertStatus(201);
+
+        // Verification 1: Historical batch available increased by 3 (from 10 to 13)
+        $batchAfterOld = DB::table('inventory_batches')->where('id', $batchBefore->id)->first();
+        $bPayloadOld = json_decode($batchAfterOld->payload, true) ?: [];
+        $availOld = (float) (isset($batchAfterOld->quantity_available) ? $batchAfterOld->quantity_available : ($bPayloadOld['fields']['availableQuantity'] ?? 0));
+        $this->assertEquals(13.0, $availOld);
+
+        // Verification 2: Current operational stock balance UNCHANGED
+        $currentStockAfterOld = (float) (DB::table('stock_balances')
+            ->where('business_id', $this->businessId)
+            ->where('outlet_id', $this->outletId)
+            ->where('product_id', $productId)
+            ->value('quantity_on_hand') ?? 0);
+        $this->assertEquals($currentStockBefore, $currentStockAfterOld);
+
+        // 4. Process Return with destination = NEW_INVENTORY (2 units)
+        $retNewRes = $this->actingAs($this->user)->postJson('/api/v1/returns', [
+            'type' => 'sale_return',
+            'business_id' => $this->businessId,
+            'outlet_id' => $this->outletId,
+            'party_id' => 'walk_in',
+            'party_name' => 'Return Customer',
+            'original_bill_id' => $invoiceId,
+            'inventory_destination' => 'NEW_INVENTORY',
+            'items' => [
+                [
+                    'original_bill_item_id' => $itemRow->id,
+                    'product_id' => $productId,
+                    'product_name' => 'Return Product',
+                    'qty_returned' => 2,
+                    'unit_price' => 300,
+                    'condition' => 'resalable',
+                    'restock' => true,
+                ],
+            ],
+        ], $this->headers);
+        $retNewRes->assertStatus(201);
+        // Verification 3: Current operational stock increased by 2
+        $currentStockAfterNew = (float) (DB::table('stock_balances')
+            ->where('business_id', $this->businessId)
+            ->where('outlet_id', $this->outletId)
+            ->where('product_id', $productId)
+            ->value('quantity_on_hand') ?? 0);
+        $this->assertEquals($currentStockBefore + 2.0, $currentStockAfterNew);
+
+        // Verification 4: Historical batch NOT changed for NEW_INVENTORY return (still 13)
+        $batchAfterNew = DB::table('inventory_batches')->where('id', $batchBefore->id)->first();
+        $bPayloadNew = json_decode($batchAfterNew->payload, true) ?: [];
+        $availNew = (float) (isset($batchAfterNew->quantity_available) ? $batchAfterNew->quantity_available : ($bPayloadNew['fields']['availableQuantity'] ?? 0));
+        $this->assertEquals(13.0, $availNew);
     }
 }

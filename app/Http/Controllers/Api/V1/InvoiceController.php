@@ -93,6 +93,14 @@ class InvoiceController extends Controller
                     $q->whereRaw("CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.dueAmount')) AS SIGNED) > 0")
                         ->orWhere('status', 'PENDING');
                 })->where('status', '!=', 'CANCELLED');
+            } elseif ($statusFilter === 'HISTORICAL') {
+                $query->where(function ($q) {
+                    $q->where('is_historical', 1)
+                        ->orWhere('entry_source', 'historical')
+                        ->orWhere('id', 'LIKE', 'HIST-%')
+                        ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.isHistorical')) = 'true'")
+                        ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.entrySource')) = 'historical'");
+                });
             } else {
                 $query->where(function ($q) use ($statusFilter) {
                     $q->where('status', $statusFilter)
@@ -170,6 +178,9 @@ class InvoiceController extends Controller
                 'paymentMode' => $fields['paymentMode'] ?? 'CASH',
                 'paymentStatus' => $paymentStatus,
                 'status' => $status,
+                'isHistorical' => (bool) ($fields['isHistorical'] ?? ($row->is_historical == 1) ?? false),
+                'is_historical' => (int) ($row->is_historical ?? ($fields['isHistorical'] ? 1 : 0)),
+                'entrySource' => (string) ($fields['entrySource'] ?? $row->entry_source ?? 'normal'),
                 'itemsCount' => count($fields['items'] ?? []),
                 'items' => $fields['items'] ?? [],
                 'createdAt' => $fields['createdAt'] ?? $row->created_at,

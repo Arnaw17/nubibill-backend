@@ -28,6 +28,10 @@ class CreateReturnRequest extends FormRequest
             $this->merge(['type' => strtolower(trim($this->type))]);
         }
 
+        if ($this->has('inventory_destination') && is_string($this->inventory_destination)) {
+            $this->merge(['inventory_destination' => strtoupper(trim($this->inventory_destination))]);
+        }
+
         $partyId = $this->input('party_id');
         if ($partyId === null || trim((string) $partyId) === '') {
             $this->merge(['party_id' => 'walk_in']);
@@ -90,6 +94,7 @@ class CreateReturnRequest extends FormRequest
             'reason_id' => 'nullable|string',
             'reason_note' => 'nullable|string',
             'refund_mode' => 'nullable|string|in:cash,upi,bank,adjust_to_ledger,credit_note',
+            'inventory_destination' => 'nullable|string|in:OLD_INVENTORY,NEW_INVENTORY,old_inventory,new_inventory',
             'idempotency_key' => 'nullable|string|max:100',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'nullable|string',

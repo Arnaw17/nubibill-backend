@@ -17,6 +17,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 
 class AuthController extends Controller
@@ -87,18 +88,25 @@ class AuthController extends Controller
                 ]);
             }
 
-            // Generate 6-digit OTP
+            // Generate cryptographically secure 6-digit OTP (5-minute expiration)
             $otp = (string) random_int(100000, 999999);
             EmailOtp::create([
                 'email' => $user->email,
+                'purpose' => EmailOtp::PURPOSE_REGISTRATION,
                 'code_hash' => Hash::make($otp),
-                'expires_at' => now()->addMinutes(10),
+                'expires_at' => now()->addMinutes(5),
                 'attempts' => 0,
                 'created_at' => now(),
             ]);
 
-            // Send Queued OTP Email
-            Mail::to($user->email)->queue(new SendOtpMail($otp));
+            // Dispatch OTP email through configured SMTP provider
+            try {
+                Mail::to($user->email)->send(new SendOtpMail($otp, EmailOtp::PURPOSE_REGISTRATION, 5));
+            } catch (\Throwable $e) {
+                Log::error("SMTP delivery failure for registration OTP to [{$user->email}]: " . $e->getMessage());
+                // Throw exception so DB transaction rolls back cleanly
+                throw new \RuntimeException('Unable to send the verification email right now. Please try again later.');
+            }
 
             return ApiResponse::success(
                 ['email' => $user->email],
@@ -113,10 +121,14 @@ class AuthController extends Controller
      */
     public function resendOtp(ResendOtpRequest $request): JsonResponse
     {
-        $email = $request->email;
+        $email = strtolower(trim((string) $request->email));
 
         // Check 60-second cooldown
-        $latestOtp = EmailOtp::where('email', $email)->latest('created_at')->first();
+        $latestOtp = EmailOtp::where('email', $email)
+            ->where('purpose', EmailOtp::PURPOSE_REGISTRATION)
+            ->latest('created_at')
+            ->first();
+
         if ($latestOtp && $latestOtp->created_at->diffInSeconds(now()) < 60) {
             $remaining = 60 - $latestOtp->created_at->diffInSeconds(now());
 
@@ -128,20 +140,35 @@ class AuthController extends Controller
             );
         }
 
-        // Invalidate older unconsumed OTPs for this email address
-        EmailOtp::where('email', $email)->whereNull('consumed_at')->update(['consumed_at' => now()]);
+        // Invalidate older unconsumed OTPs for this email address and purpose
+        EmailOtp::where('email', $email)
+            ->where('purpose', EmailOtp::PURPOSE_REGISTRATION)
+            ->whereNull('consumed_at')
+            ->update(['consumed_at' => now()]);
 
-        // Generate fresh OTP
+        // Generate fresh 6-digit OTP (5-minute expiration)
         $otp = (string) random_int(100000, 999999);
         EmailOtp::create([
             'email' => $email,
+            'purpose' => EmailOtp::PURPOSE_REGISTRATION,
             'code_hash' => Hash::make($otp),
-            'expires_at' => now()->addMinutes(10),
+            'expires_at' => now()->addMinutes(5),
             'attempts' => 0,
             'created_at' => now(),
         ]);
 
-        Mail::to($email)->queue(new SendOtpMail($otp));
+        try {
+            Mail::to($email)->send(new SendOtpMail($otp, EmailOtp::PURPOSE_REGISTRATION, 5));
+        } catch (\Throwable $e) {
+            Log::error("SMTP delivery failure for resend OTP to [{$email}]: " . $e->getMessage());
+
+            return ApiResponse::error(
+                'Unable to send the verification email right now. Please try again later.',
+                500,
+                null,
+                'EMAIL_DELIVERY_FAILED'
+            );
+        }
 
         return ApiResponse::success(
             null,
@@ -154,10 +181,11 @@ class AuthController extends Controller
      */
     public function verifyOtp(VerifyOtpRequest $request): JsonResponse
     {
-        $email = $request->email;
-        $otp = $request->otp;
+        $email = strtolower(trim((string) $request->email));
+        $otp = trim((string) $request->otp);
 
         $record = EmailOtp::where('email', $email)
+            ->where('purpose', EmailOtp::PURPOSE_REGISTRATION)
             ->whereNull('consumed_at')
             ->latest('created_at')
             ->first();
@@ -208,7 +236,7 @@ class AuthController extends Controller
             );
         }
 
-        // OTP is valid
+        // OTP is valid - consume immediately
         $record->update(['consumed_at' => now()]);
 
         $user = User::where('email', $email)->first();
@@ -308,9 +336,14 @@ class AuthController extends Controller
         }
 
         // Check 60-second cooldown
-        $latestOtp = EmailOtp::where('email', $email)->latest('created_at')->first();
+        $latestOtp = EmailOtp::where('email', $email)
+            ->where('purpose', EmailOtp::PURPOSE_FORGOT_PASSWORD)
+            ->latest('created_at')
+            ->first();
+
         if ($latestOtp && $latestOtp->created_at->diffInSeconds(now()) < 60) {
             $remaining = 60 - $latestOtp->created_at->diffInSeconds(now());
+
             return ApiResponse::error(
                 "Please wait {$remaining} seconds before requesting a new OTP.",
                 429,
@@ -319,32 +352,41 @@ class AuthController extends Controller
             );
         }
 
-        // Invalidate older unconsumed OTPs
-        EmailOtp::where('email', $email)->whereNull('consumed_at')->update(['consumed_at' => now()]);
+        // Invalidate older unconsumed forgot password OTPs
+        EmailOtp::where('email', $email)
+            ->where('purpose', EmailOtp::PURPOSE_FORGOT_PASSWORD)
+            ->whereNull('consumed_at')
+            ->update(['consumed_at' => now()]);
 
-        // Generate fresh 6-digit OTP
+        // Generate fresh 6-digit OTP (5-minute expiration)
         $otp = (string) random_int(100000, 999999);
         EmailOtp::create([
             'email' => $email,
+            'purpose' => EmailOtp::PURPOSE_FORGOT_PASSWORD,
             'code_hash' => Hash::make($otp),
-            'expires_at' => now()->addMinutes(10),
+            'expires_at' => now()->addMinutes(5),
             'attempts' => 0,
             'created_at' => now(),
         ]);
 
         try {
-            Mail::to($email)->queue(new SendOtpMail($otp));
+            Mail::to($email)->send(new SendOtpMail($otp, EmailOtp::PURPOSE_FORGOT_PASSWORD, 5));
         } catch (\Throwable $e) {
-            // Queue or log failure safely handled
+            Log::error("SMTP delivery failure for forgot password OTP to [{$email}]: " . $e->getMessage());
+
+            return ApiResponse::error(
+                'Unable to send the verification email right now. Please try again later.',
+                500,
+                null,
+                'EMAIL_DELIVERY_FAILED'
+            );
         }
 
+        // Never expose OTP or debug_otp in the response
         $responseData = [
             'email' => $email,
-            'expiresInMinutes' => 10,
+            'expiresInMinutes' => 5,
         ];
-        if (config('app.debug')) {
-            $responseData['debug_otp'] = $otp;
-        }
 
         return ApiResponse::success(
             $responseData,
@@ -360,7 +402,7 @@ class AuthController extends Controller
         $validated = $request->validate([
             'email' => 'required|email|max:255',
             'otp' => 'required|string|size:6',
-            'password' => 'required|string|min:6|max:255',
+            'password' => 'required|string|min:8|max:255',
         ]);
 
         $email = strtolower(trim($validated['email']));
@@ -377,6 +419,7 @@ class AuthController extends Controller
         }
 
         $record = EmailOtp::where('email', $email)
+            ->where('purpose', EmailOtp::PURPOSE_FORGOT_PASSWORD)
             ->whereNull('consumed_at')
             ->latest('created_at')
             ->first();
@@ -427,17 +470,17 @@ class AuthController extends Controller
             );
         }
 
-        // OTP is valid, consume it
+        // OTP is valid, consume it immediately
         $record->update(['consumed_at' => now()]);
 
-        // Update user password and ensure verified
-        $user->password = $newPassword;
+        // Securely update user password with Hash::make
+        $user->password = Hash::make($newPassword);
         if (! $user->email_verified_at) {
             $user->email_verified_at = now();
         }
         $user->save();
 
-        // Invalidate older personal access tokens for security
+        // Invalidate all existing personal access tokens for security
         if (method_exists($user, 'tokens')) {
             $user->tokens()->delete();
         }

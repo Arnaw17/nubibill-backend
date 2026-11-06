@@ -22,7 +22,7 @@ class CreateBusinessRequest extends FormRequest
             'phone' => ['required', 'string', 'min:10', 'max:15'],
             'address' => ['required', 'string', 'min:3'],
             'gstin' => ['nullable', 'string', 'regex:/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i'],
-            'logo' => ['nullable'],
+            'logo' => ['nullable', 'file', 'image', 'mimes:jpeg,jpg,png,webp,svg', 'max:2048'],
             'logo_base64' => ['nullable', 'string'],
             'logo_url' => ['nullable', 'string'],
         ];

@@ -16,8 +16,12 @@ class EmailOtp extends Model
 
     public $incrementing = false;
 
+    public const PURPOSE_REGISTRATION = 'REGISTRATION';
+    public const PURPOSE_FORGOT_PASSWORD = 'FORGOT_PASSWORD';
+
     protected $fillable = [
         'email',
+        'purpose',
         'code_hash',
         'expires_at',
         'attempts',
@@ -48,5 +52,15 @@ class EmailOtp extends Model
     public function isConsumed(): bool
     {
         return $this->consumed_at !== null;
+    }
+
+    public function isForRegistration(): bool
+    {
+        return ($this->purpose ?? self::PURPOSE_REGISTRATION) === self::PURPOSE_REGISTRATION;
+    }
+
+    public function isForForgotPassword(): bool
+    {
+        return ($this->purpose ?? '') === self::PURPOSE_FORGOT_PASSWORD;
     }
 }
