@@ -274,6 +274,8 @@ class PurchaseController extends Controller
                 'product_name' => $ri['product_name'] ?? $ri['productName'] ?? '',
                 'variant_name' => $ri['variant_name'] ?? $ri['variantName'] ?? '',
                 'quantity' => $ri['quantity'] ?? $ri['qty'] ?? 1,
+                'conversion_factor' => (int) ($ri['conversion_factor'] ?? $ri['conversionFactor'] ?? 1000),
+                'base_quantity' => $ri['base_quantity'] ?? $ri['baseQuantity'] ?? null,
                 'unit_id' => $ri['unit_id'] ?? $ri['unitId'] ?? 'SYS_UNIT_PCS',
                 'rate' => $ri['rate'] ?? 0,
                 'gst_rate_bps' => $ri['gst_rate_bps'] ?? $ri['gstRateBps'] ?? 0,
@@ -363,6 +365,13 @@ class PurchaseController extends Controller
             $qty = (float) $item['quantity'];
             $rate = (int) $item['rate'];
             $gstRateBps = (int) ($item['gst_rate_bps'] ?? 1800);
+            $conversionFactor = (int) ($item['conversion_factor'] ?? 1000);
+            $baseQty = isset($item['base_quantity']) && $item['base_quantity'] !== null
+                ? (float) $item['base_quantity']
+                : (float) round(($qty * $conversionFactor) / 1000);
+            if ($baseQty <= 0) {
+                $baseQty = $qty;
+            }
 
             $taxableAmount = (int) round(($qty * $rate) / 1000); // 1000 conversion if millieunits, or direct paise
             if ($taxableAmount == 0 && $qty > 0 && $rate > 0) {
@@ -389,7 +398,8 @@ class PurchaseController extends Controller
                 'productName' => $item['product_name'] ?? 'Product',
                 'variantName' => $item['variant_name'] ?? 'Default',
                 'quantity' => $qty,
-                'baseQuantity' => $qty,
+                'baseQuantity' => $baseQty,
+                'conversionFactor' => $conversionFactor,
                 'unitId' => $item['unit_id'] ?? 'SYS_UNIT_PCS',
                 'rate' => $rate,
                 'gstRateBps' => $gstRateBps,
@@ -658,22 +668,45 @@ class PurchaseController extends Controller
                     if ($qty > 0 && $qty < 500) {
                         $qty = $qty * 1000;
                     }
+                    $baseQuantity = (int) ($item['baseQuantity'] ?? $item['base_quantity'] ?? $qty);
+                    if ($baseQuantity > 0 && $baseQuantity < 500) {
+                        $baseQuantity = $baseQuantity * 1000;
+                    }
                     $rate = (int) ($item['rate'] ?? 0);
                     $lineCost = (int) ($item['taxableAmount'] ?? 0) + (int) ($item['taxAmount'] ?? 0);
-                    if ($lineCost <= 0 && $qty > 0 && $rate > 0) {
-                        $lineCost = (int) round(($qty * $rate) / 1000);
+                    if ($lineCost <= 0 && $baseQuantity > 0 && $rate > 0) {
+                        $lineCost = (int) round(($baseQuantity * $rate) / 1000);
                     }
-                    if (! $vId || $qty <= 0) {
+                    if (! $vId || $baseQuantity <= 0) {
                         continue;
                     }
 
-                    $stockBalId = "{$userId}_{$outletId}_{$vId}";
+                    // Resolve base variant if this is a load variant
+                    $targetVariantId = $vId;
+                    if ($pId) {
+                        $vRows = DB::table('product_variants')
+                            ->where('product_id', $pId)
+                            ->orWhere('payload->fields->productId', $pId)
+                            ->get();
+                        foreach ($vRows as $vRow) {
+                            $vp = json_decode($vRow->payload, true) ?: [];
+                            $vf = $vp['fields'] ?? [];
+                            $c = (float) ($vf['baseQuantityPerCommercialUnit'] ?? 1);
+                            $vn = strtolower((string) ($vf['name'] ?? $vf['variantName'] ?? ''));
+                            if ($c <= 1 || str_contains($vn, 'piece') || str_contains($vn, 'cft') || str_contains($vn, 'bag')) {
+                                $targetVariantId = (string) ($vf['variantId'] ?? $vRow->id);
+                                break;
+                            }
+                        }
+                    }
+
+                    $stockBalId = "{$userId}_{$outletId}_{$targetVariantId}";
                     $stockRow = DB::table('stock_balances')
                         ->where('business_id', $businessId)
                         ->where('outlet_id', $outletId)
-                        ->where(function ($q) use ($stockBalId, $vId) {
+                        ->where(function ($q) use ($stockBalId, $targetVariantId) {
                             $q->where('id', $stockBalId)
-                                ->orWhere('payload->fields->variantId', $vId);
+                                ->orWhere('payload->fields->variantId', $targetVariantId);
                         })
                         ->lockForUpdate()
                         ->first();
@@ -690,7 +723,7 @@ class PurchaseController extends Controller
                                 $currStock = ((int) ($currStock / 1000) + $remainder) * 1000;
                             }
                         }
-                        $newStock = $currStock + $qty;
+                        $newStock = $currStock + $baseQuantity;
                         $oldVal = (int) ($sbFields['totalValue'] ?? 0);
                         $newVal = $oldVal + $lineCost;
                         $sbFields['quantityOnHand'] = $newStock;
@@ -712,13 +745,13 @@ class PurchaseController extends Controller
                             'tenantId' => $userId,
                             'businessId' => $businessId,
                             'outletId' => $outletId,
-                            'variantId' => $vId,
+                            'variantId' => $targetVariantId,
                             'productId' => $pId,
-                            'quantityOnHand' => $qty,
-                            'currentStock' => $qty,
+                            'quantityOnHand' => $baseQuantity,
+                            'currentStock' => $baseQuantity,
                             'totalValue' => $lineCost,
-                            'averageCost' => $qty > 0 ? (int) round(($lineCost * 1000) / $qty) : 0,
-                            'avgCostPaise' => $qty > 0 ? (int) round($lineCost / max(1, $qty / 1000)) : 0,
+                            'averageCost' => $baseQuantity > 0 ? (int) round(($lineCost * 1000) / $baseQuantity) : 0,
+                            'avgCostPaise' => $baseQuantity > 0 ? (int) round($lineCost / max(1, $baseQuantity / 1000)) : 0,
                             'lastPurchasePricePaise' => $rate,
                             'createdAt' => $now,
                             'updatedAt' => $now,
@@ -1202,22 +1235,45 @@ class PurchaseController extends Controller
                 if ($qty > 0 && $qty < 500) {
                     $qty = $qty * 1000;
                 }
+                $baseQuantity = (int) ($item['baseQuantity'] ?? $item['base_quantity'] ?? $qty);
+                if ($baseQuantity > 0 && $baseQuantity < 500) {
+                    $baseQuantity = $baseQuantity * 1000;
+                }
                 $rate = (int) ($item['rate'] ?? 0);
                 $lineCost = (int) ($item['taxableAmount'] ?? 0) + (int) ($item['taxAmount'] ?? 0);
-                if ($lineCost <= 0 && $qty > 0 && $rate > 0) {
-                    $lineCost = (int) round(($qty * $rate) / 1000);
+                if ($lineCost <= 0 && $baseQuantity > 0 && $rate > 0) {
+                    $lineCost = (int) round(($baseQuantity * $rate) / 1000);
                 }
-                if (! $vId || $qty <= 0) {
+                if (! $vId || $baseQuantity <= 0) {
                     continue;
                 }
 
-                $stockBalId = "{$userId}_{$outletId}_{$vId}";
+                // Resolve base variant if this is a load variant
+                $targetVariantId = $vId;
+                if ($pId) {
+                    $vRows = DB::table('product_variants')
+                        ->where('product_id', $pId)
+                        ->orWhere('payload->fields->productId', $pId)
+                        ->get();
+                    foreach ($vRows as $vRow) {
+                        $vp = json_decode($vRow->payload, true) ?: [];
+                        $vf = $vp['fields'] ?? [];
+                        $c = (float) ($vf['baseQuantityPerCommercialUnit'] ?? 1);
+                        $vn = strtolower((string) ($vf['name'] ?? $vf['variantName'] ?? ''));
+                        if ($c <= 1 || str_contains($vn, 'piece') || str_contains($vn, 'cft') || str_contains($vn, 'bag')) {
+                            $targetVariantId = (string) ($vf['variantId'] ?? $vRow->id);
+                            break;
+                        }
+                    }
+                }
+
+                $stockBalId = "{$userId}_{$outletId}_{$targetVariantId}";
                 $stockRow = DB::table('stock_balances')
                     ->where('business_id', $businessId)
                     ->where('outlet_id', $outletId)
-                    ->where(function ($q) use ($stockBalId, $vId) {
+                    ->where(function ($q) use ($stockBalId, $targetVariantId) {
                         $q->where('id', $stockBalId)
-                            ->orWhere('payload->fields->variantId', $vId);
+                            ->orWhere('payload->fields->variantId', $targetVariantId);
                     })
                     ->lockForUpdate()
                     ->first();
@@ -1234,7 +1290,7 @@ class PurchaseController extends Controller
                             $currStock = ((int) ($currStock / 1000) + $remainder) * 1000;
                         }
                     }
-                    $newStock = $currStock + $qty;
+                    $newStock = $currStock + $baseQuantity;
                     $oldVal = (int) ($sbFields['totalValue'] ?? 0);
                     $newVal = $oldVal + $lineCost;
                     $sbFields['quantityOnHand'] = $newStock;
@@ -1256,13 +1312,13 @@ class PurchaseController extends Controller
                         'tenantId' => $userId,
                         'businessId' => $businessId,
                         'outletId' => $outletId,
-                        'variantId' => $vId,
+                        'variantId' => $targetVariantId,
                         'productId' => $pId,
-                        'quantityOnHand' => $qty,
-                        'currentStock' => $qty,
+                        'quantityOnHand' => $baseQuantity,
+                        'currentStock' => $baseQuantity,
                         'totalValue' => $lineCost,
-                        'averageCost' => $qty > 0 ? (int) round(($lineCost * 1000) / $qty) : 0,
-                        'avgCostPaise' => $qty > 0 ? (int) round($lineCost / max(1, $qty / 1000)) : 0,
+                        'averageCost' => $baseQuantity > 0 ? (int) round(($lineCost * 1000) / $baseQuantity) : 0,
+                        'avgCostPaise' => $baseQuantity > 0 ? (int) round($lineCost / max(1, $baseQuantity / 1000)) : 0,
                         'lastPurchasePricePaise' => $rate,
                         'createdAt' => $now,
                         'updatedAt' => $now,

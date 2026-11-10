@@ -146,11 +146,16 @@ class SyncController extends Controller
                     $id = $parsed['id'];
 
                     if ($collection && $id && Schema::hasTable($collection)) {
-                        DB::table($collection)->where('id', $id)->update([
-                            'is_deleted' => 1,
-                            'status' => 'DELETED',
+                        $deleteUpdate = [
                             'updated_at' => $now,
-                        ]);
+                        ];
+                        if (Schema::hasColumn($collection, 'is_deleted')) {
+                            $deleteUpdate['is_deleted'] = 1;
+                        }
+                        if (Schema::hasColumn($collection, 'status')) {
+                            $deleteUpdate['status'] = 'DELETED';
+                        }
+                        DB::table($collection)->where('id', $id)->update($deleteUpdate);
                     }
                     $writeResults[] = ['updateTime' => $isoNow];
                 } elseif (isset($write['update'])) {
@@ -172,17 +177,8 @@ class SyncController extends Controller
 
                         $existing = DB::table($collection)->where('id', $id)->first();
                         $existingPayload = $existing ? (json_decode($existing->payload, true) ?: []) : [];
-                        $mergedFields = array_merge($existingPayload['fields'] ?? [], $rawFields);
-
-                        if (!$businessId) {
-                            $businessId = $decoded['businessId'] ?? ($existing->business_id ?? null);
-                        }
-                        if (!$outletId) {
-                            $outletId = $decoded['outletId'] ?? ($existing->outlet_id ?? null);
-                        }
-                        if (!$tenantId) {
-                            $tenantId = $decoded['tenantId'] ?? ($existing->tenant_id ?? null);
-                        }
+                        $existingDecoded = self::decodeFields($existingPayload['fields'] ?? []);
+                        $mergedFields = array_merge($existingDecoded, $decoded);
 
                         $payload = [
                             '_documentId' => $id,
@@ -190,20 +186,7 @@ class SyncController extends Controller
                             'fields' => $mergedFields,
                         ];
 
-                        $row = [
-                            'id' => $id,
-                            'document_path' => $docPath,
-                            'business_id' => $businessId,
-                            'outlet_id' => $outletId,
-                            'status' => $status,
-                            'is_deleted' => $isDeleted,
-                            'payload' => json_encode($payload),
-                            'updated_at' => $now,
-                        ];
-
-                        if (Schema::hasColumn($collection, 'tenant_id')) {
-                            $row['tenant_id'] = $tenantId;
-                        }
+                        $row = $this->mapRowColumns($collection, $id, $docPath, $decoded, $payload, $existing, $now);
 
                         if ($existing) {
                             DB::table($collection)->where('id', $id)->update($row);
@@ -232,6 +215,80 @@ class SyncController extends Controller
                 ],
             ], 500);
         }
+    }
+
+    /**
+     * Map Firestore document fields to MySQL table columns dynamically.
+     */
+    private function mapRowColumns(string $table, string $id, string $docPath, array $decoded, array $payload, ?object $existing, Carbon $now): array
+    {
+        $status = strtoupper((string) ($decoded['status'] ?? 'ACTIVE'));
+        $isDeleted = (!empty($decoded['isDeleted']) || $status === 'DELETED') ? 1 : 0;
+
+        $row = [
+            'id' => $id,
+            'document_path' => $docPath,
+            'payload' => json_encode($payload),
+            'updated_at' => $now,
+        ];
+
+        // Specific mapping for stock_movements
+        if ($table === 'stock_movements') {
+            $row['product_id'] = $decoded['productId'] ?? $decoded['product_id'] ?? ($existing->product_id ?? '');
+            $row['variant_id'] = $decoded['variantId'] ?? $decoded['variant_id'] ?? ($existing->variant_id ?? null);
+            $row['type'] = strtolower((string) ($decoded['type'] ?? $decoded['transactionType'] ?? ($existing->type ?? 'adjustment')));
+
+            $qtyChange = $decoded['changedQuantity'] ?? $decoded['qtyChange'] ?? $decoded['qtyBase'] ?? null;
+            if ($qtyChange !== null && is_numeric($qtyChange)) {
+                $row['qty_change'] = abs($qtyChange) >= 1000 ? ($qtyChange / 1000.0) : (float) $qtyChange;
+            } elseif ($existing && isset($existing->qty_change)) {
+                $row['qty_change'] = $existing->qty_change;
+            } else {
+                $row['qty_change'] = 0.0;
+            }
+
+            $balAfter = $decoded['balanceAfter'] ?? $decoded['newQuantity'] ?? null;
+            if ($balAfter !== null && is_numeric($balAfter)) {
+                $row['balance_after'] = abs($balAfter) >= 1000 ? ($balAfter / 1000.0) : (float) $balAfter;
+            } elseif ($existing && isset($existing->balance_after)) {
+                $row['balance_after'] = $existing->balance_after;
+            } else {
+                $row['balance_after'] = null;
+            }
+
+            $row['reference_type'] = strtolower((string) ($decoded['referenceType'] ?? $decoded['transactionType'] ?? ($existing->reference_type ?? 'adjustment')));
+            $row['reference_id'] = $decoded['referenceId'] ?? $decoded['sourceDocumentId'] ?? ($existing->reference_id ?? $id);
+            $row['condition'] = $decoded['condition'] ?? ($existing->condition ?? 'resalable');
+            $row['note'] = $decoded['note'] ?? $decoded['reason'] ?? ($existing->note ?? null);
+            $row['created_by'] = $decoded['performedBy'] ?? $decoded['userId'] ?? $decoded['approvedBy'] ?? ($existing->created_by ?? null);
+            $row['entry_source'] = $decoded['entrySource'] ?? ($existing->entry_source ?? 'new');
+            $row['is_historical'] = !empty($decoded['isHistorical']) ? 1 : ($existing->is_historical ?? 0);
+        }
+
+        // Standard column checks across any table
+        if (Schema::hasColumn($table, 'business_id')) {
+            $row['business_id'] = $decoded['businessId'] ?? ($existing->business_id ?? null);
+        }
+        if (Schema::hasColumn($table, 'outlet_id')) {
+            $row['outlet_id'] = $decoded['outletId'] ?? ($existing->outlet_id ?? null);
+        }
+        if (Schema::hasColumn($table, 'tenant_id')) {
+            $row['tenant_id'] = $decoded['tenantId'] ?? ($existing->tenant_id ?? null);
+        }
+        if (Schema::hasColumn($table, 'status')) {
+            $row['status'] = $status;
+        }
+        if (Schema::hasColumn($table, 'is_deleted')) {
+            $row['is_deleted'] = $isDeleted;
+        }
+        if (Schema::hasColumn($table, 'product_id') && !isset($row['product_id'])) {
+            $row['product_id'] = $decoded['productId'] ?? ($existing->product_id ?? null);
+        }
+        if (Schema::hasColumn($table, 'variant_id') && !isset($row['variant_id'])) {
+            $row['variant_id'] = $decoded['variantId'] ?? ($existing->variant_id ?? null);
+        }
+
+        return $row;
     }
 
     /**
@@ -381,34 +438,15 @@ class SyncController extends Controller
         $isoNow = $now->toIso8601String();
         $docPath = "$collection/$id";
 
-        $businessId = $decoded['businessId'] ?? null;
-        $outletId = $decoded['outletId'] ?? null;
-        $tenantId = $decoded['tenantId'] ?? null;
-        $status = strtoupper((string) ($decoded['status'] ?? 'ACTIVE'));
-        $isDeleted = (!empty($decoded['isDeleted']) || $status === 'DELETED') ? 1 : 0;
-
         $payload = [
             '_documentId' => $id,
             '_documentPath' => $docPath,
             'fields' => $rawFields,
         ];
 
-        $row = [
-            'id' => $id,
-            'document_path' => $docPath,
-            'business_id' => $businessId,
-            'outlet_id' => $outletId,
-            'status' => $status,
-            'is_deleted' => $isDeleted,
-            'payload' => json_encode($payload),
-            'updated_at' => $now,
-        ];
-
-        if (Schema::hasColumn($table, 'tenant_id')) {
-            $row['tenant_id'] = $tenantId;
-        }
-
         $existing = DB::table($table)->where('id', $id)->first();
+        $row = $this->mapRowColumns($table, $id, $docPath, $decoded, $payload, $existing, $now);
+
         if ($existing) {
             DB::table($table)->where('id', $id)->update($row);
         } else {

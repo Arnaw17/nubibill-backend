@@ -14,6 +14,43 @@ use Illuminate\Validation\ValidationException;
 
 class ProductController extends Controller
 {
+    public static function extractInt($val, int $default = 0): int
+    {
+        if ($val === null) return $default;
+        if (is_int($val)) return $val;
+        if (is_numeric($val)) return (int) $val;
+        if (is_array($val)) {
+            if (isset($val['integerValue'])) return (int) $val['integerValue'];
+            if (isset($val['doubleValue'])) return (int) round((float) $val['doubleValue']);
+            if (isset($val['stringValue'])) return (int) $val['stringValue'];
+        }
+        return $default;
+    }
+
+    public static function extractFloat($val, float $default = 0.0): float
+    {
+        if ($val === null) return $default;
+        if (is_float($val) || is_int($val)) return (float) $val;
+        if (is_numeric($val)) return (float) $val;
+        if (is_array($val)) {
+            if (isset($val['doubleValue'])) return (float) $val['doubleValue'];
+            if (isset($val['integerValue'])) return (float) $val['integerValue'];
+            if (isset($val['stringValue'])) return (float) $val['stringValue'];
+        }
+        return $default;
+    }
+
+    public static function extractString($val, string $default = ''): string
+    {
+        if ($val === null) return $default;
+        if (is_string($val)) return $val;
+        if (is_array($val)) {
+            if (isset($val['stringValue'])) return (string) $val['stringValue'];
+            if (isset($val['integerValue'])) return (string) $val['integerValue'];
+        }
+        return (string) $val;
+    }
+
     /**
      * List product IDs that have ever been placed at an outlet.
      */
@@ -139,9 +176,9 @@ class ProductController extends Controller
 
             $vId = (string) ($vFields['variantId'] ?? $vRow->id);
 
-            $vSellingPrice = (int) ($vFields['sellingPrice'] ?? 0);
-            $vPurchaseRate = (int) ($vFields['purchaseRate'] ?? 0);
-            $vMrp = (int) ($vFields['mrp'] ?? 0);
+            $vSellingPrice = self::extractInt($vFields['sellingPrice'] ?? null, 0);
+            $vPurchaseRate = self::extractInt($vFields['purchaseRate'] ?? null, 0);
+            $vMrp = self::extractInt($vFields['mrp'] ?? null, 0);
 
             if ($vSellingPrice === 0 || $vPurchaseRate === 0) {
                 $latestPbItem = DB::table('purchase_bill_items')
@@ -156,13 +193,13 @@ class ProductController extends Controller
                     $pbiPayload = json_decode($latestPbItem->payload, true) ?: [];
                     $pbiFields = $pbiPayload['fields'] ?? [];
                     if ($vSellingPrice === 0 && ! empty($pbiFields['sellingPrice'])) {
-                        $vSellingPrice = (int) $pbiFields['sellingPrice'];
+                        $vSellingPrice = self::extractInt($pbiFields['sellingPrice']);
                     }
                     if ($vMrp === 0 && ! empty($pbiFields['mrp'])) {
-                        $vMrp = (int) $pbiFields['mrp'];
+                        $vMrp = self::extractInt($pbiFields['mrp']);
                     }
                     if ($vPurchaseRate === 0 && ! empty($pbiFields['rate'])) {
-                        $vPurchaseRate = (int) $pbiFields['rate'];
+                        $vPurchaseRate = self::extractInt($pbiFields['rate']);
                     }
                 }
             }
@@ -181,12 +218,12 @@ class ProductController extends Controller
                 'packUnitId' => $vFields['packUnitId'] ?? null,
                 'commercialUnitId' => $vFields['commercialUnitId'] ?? null,
                 'commercialUnitName' => $vFields['commercialUnitName'] ?? null,
-                'baseQuantityPerCommercialUnit' => (float) ($vFields['baseQuantityPerCommercialUnit'] ?? 1),
+                'baseQuantityPerCommercialUnit' => self::extractFloat($vFields['baseQuantityPerCommercialUnit'] ?? null, 1.0),
                 'packSize' => $vFields['packSize'] ?? ($vFields['attributeValues']['packSize'] ?? null),
                 'purchaseRate' => $vPurchaseRate,
                 'sellingPrice' => $vSellingPrice,
                 'mrp' => $vMrp,
-                'defaultGstRateBps' => (int) ($vFields['defaultGstRateBps'] ?? $vFields['defaultGstRate'] ?? 0),
+                'defaultGstRateBps' => self::extractInt($vFields['defaultGstRateBps'] ?? $vFields['defaultGstRate'] ?? null, 0),
                 'rackId' => $vFields['rackId'] ?? $vFields['rack'] ?? ($vFields['attributeValues']['rack'] ?? null),
                 'status' => (string) ($vFields['status'] ?? 'ACTIVE'),
                 'isActive' => (($vFields['status'] ?? 'ACTIVE') === 'ACTIVE'),
@@ -381,9 +418,9 @@ class ProductController extends Controller
                     $vCommUnitName = $vAttrs['soldAs'] ?? ($vAttrs['commercialUnit'] ?? $parentSoldAs);
                 }
 
-                $vSellingPrice = (int) ($vFields['sellingPrice'] ?? 0);
-                $vPurchaseRate = (int) ($vFields['purchaseRate'] ?? 0);
-                $vMrp = (int) ($vFields['mrp'] ?? 0);
+                $vSellingPrice = self::extractInt($vFields['sellingPrice'] ?? null, 0);
+                $vPurchaseRate = self::extractInt($vFields['purchaseRate'] ?? null, 0);
+                $vMrp = self::extractInt($vFields['mrp'] ?? null, 0);
                 $singleVid = (string) ($vFields['variantId'] ?? $vRow->id);
 
                 if ($vSellingPrice === 0 || $vPurchaseRate === 0) {
@@ -399,13 +436,13 @@ class ProductController extends Controller
                         $pbiPayload = json_decode($latestPbItem->payload, true) ?: [];
                         $pbiFields = $pbiPayload['fields'] ?? [];
                         if ($vSellingPrice === 0 && ! empty($pbiFields['sellingPrice'])) {
-                            $vSellingPrice = (int) $pbiFields['sellingPrice'];
+                            $vSellingPrice = self::extractInt($pbiFields['sellingPrice']);
                         }
                         if ($vMrp === 0 && ! empty($pbiFields['mrp'])) {
-                            $vMrp = (int) $pbiFields['mrp'];
+                            $vMrp = self::extractInt($pbiFields['mrp']);
                         }
                         if ($vPurchaseRate === 0 && ! empty($pbiFields['rate'])) {
-                            $vPurchaseRate = (int) $pbiFields['rate'];
+                            $vPurchaseRate = self::extractInt($pbiFields['rate']);
                         }
                     }
                 }
@@ -426,12 +463,12 @@ class ProductController extends Controller
                     'packUnitId' => $vFields['packUnitId'] ?? null,
                     'commercialUnitId' => $vFields['commercialUnitId'] ?? null,
                     'commercialUnitName' => $vCommUnitName,
-                    'baseQuantityPerCommercialUnit' => (float) ($vFields['baseQuantityPerCommercialUnit'] ?? 1),
+                    'baseQuantityPerCommercialUnit' => self::extractFloat($vFields['baseQuantityPerCommercialUnit'] ?? null, 1.0),
                     'packSize' => $vFields['packSize'] ?? ($vAttrs['packSize'] ?? null),
                     'purchaseRate' => $vPurchaseRate,
                     'sellingPrice' => $vSellingPrice,
                     'mrp' => $vMrp,
-                    'defaultGstRateBps' => (int) ($vFields['defaultGstRateBps'] ?? $fields['defaultGstRateBps'] ?? 0),
+                    'defaultGstRateBps' => self::extractInt($vFields['defaultGstRateBps'] ?? $fields['defaultGstRateBps'] ?? null, 0),
                     'status' => (string) ($vFields['status'] ?? 'ACTIVE'),
                     'isActive' => (($vFields['status'] ?? 'ACTIVE') === 'ACTIVE'),
                     'quantitySlabs' => $vFields['quantitySlabs'] ?? $vFields['quantity_slabs'] ?? ($fields['quantitySlabs'] ?? $fields['quantity_slabs'] ?? []),
@@ -1223,9 +1260,9 @@ class ProductController extends Controller
 
             $vUnit = (string) ($vFields['baseUnitId'] ?? $vFields['unitId'] ?? $fields['baseUnitId'] ?? 'UNIT');
             $vCommUnitName = $vFields['commercialUnitName'] ?? null;
-            $vSellingPrice = (int) ($vFields['sellingPrice'] ?? $vFields['selling_price'] ?? 0);
-            $vMrp = (int) ($vFields['mrp'] ?? 0);
-            $vPurchaseRate = (int) ($vFields['purchaseRate'] ?? $vFields['purchase_rate'] ?? 0);
+            $vSellingPrice = self::extractInt($vFields['sellingPrice'] ?? $vFields['selling_price'] ?? null, 0);
+            $vMrp = self::extractInt($vFields['mrp'] ?? null, 0);
+            $vPurchaseRate = self::extractInt($vFields['purchaseRate'] ?? $vFields['purchase_rate'] ?? null, 0);
 
             $assembledVariants[] = [
                 'id' => $vRow->id,
@@ -1246,12 +1283,12 @@ class ProductController extends Controller
                 'packUnitId' => $vFields['packUnitId'] ?? null,
                 'commercialUnitId' => $vFields['commercialUnitId'] ?? null,
                 'commercialUnitName' => $vCommUnitName,
-                'baseQuantityPerCommercialUnit' => (float) ($vFields['baseQuantityPerCommercialUnit'] ?? 1),
+                'baseQuantityPerCommercialUnit' => self::extractFloat($vFields['baseQuantityPerCommercialUnit'] ?? null, 1.0),
                 'packSize' => $vFields['packSize'] ?? ($vAttrsMap['packSize'] ?? null),
                 'purchaseRate' => $vPurchaseRate,
                 'sellingPrice' => $vSellingPrice,
                 'mrp' => $vMrp,
-                'defaultGstRateBps' => (int) ($vFields['defaultGstRateBps'] ?? $fields['defaultGstRateBps'] ?? 0),
+                'defaultGstRateBps' => self::extractInt($vFields['defaultGstRateBps'] ?? $fields['defaultGstRateBps'] ?? null, 0),
                 'status' => (string) ($vFields['status'] ?? 'ACTIVE'),
                 'isActive' => (($vFields['status'] ?? 'ACTIVE') === 'ACTIVE'),
                 'quantitySlabs' => $vFields['quantitySlabs'] ?? $vFields['quantity_slabs'] ?? ($fields['quantitySlabs'] ?? []),

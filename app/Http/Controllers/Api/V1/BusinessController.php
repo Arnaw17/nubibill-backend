@@ -316,6 +316,34 @@ class BusinessController extends Controller
             $statusVal = strtolower((string) ($f['status'] ?? $row->status ?? 'active'));
             $isActive = $f['isActive'] ?? ($statusVal === 'active');
             if ($isActive) {
+                $enabledCategories = $f['enabledCategories'] ?? ($p['fields']['enabledCategories'] ?? null);
+                if (is_string($enabledCategories)) {
+                    $decoded = json_decode($enabledCategories, true);
+                    if (is_array($decoded)) {
+                        $enabledCategories = $decoded;
+                    }
+                }
+                $extractedCategories = [];
+                $flattenCategories = function ($val) use (&$flattenCategories, &$extractedCategories) {
+                    if (is_array($val)) {
+                        if (isset($val['arrayValue']['values'])) {
+                            $flattenCategories($val['arrayValue']['values']);
+                        } elseif (isset($val['values'])) {
+                            $flattenCategories($val['values']);
+                        } elseif (isset($val['stringValue'])) {
+                            $extractedCategories[] = (string) $val['stringValue'];
+                        } else {
+                            foreach ($val as $sub) {
+                                $flattenCategories($sub);
+                            }
+                        }
+                    } elseif (is_string($val) && trim($val) !== '') {
+                        $extractedCategories[] = trim($val);
+                    }
+                };
+                $flattenCategories($enabledCategories);
+                $finalCategories = array_values(array_unique($extractedCategories));
+
                 $outlets[] = [
                     'outletId' => $outletId,
                     'businessId' => $businessId,
@@ -328,6 +356,7 @@ class BusinessController extends Controller
                     'contactNumber' => $f['contactNumber'] ?? null,
                     'isMainOutlet' => (bool) ($f['isMainOutlet'] ?? false),
                     'enableGST' => (bool) ($f['enableGST'] ?? false),
+                    'enabledCategories' => $finalCategories,
                     'isActive' => true,
                     'status' => 'active',
                 ];
@@ -476,6 +505,71 @@ class BusinessController extends Controller
         return ApiResponse::success([
             'outlet' => $outletFields,
         ], 'Outlet created successfully.', 201);
+    }
+
+    /**
+     * Update an existing outlet.
+     */
+    public function updateOutlet(Request $request, string $id, string $outletId): JsonResponse
+    {
+        $user = $request->user();
+        $businessId = $id;
+
+        $outletRow = DB::table('outlets')
+            ->where('id', $outletId)
+            ->where('business_id', $businessId)
+            ->where('is_deleted', 0)
+            ->first();
+
+        if (! $outletRow) {
+            return ApiResponse::error('Outlet not found.', 404);
+        }
+
+        $payload = json_decode($outletRow->payload ?? '', true) ?: [];
+        $fields = $payload['fields'] ?? [];
+
+        if ($request->has('enabledCategories') || $request->has('enabled_categories')) {
+            $raw = $request->input('enabledCategories') ?? $request->input('enabled_categories');
+            $cats = [];
+            if (is_array($raw)) {
+                $cats = array_values(array_filter(array_map('strval', $raw)));
+            } elseif (is_string($raw)) {
+                $decoded = json_decode($raw, true);
+                $cats = is_array($decoded) ? array_values(array_filter(array_map('strval', $decoded))) : array_values(array_filter(array_map('trim', explode(',', $raw))));
+            }
+            $fields['enabledCategories'] = $cats;
+        }
+
+        if ($request->has('outlet_name') || $request->has('outletName')) {
+            $fields['outletName'] = trim((string) ($request->input('outlet_name') ?? $request->input('outletName')));
+        }
+        if ($request->has('address')) {
+            $fields['address'] = trim((string) $request->input('address'));
+        }
+        if ($request->has('contact_number') || $request->has('contactNumber')) {
+            $fields['contactNumber'] = trim((string) ($request->input('contact_number') ?? $request->input('contactNumber')));
+        }
+        if ($request->has('gstin')) {
+            $fields['gstin'] = strtoupper(trim((string) $request->input('gstin')));
+        }
+
+        $nowIso = now()->toISOString();
+        $fields['updatedAt'] = $nowIso;
+        $fields['outletId'] = $outletId;
+        $payload['fields'] = $fields;
+
+        DB::table('outlets')
+            ->where('id', $outletId)
+            ->update([
+                'payload' => json_encode($payload),
+                'updated_at' => now(),
+            ]);
+
+        Log::info("Outlet updated: {$outletId} for Business {$businessId} by User {$user->id}");
+
+        return ApiResponse::success([
+            'outlet' => $fields,
+        ], 'Outlet updated successfully.');
     }
 
     /**

@@ -82,6 +82,7 @@ Route::prefix('v1')->group(function () {
         Route::get('/businesses/{id}/outlets', [BusinessController::class, 'outlets']);
         Route::post('/businesses/{id}/outlets', [BusinessController::class, 'storeOutlet'])
             ->middleware('permission:outlet.create,businesses');
+        Route::put('/businesses/{id}/outlets/{outletId}', [BusinessController::class, 'updateOutlet']);
         Route::get('/businesses/{id}/settings', [BusinessController::class, 'settings'])
             ->middleware('permission:settings.view,settings');
         Route::put('/businesses/{id}/settings', [BusinessController::class, 'saveSettings'])
