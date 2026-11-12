@@ -6,24 +6,29 @@ use App\Http\Controllers\Api\V1\AttendanceController;
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\BusinessController;
 use App\Http\Controllers\Api\V1\BusinessTypeController;
+use App\Http\Controllers\Api\V1\CategoryConfigurationController;
 use App\Http\Controllers\Api\V1\CustomerController;
 use App\Http\Controllers\Api\V1\DashboardController;
 use App\Http\Controllers\Api\V1\EmployeeActivityController;
 use App\Http\Controllers\Api\V1\EmployeeController;
 use App\Http\Controllers\Api\V1\EmployeeOutletAllocationController;
 use App\Http\Controllers\Api\V1\ExpenseController;
+use App\Http\Controllers\Api\V1\FcmTokenController;
 use App\Http\Controllers\Api\V1\FinancialTransactionController;
 use App\Http\Controllers\Api\V1\HistoricalDataController;
 use App\Http\Controllers\Api\V1\InventoryController;
 use App\Http\Controllers\Api\V1\InvoiceController;
+use App\Http\Controllers\Api\V1\OtaUpdateController;
 use App\Http\Controllers\Api\V1\PayrollController;
 use App\Http\Controllers\Api\V1\ProductController;
 use App\Http\Controllers\Api\V1\PurchaseController;
+use App\Http\Controllers\Api\V1\QuotationController;
 use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\ReturnController;
 use App\Http\Controllers\Api\V1\ReturnReasonController;
 use App\Http\Controllers\Api\V1\StorageController;
 use App\Http\Controllers\Api\V1\SuperUserController;
+use App\Http\Controllers\Api\V1\SuperUserReleaseController;
 use App\Http\Controllers\Api\V1\SupplierController;
 use App\Http\Controllers\Api\V1\SupplierRefundController;
 use App\Http\Controllers\Api\V1\SyncController;
@@ -34,11 +39,40 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('v1')->group(function () {
     // Public Application Configuration & Metadata Routes
     Route::get('/app-config', [AppConfigController::class, 'show']);
+
+    // Public OTA Update Check, Release Catalog & Package Download Routes
+    Route::prefix('updates')->group(function () {
+        Route::get('/check', [OtaUpdateController::class, 'check']);
+        Route::get('/releases', [OtaUpdateController::class, 'releases']);
+        Route::get('/download/{release}', [OtaUpdateController::class, 'download'])
+            ->name('api.v1.updates.download');
+    });
     Route::get('/business-types', [BusinessTypeController::class, 'types']);
     Route::get('/business-sub-types', [BusinessTypeController::class, 'subTypes']);
     Route::get('/product-masters', [ProductController::class, 'masters']);
     Route::post('/product-masters', [ProductController::class, 'storeMaster'])
         ->middleware(['auth:sanctum', 'active', 'permission:product.create,products.create']);
+
+    // Dynamic Category Attributes & Measurement Units Configuration (Gravels & Construction Accessories)
+    Route::middleware(['auth:sanctum', 'active'])->prefix('category-config')->group(function () {
+        Route::get('/', [CategoryConfigurationController::class, 'index']);
+        Route::get('/units', [CategoryConfigurationController::class, 'listUnits']);
+
+        Route::middleware('permission:settings.edit,settings,product.create,products.create,product.update,products.update')->group(function () {
+            Route::post('/gravels/options', [CategoryConfigurationController::class, 'storeGravelOption']);
+            Route::put('/gravels/options/{id}', [CategoryConfigurationController::class, 'updateGravelOption']);
+            Route::delete('/gravels/options/{id}', [CategoryConfigurationController::class, 'destroyGravelOption']);
+
+            Route::post('/accessories/fields', [CategoryConfigurationController::class, 'storeAccessoryField']);
+            Route::put('/accessories/fields/{id}', [CategoryConfigurationController::class, 'updateAccessoryField']);
+            Route::delete('/accessories/fields/{id}', [CategoryConfigurationController::class, 'destroyAccessoryField']);
+            Route::post('/accessories/fields/reorder', [CategoryConfigurationController::class, 'reorderAccessoryFields']);
+
+            Route::post('/units', [CategoryConfigurationController::class, 'storeUnit']);
+            Route::put('/units/{id}', [CategoryConfigurationController::class, 'updateUnit']);
+            Route::delete('/units/{id}', [CategoryConfigurationController::class, 'destroyUnit']);
+        });
+    });
     Route::get('/products/central/search', [ProductController::class, 'searchCentral']);
 
     // SQLite Outbox / Document Synchronization to Central MySQL
@@ -75,6 +109,10 @@ Route::prefix('v1')->group(function () {
         Route::post('/telemetry/screen', [TelemetryController::class, 'recordScreen']);
         Route::post('/telemetry/logout', [TelemetryController::class, 'logout']);
 
+        // Firebase Cloud Messaging (FCM) Device Token Registration
+        Route::post('/fcm/token', [FcmTokenController::class, 'store']);
+        Route::delete('/fcm/token', [FcmTokenController::class, 'destroy']);
+
         Route::get('/businesses', [BusinessController::class, 'index']);
         Route::post('/businesses', [BusinessController::class, 'store'])
             ->middleware('permission:businesses.create,businesses');
@@ -86,6 +124,16 @@ Route::prefix('v1')->group(function () {
         Route::get('/businesses/{id}/settings', [BusinessController::class, 'settings'])
             ->middleware('permission:settings.view,settings');
         Route::put('/businesses/{id}/settings', [BusinessController::class, 'saveSettings'])
+            ->middleware('permission:settings.edit,settings');
+        Route::post('/businesses/{id}/logo', [BusinessController::class, 'uploadLogo'])
+            ->middleware('permission:settings.edit,settings');
+        Route::delete('/businesses/{id}/logo', [BusinessController::class, 'deleteLogo'])
+            ->middleware('permission:settings.edit,settings');
+        Route::post('/businesses/{id}/signature', [BusinessController::class, 'uploadSignature'])
+            ->middleware('permission:settings.edit,settings');
+        Route::put('/businesses/{id}/signature/settings', [BusinessController::class, 'saveSignatureSettings'])
+            ->middleware('permission:settings.edit,settings');
+        Route::delete('/businesses/{id}/signature', [BusinessController::class, 'deleteSignature'])
             ->middleware('permission:settings.edit,settings');
 
         // Product Catalog & Master Data Routes
@@ -174,6 +222,20 @@ Route::prefix('v1')->group(function () {
         Route::patch('/invoices/{id}/due-date', [InvoiceController::class, 'updateDueDate'])
             ->middleware('permission:sales.update,sales.edit,sales');
 
+        // Quotations / Estimates Routes
+        Route::get('/quotations', [QuotationController::class, 'index'])
+            ->middleware('permission:sales.read,sales.view,sales,billing');
+        Route::post('/quotations', [QuotationController::class, 'store'])
+            ->middleware('permission:sales.create,sales,billing');
+        Route::get('/quotations/{id}', [QuotationController::class, 'show'])
+            ->middleware('permission:sales.read,sales.view,sales,billing');
+        Route::put('/quotations/{id}', [QuotationController::class, 'update'])
+            ->middleware('permission:sales.create,sales.update,sales.edit,sales,billing');
+        Route::post('/quotations/{id}/finalize', [QuotationController::class, 'finalize'])
+            ->middleware('permission:sales.create,sales,billing');
+        Route::post('/quotations/{id}/cancel', [QuotationController::class, 'cancel'])
+            ->middleware('permission:sales.delete,sales.cancel,sales,billing');
+
         // Storage Management (Godowns, Racks, Shelves) Routes
         Route::get('/storage/locations', [StorageController::class, 'index'])
             ->middleware('permission:godown.read,godown.view,storage,rack.read');
@@ -193,6 +255,8 @@ Route::prefix('v1')->group(function () {
         // Inventory, Stock Balances & Batch Movement Routes
         Route::get('/inventory/stock', [InventoryController::class, 'stock'])
             ->middleware('permission:inventory.read,inventory.view,inventory,products,billing');
+        Route::post('/inventory/reconcile-cft', [InventoryController::class, 'reconcileCft'])
+            ->middleware('permission:inventory.adjust,inventory.update,inventory.read,inventory');
         Route::post('/inventory/movements', [InventoryController::class, 'recordMovement'])
             ->middleware('permission:inventory.adjust,inventory.transfer,stock_movement.create,inventory.opening_stock');
         Route::get('/inventory/movements', [InventoryController::class, 'movements'])
@@ -368,6 +432,15 @@ Route::prefix('v1')->group(function () {
             Route::post('/feature-flags', [SuperUserController::class, 'saveFeature']);
             Route::post('/sessions/{sessionId}/terminate', [SuperUserController::class, 'terminateSession']);
             Route::get('/owners', [SuperUserController::class, 'owners']);
+            Route::post('/notifications/send', [SuperUserController::class, 'sendNotification']);
+
+            // OTA Release Management
+            Route::get('/releases', [SuperUserReleaseController::class, 'index']);
+            Route::post('/releases', [SuperUserReleaseController::class, 'store']);
+            Route::post('/releases/{release}/toggle-mandatory', [SuperUserReleaseController::class, 'toggleMandatory']);
+            Route::post('/releases/{release}/toggle-active', [SuperUserReleaseController::class, 'toggleActive']);
+            Route::post('/releases/{release}/recall', [SuperUserReleaseController::class, 'recall']);
+            Route::delete('/releases/{release}', [SuperUserReleaseController::class, 'destroy']);
         });
 
     // Reports & Statutory Analytics Routes (Direct & Authenticated reporting)
@@ -396,6 +469,8 @@ Route::prefix('v1')->group(function () {
         ->name('api.v1.users.photo');
     Route::get('/businesses/{id}/logo', [BusinessController::class, 'logo'])
         ->name('api.v1.businesses.logo');
+    Route::get('/businesses/{id}/signature', [BusinessController::class, 'signature'])
+        ->name('api.v1.businesses.signature');
 
     // Admin Routes
     Route::middleware(['auth:sanctum', 'active', 'admin'])->prefix('admin')->group(function () {

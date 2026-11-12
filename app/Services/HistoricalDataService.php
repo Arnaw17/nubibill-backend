@@ -4,7 +4,6 @@ namespace App\Services;
 
 use App\Models\HistoricalStockAdjustment;
 use App\Models\MigrationBatch;
-use App\Models\MigrationError;
 use App\Models\MigrationLog;
 use App\Models\User;
 use Carbon\Carbon;
@@ -43,13 +42,13 @@ class HistoricalDataService
         // Auto-link or register customer if name is provided but customerId was omitted
         if (empty($customerId) && ! empty($customerName) && $customerName !== 'Walk-in Customer') {
             $custQuery = DB::table('customers')->where('business_id', $businessId);
-            if (\Illuminate\Support\Facades\Schema::hasColumn('customers', 'is_deleted')) {
+            if (Schema::hasColumn('customers', 'is_deleted')) {
                 $custQuery->where('is_deleted', 0);
             }
             $foundCust = null;
             if (! empty($customerPhone)) {
                 $foundCust = (clone $custQuery)->where(function ($q) use ($customerPhone) {
-                    if (\Illuminate\Support\Facades\Schema::hasColumn('customers', 'phone')) {
+                    if (Schema::hasColumn('customers', 'phone')) {
                         $q->where('phone', $customerPhone);
                     }
                     $q->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.phone')) = ?", [$customerPhone]);
@@ -57,7 +56,7 @@ class HistoricalDataService
             }
             if (! $foundCust) {
                 $foundCust = (clone $custQuery)->where(function ($q) use ($customerName) {
-                    if (\Illuminate\Support\Facades\Schema::hasColumn('customers', 'name')) {
+                    if (Schema::hasColumn('customers', 'name')) {
                         $q->where('name', $customerName);
                     }
                     $q->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.name')) = ?", [$customerName]);
@@ -146,6 +145,29 @@ class HistoricalDataService
             $grossPaise = (int) round($qty * $unitPricePaise);
             $discountPaise = min($discountPaise, $grossPaise);
             $netPaise = $grossPaise - $discountPaise;
+
+            $catalogPid = $item['product_id'] ?? '';
+            $catalogVid = $item['variant_id'] ?? '';
+            if (! empty($catalogPid) && ! str_starts_with((string) $catalogPid, 'SYS_PROD_HIST_')) {
+                $catVRow = ! empty($catalogVid)
+                    ? DB::table('product_variants')->where('id', $catalogVid)->where('business_id', $businessId)->first()
+                    : null;
+                $catPRow = DB::table('products')->where('id', $catalogPid)->where('business_id', $businessId)->first();
+                $catVFields = $catVRow ? ((json_decode($catVRow->payload ?? '{}', true) ?: [])['fields'] ?? []) : [];
+                $catPFields = $catPRow ? ((json_decode($catPRow->payload ?? '{}', true) ?: [])['fields'] ?? []) : [];
+                $singleCostPaise = (int) ($catVFields['purchasePricePerUnit'] ?? $catVFields['purchaseRate'] ?? ($catVRow->purchase_rate ?? 0));
+                if ($singleCostPaise <= 0) {
+                    $singleCostPaise = (int) ($catPFields['purchasePricePerUnit'] ?? $catPFields['purchaseRate'] ?? 0);
+                }
+                if ($singleCostPaise > 0) {
+                    $minTotal = (int) round($qty * $singleCostPaise);
+                    if ($netPaise < $minTotal) {
+                        $prodLabel = (string) ($item['product_name'] ?? $item['name'] ?? 'Product');
+                        $minRupees = number_format($singleCostPaise / 100, 2, '.', '');
+                        throw new InvalidArgumentException("Selling price cannot be lower than the purchase price. Minimum permissible selling price for '{$prodLabel}' is ₹{$minRupees}.");
+                    }
+                }
+            }
 
             $gstRateBps = (int) ($item['gst_percentage'] ?? $item['gst_rate_bps'] ?? 18);
             if ($gstRateBps < 100) {
@@ -386,7 +408,9 @@ class HistoricalDataService
                 usort($availBatches, fn ($a, $b) => strcmp($a['purchaseDate'], $b['purchaseDate']));
 
                 foreach ($availBatches as $batchItem) {
-                    if ($qtyToDeduct <= 0) break;
+                    if ($qtyToDeduct <= 0) {
+                        break;
+                    }
                     $batchRow = $batchItem['row'];
                     $bFields = $batchItem['fields'];
                     $batchAvail = $batchItem['available'];
@@ -431,12 +455,24 @@ class HistoricalDataService
                             'quantityAfter' => $newAvail,
                         ]]),
                     ];
-                    if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) $ibmSaleData['batch_id'] = $batchRow->id;
-                    if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) $ibmSaleData['reference_type'] = 'historical_invoice';
-                    if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) $ibmSaleData['reference_id'] = $invoiceId;
-                    if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) $ibmSaleData['movement_type'] = 'SALE_OUTWARD';
-                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) $ibmSaleData['quantity_changed'] = -$deduct;
-                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) $ibmSaleData['quantity_after'] = $newAvail;
+                    if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) {
+                        $ibmSaleData['batch_id'] = $batchRow->id;
+                    }
+                    if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) {
+                        $ibmSaleData['reference_type'] = 'historical_invoice';
+                    }
+                    if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) {
+                        $ibmSaleData['reference_id'] = $invoiceId;
+                    }
+                    if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) {
+                        $ibmSaleData['movement_type'] = 'SALE_OUTWARD';
+                    }
+                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) {
+                        $ibmSaleData['quantity_changed'] = -$deduct;
+                    }
+                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) {
+                        $ibmSaleData['quantity_after'] = $newAvail;
+                    }
 
                     DB::table('inventory_batch_movements')->insert($ibmSaleData);
                     $qtyToDeduct -= $deduct;
@@ -596,10 +632,10 @@ class HistoricalDataService
                         ->where('business_id', $businessId)
                         ->where('outlet_id', $outletId)
                         ->where(function ($q) use ($vId, $pId) {
-                            if (!empty($vId)) {
+                            if (! empty($vId)) {
                                 $q->where('id', 'LIKE', "%_{$vId}")
                                     ->orWhere('payload->fields->variantId', $vId);
-                            } elseif (!empty($pId)) {
+                            } elseif (! empty($pId)) {
                                 $q->where('payload->fields->productId', $pId);
                             }
                         })
@@ -976,10 +1012,10 @@ class HistoricalDataService
                 ]);
 
                 // Create Inventory Batch for historical purchase line
-                $batchNumber = !empty($item['batch_number']) ? trim((string) $item['batch_number']) : ('AUTO-BATCH-'.strtoupper(Str::random(8)));
+                $batchNumber = ! empty($item['batch_number']) ? trim((string) $item['batch_number']) : ('AUTO-BATCH-'.strtoupper(Str::random(8)));
                 $autoBatchId = 'BATCH-'.strtoupper(Str::random(24));
-                $batchMfgDate = !empty($item['manufacturing_date']) ? Carbon::parse($item['manufacturing_date'])->toDateString() : null;
-                $batchExpiryDate = !empty($item['expiry_date']) ? Carbon::parse($item['expiry_date'])->toDateString() : null;
+                $batchMfgDate = ! empty($item['manufacturing_date']) ? Carbon::parse($item['manufacturing_date'])->toDateString() : null;
+                $batchExpiryDate = ! empty($item['expiry_date']) ? Carbon::parse($item['expiry_date'])->toDateString() : null;
 
                 $batchRowData = [
                     'id' => $autoBatchId,
@@ -1009,16 +1045,36 @@ class HistoricalDataService
                         'status' => 'ACTIVE',
                     ]]),
                 ];
-                if (Schema::hasColumn('inventory_batches', 'variant_id')) $batchRowData['variant_id'] = $item['variantId'];
-                if (Schema::hasColumn('inventory_batches', 'batch_number')) $batchRowData['batch_number'] = $batchNumber;
-                if (Schema::hasColumn('inventory_batches', 'mfg_date')) $batchRowData['mfg_date'] = $batchMfgDate;
-                if (Schema::hasColumn('inventory_batches', 'expiry_date')) $batchRowData['expiry_date'] = $batchExpiryDate;
-                if (Schema::hasColumn('inventory_batches', 'purchase_rate')) $batchRowData['purchase_rate'] = $item['rate'] >= 1000 ? ($item['rate'] / 100.0) : $item['rate'];
-                if (Schema::hasColumn('inventory_batches', 'quantity_initial')) $batchRowData['quantity_initial'] = $lineQtyUnits;
-                if (Schema::hasColumn('inventory_batches', 'quantity_available')) $batchRowData['quantity_available'] = $lineQtyUnits;
-                if (Schema::hasColumn('inventory_batches', 'is_historical')) $batchRowData['is_historical'] = 1;
-                if (Schema::hasColumn('inventory_batches', 'purchase_bill_id')) $batchRowData['purchase_bill_id'] = $purchaseBillId;
-                if (Schema::hasColumn('inventory_batches', 'purchase_date')) $batchRowData['purchase_date'] = $invoiceDate;
+                if (Schema::hasColumn('inventory_batches', 'variant_id')) {
+                    $batchRowData['variant_id'] = $item['variantId'];
+                }
+                if (Schema::hasColumn('inventory_batches', 'batch_number')) {
+                    $batchRowData['batch_number'] = $batchNumber;
+                }
+                if (Schema::hasColumn('inventory_batches', 'mfg_date')) {
+                    $batchRowData['mfg_date'] = $batchMfgDate;
+                }
+                if (Schema::hasColumn('inventory_batches', 'expiry_date')) {
+                    $batchRowData['expiry_date'] = $batchExpiryDate;
+                }
+                if (Schema::hasColumn('inventory_batches', 'purchase_rate')) {
+                    $batchRowData['purchase_rate'] = $item['rate'] >= 1000 ? ($item['rate'] / 100.0) : $item['rate'];
+                }
+                if (Schema::hasColumn('inventory_batches', 'quantity_initial')) {
+                    $batchRowData['quantity_initial'] = $lineQtyUnits;
+                }
+                if (Schema::hasColumn('inventory_batches', 'quantity_available')) {
+                    $batchRowData['quantity_available'] = $lineQtyUnits;
+                }
+                if (Schema::hasColumn('inventory_batches', 'is_historical')) {
+                    $batchRowData['is_historical'] = 1;
+                }
+                if (Schema::hasColumn('inventory_batches', 'purchase_bill_id')) {
+                    $batchRowData['purchase_bill_id'] = $purchaseBillId;
+                }
+                if (Schema::hasColumn('inventory_batches', 'purchase_date')) {
+                    $batchRowData['purchase_date'] = $invoiceDate;
+                }
 
                 DB::table('inventory_batches')->insert($batchRowData);
 
@@ -1043,12 +1099,24 @@ class HistoricalDataService
                         'quantityAfter' => $lineQtyUnits,
                     ]]),
                 ];
-                if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) $ibmRowData['batch_id'] = $autoBatchId;
-                if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) $ibmRowData['reference_type'] = 'historical_purchase_bill';
-                if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) $ibmRowData['reference_id'] = $purchaseBillId;
-                if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) $ibmRowData['movement_type'] = 'PURCHASE_INWARD';
-                if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) $ibmRowData['quantity_changed'] = $lineQtyUnits;
-                if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) $ibmRowData['quantity_after'] = $lineQtyUnits;
+                if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) {
+                    $ibmRowData['batch_id'] = $autoBatchId;
+                }
+                if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) {
+                    $ibmRowData['reference_type'] = 'historical_purchase_bill';
+                }
+                if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) {
+                    $ibmRowData['reference_id'] = $purchaseBillId;
+                }
+                if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) {
+                    $ibmRowData['movement_type'] = 'PURCHASE_INWARD';
+                }
+                if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) {
+                    $ibmRowData['quantity_changed'] = $lineQtyUnits;
+                }
+                if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) {
+                    $ibmRowData['quantity_after'] = $lineQtyUnits;
+                }
 
                 DB::table('inventory_batch_movements')->insert($ibmRowData);
             }
@@ -1197,10 +1265,10 @@ class HistoricalDataService
                             ->where('business_id', $businessId)
                             ->where('outlet_id', $outletId)
                             ->where(function ($q) use ($vId, $pId) {
-                                if (!empty($vId)) {
+                                if (! empty($vId)) {
                                     $q->where('id', 'LIKE', "%_{$vId}")
                                         ->orWhere('payload->fields->variantId', $vId);
-                                } elseif (!empty($pId)) {
+                                } elseif (! empty($pId)) {
                                     $q->where('payload->fields->productId', $pId);
                                 }
                             })
@@ -1246,7 +1314,7 @@ class HistoricalDataService
                                 'createdAt' => $nowStr,
                                 'updatedAt' => $nowStr,
                             ];
-                                                        $sbInsertData = [
+                            $sbInsertData = [
                                 'id' => "HIST_{$businessId}_{$outletId}_{$vId}",
                                 'business_id' => $businessId,
                                 'outlet_id' => $outletId,
@@ -1405,10 +1473,10 @@ class HistoricalDataService
                 ->where('business_id', $businessId)
                 ->where('outlet_id', $outletId)
                 ->where(function ($q) use ($stockBalId, $variantId, $productId) {
-                    if (!empty($variantId)) {
+                    if (! empty($variantId)) {
                         $q->where('id', $stockBalId)
                             ->orWhere('payload->fields->variantId', $variantId);
-                    } elseif (!empty($productId)) {
+                    } elseif (! empty($productId)) {
                         $q->where('payload->fields->productId', $productId);
                     }
                 })
@@ -1537,13 +1605,27 @@ class HistoricalDataService
                     'status' => 'ACTIVE',
                 ]]),
             ];
-            if (Schema::hasColumn('inventory_batches', 'variant_id')) $opBatchData['variant_id'] = $variantId;
-            if (Schema::hasColumn('inventory_batches', 'batch_number')) $opBatchData['batch_number'] = $batchNumber;
-            if (Schema::hasColumn('inventory_batches', 'purchase_rate')) $opBatchData['purchase_rate'] = $ratePaise >= 1000 ? ($ratePaise / 100.0) : $ratePaise;
-            if (Schema::hasColumn('inventory_batches', 'quantity_initial')) $opBatchData['quantity_initial'] = $quantity;
-            if (Schema::hasColumn('inventory_batches', 'quantity_available')) $opBatchData['quantity_available'] = $quantity;
-            if (Schema::hasColumn('inventory_batches', 'is_historical')) $opBatchData['is_historical'] = 1;
-            if (Schema::hasColumn('inventory_batches', 'purchase_date')) $opBatchData['purchase_date'] = $openingDate;
+            if (Schema::hasColumn('inventory_batches', 'variant_id')) {
+                $opBatchData['variant_id'] = $variantId;
+            }
+            if (Schema::hasColumn('inventory_batches', 'batch_number')) {
+                $opBatchData['batch_number'] = $batchNumber;
+            }
+            if (Schema::hasColumn('inventory_batches', 'purchase_rate')) {
+                $opBatchData['purchase_rate'] = $ratePaise >= 1000 ? ($ratePaise / 100.0) : $ratePaise;
+            }
+            if (Schema::hasColumn('inventory_batches', 'quantity_initial')) {
+                $opBatchData['quantity_initial'] = $quantity;
+            }
+            if (Schema::hasColumn('inventory_batches', 'quantity_available')) {
+                $opBatchData['quantity_available'] = $quantity;
+            }
+            if (Schema::hasColumn('inventory_batches', 'is_historical')) {
+                $opBatchData['is_historical'] = 1;
+            }
+            if (Schema::hasColumn('inventory_batches', 'purchase_date')) {
+                $opBatchData['purchase_date'] = $openingDate;
+            }
 
             DB::table('inventory_batches')->insert($opBatchData);
 
@@ -1568,12 +1650,24 @@ class HistoricalDataService
                     'quantityAfter' => $quantity,
                 ]]),
             ];
-            if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) $ibmOpData['batch_id'] = $autoBatchId;
-            if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) $ibmOpData['reference_type'] = 'opening_stock';
-            if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) $ibmOpData['reference_id'] = $stockBalId;
-            if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) $ibmOpData['movement_type'] = 'OPENING_INWARD';
-            if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) $ibmOpData['quantity_changed'] = $quantity;
-            if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) $ibmOpData['quantity_after'] = $quantity;
+            if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) {
+                $ibmOpData['batch_id'] = $autoBatchId;
+            }
+            if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) {
+                $ibmOpData['reference_type'] = 'opening_stock';
+            }
+            if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) {
+                $ibmOpData['reference_id'] = $stockBalId;
+            }
+            if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) {
+                $ibmOpData['movement_type'] = 'OPENING_INWARD';
+            }
+            if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) {
+                $ibmOpData['quantity_changed'] = $quantity;
+            }
+            if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) {
+                $ibmOpData['quantity_after'] = $quantity;
+            }
 
             DB::table('inventory_batch_movements')->insert($ibmOpData);
 
@@ -1851,7 +1945,7 @@ class HistoricalDataService
             ->min(DB::raw('COALESCE(original_transaction_date, DATE(created_at))'));
 
         $dates = array_filter([$firstPurchaseDate, $firstOpeningDate]);
-        $firstInwardDate = !empty($dates) ? min($dates) : null;
+        $firstInwardDate = ! empty($dates) ? min($dates) : null;
 
         // 2. Inward on or before target date
         $openingStockOnDate = (float) DB::table('stock_movements')
@@ -1883,7 +1977,7 @@ class HistoricalDataService
 
         // Sales Returns routed back to Old Inventory on or before target date
         $salesReturnsToOldOnDate = 0.0;
-        if (\Illuminate\Support\Facades\Schema::hasTable('returns') && \Illuminate\Support\Facades\Schema::hasTable('return_items')) {
+        if (Schema::hasTable('returns') && Schema::hasTable('return_items')) {
             $salesReturnsToOldOnDate = (float) DB::table('return_items')
                 ->join('returns', 'return_items.return_id', '=', 'returns.id')
                 ->where('returns.business_id', $businessId)
@@ -1914,7 +2008,7 @@ class HistoricalDataService
 
         // Purchase returns made on or before target date
         $purchaseReturnsOnDate = 0.0;
-        if (\Illuminate\Support\Facades\Schema::hasTable('returns') && \Illuminate\Support\Facades\Schema::hasTable('return_items')) {
+        if (Schema::hasTable('returns') && Schema::hasTable('return_items')) {
             $purchaseReturnsOnDate = (float) DB::table('return_items')
                 ->join('returns', 'return_items.return_id', '=', 'returns.id')
                 ->where('returns.business_id', $businessId)
@@ -1971,7 +2065,7 @@ class HistoricalDataService
             $status = $hasHistoricalInward ? 'EXHAUSTED' : 'UNTRACKED';
             $message = $hasHistoricalInward
                 ? "No historical stock available on or before {$targetDate}."
-                : "Product does not have tracked historical stock.";
+                : 'Product does not have tracked historical stock.';
         }
 
         return [

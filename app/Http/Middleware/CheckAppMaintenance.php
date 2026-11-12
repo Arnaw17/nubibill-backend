@@ -16,8 +16,9 @@ class CheckAppMaintenance
      */
     public function handle(Request $request, Closure $next): Response
     {
-        // 1. Allow public config check and admin routes
+        // 1. Allow public config check, OTA updates, and admin routes
         if ($request->is('api/v1/app-config') ||
+            $request->is('api/v1/updates/*') ||
             $request->is('api/v1/admin/*') ||
             $request->is('api/v1/superuser/*') ||
             $request->is('admin*') ||

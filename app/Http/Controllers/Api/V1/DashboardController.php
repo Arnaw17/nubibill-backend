@@ -283,27 +283,15 @@ class DashboardController extends Controller
             }
         }
 
-        // Fetch stock balances for this outlet if available
+        // Fetch normalized consolidated stock balances (in display units per product) for this outlet/business
+        $stockSvc = new \App\Services\InventoryStockService;
+        $snapshot = $stockSvc->getConsolidatedStockSnapshot(
+            (string) $businessId,
+            ($outletId && $outletId !== 'ALL') ? (string) $outletId : null
+        );
         $stockMap = [];
-        $balanceQuery = DB::table('stock_balances')
-            ->where('business_id', $businessId)
-            ->where('is_deleted', 0);
-        if ($outletId && $outletId !== 'ALL') {
-            $balanceQuery->where('outlet_id', $outletId);
-        }
-        foreach ($balanceQuery->get() as $bRow) {
-            $bPayload = json_decode($bRow->payload ?? '{}', true) ?: [];
-            $bFields = $bPayload['fields'] ?? [];
-            $vId = (string) ($bFields['variantId'] ?? '');
-            $pId = (string) ($bFields['productId'] ?? '');
-            $qty = (int) ($bFields['quantityOnHand'] ?? $bFields['currentStock'] ?? 0);
-            $stockQty = $qty >= 1000 ? (int) ($qty / 1000) : $qty;
-            if ($vId) {
-                $stockMap[$vId] = ($stockMap[$vId] ?? 0) + $stockQty;
-            }
-            if ($pId) {
-                $stockMap[$pId] = ($stockMap[$pId] ?? 0) + $stockQty;
-            }
+        foreach ($snapshot['parentStockUnitsMap'] as $pId => $units) {
+            $stockMap[(string) $pId] = round((float) $units, 3);
         }
 
         $prodQuery = DB::table('products')
@@ -343,7 +331,7 @@ class DashboardController extends Controller
 
             $prodName = (string) ($pFields['productName'] ?? $pFields['name'] ?? 'Product');
             $prodSku = (string) ($pFields['sku'] ?? '');
-            $prodUnit = (string) ($pFields['unit'] ?? 'PCS');
+            $prodUnit = (string) ($pFields['unitSymbol'] ?? $pFields['unit'] ?? (($pFields['baseUnitId'] ?? '') === 'SYS_UNIT_CFT' ? 'CFT' : 'PCS'));
 
             if ($currentStock <= 0) {
                 $outOfStockCount++;

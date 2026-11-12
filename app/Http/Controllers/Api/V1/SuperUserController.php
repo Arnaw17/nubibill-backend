@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
 use App\Models\User;
+use App\Services\FcmService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -402,5 +403,78 @@ class SuperUserController extends Controller
             'status' => 'TERMINATED',
             'terminated_at' => $now->toIso8601String(),
         ], "Session {$sessionId} has been forcefully terminated.");
+    }
+
+    /**
+     * Dispatch a push notification from the Super User control center to a user,
+     * business, device token, or FCM topic.
+     */
+    public function sendNotification(Request $request, FcmService $fcmService): JsonResponse
+    {
+        $validated = $request->validate([
+            'user_id' => 'nullable|string',
+            'business_id' => 'nullable|string',
+            'device_token' => 'nullable|string|max:512',
+            'topic' => 'nullable|string|max:128',
+            'title' => 'required|string|max:255',
+            'body' => 'required|string|max:1000',
+            'data' => 'nullable|array',
+        ]);
+
+        if (
+            empty($validated['user_id']) &&
+            empty($validated['business_id']) &&
+            empty($validated['device_token']) &&
+            empty($validated['topic'])
+        ) {
+            return ApiResponse::error(
+                'Provide user_id, business_id, device_token, or topic.',
+                422,
+                null,
+                'VALIDATION_ERROR'
+            );
+        }
+
+        try {
+            $data = $validated['data'] ?? [];
+            if (! empty($validated['device_token'])) {
+                $details = $fcmService->sendToTokens(
+                    [$validated['device_token']],
+                    $validated['title'],
+                    $validated['body'],
+                    $data
+                );
+            } elseif (! empty($validated['user_id'])) {
+                $details = $fcmService->sendToUser(
+                    $validated['user_id'],
+                    $validated['title'],
+                    $validated['body'],
+                    $data
+                );
+            } elseif (! empty($validated['business_id'])) {
+                $details = $fcmService->sendToBusiness(
+                    $validated['business_id'],
+                    $validated['title'],
+                    $validated['body'],
+                    $data
+                );
+            } else {
+                $details = $fcmService->sendToTopic(
+                    $validated['topic'],
+                    $validated['title'],
+                    $validated['body'],
+                    $data
+                );
+            }
+
+            return ApiResponse::success($details, 'Push notification processed.');
+        } catch (\Throwable $e) {
+            return ApiResponse::error(
+                'Failed to send push notification: '.$e->getMessage(),
+                500,
+                null,
+                'FCM_SEND_ERROR'
+            );
+        }
     }
 }

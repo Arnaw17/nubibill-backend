@@ -74,6 +74,11 @@ class User extends Authenticatable implements FilamentUser
         return $this->hasMany(UserDocument::class);
     }
 
+    public function deviceTokens(): HasMany
+    {
+        return $this->hasMany(UserDeviceToken::class);
+    }
+
     public function aadhaarDocument(): HasOne
     {
         return $this->hasOne(UserDocument::class)->where('type', 'AADHAAR');

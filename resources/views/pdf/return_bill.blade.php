@@ -116,14 +116,33 @@
     <div class="header-box">
         <table class="header-table">
             <tr>
-                <td style="width: 60%;">
-                    <div class="doc-title">{{ $return->type === 'sale_return' ? 'CREDIT NOTE' : 'DEBIT NOTE' }}</div>
-                    <div class="doc-subtitle">Issued under Section 34 of CGST Act, 2017</div>
-                    @if($return->isCancelled())
-                        <div style="margin-top: 4px;"><span class="badge badge-cancelled">CANCELLED / REVERSED</span></div>
-                    @endif
+                <td style="width: 65%; vertical-align: middle;">
+                    <table style="border-collapse: collapse;">
+                        <tr>
+                            @if(!empty($businessLogoDataUri))
+                                <td style="vertical-align: middle; padding-right: 12px; width: 1%;">
+                                    <img src="{{ $businessLogoDataUri }}" alt="{{ $businessName ?? 'Business Logo' }}" style="max-height: 52px; max-width: 110px; width: auto; height: auto; display: block;" />
+                                </td>
+                            @endif
+                            <td style="vertical-align: middle;">
+                                <div class="doc-title">{{ $return->type === 'sale_return' ? 'CREDIT NOTE' : 'DEBIT NOTE' }}</div>
+                                <div style="font-size: 11px; font-weight: bold; color: #0f172a; margin-top: 2px;">{{ $businessName ?? 'NubiBilling Store' }}</div>
+                                @if(!empty($businessAddress) || !empty($businessPhone) || !empty($businessGstin))
+                                    <div style="font-size: 9px; color: #475569;">
+                                        @if(!empty($businessAddress)) {{ $businessAddress }} @endif
+                                        @if(!empty($businessPhone)) • Ph: {{ $businessPhone }} @endif
+                                        @if(!empty($businessGstin)) • GSTIN: {{ $businessGstin }} @endif
+                                    </div>
+                                @endif
+                                <div class="doc-subtitle">Issued under Section 34 of CGST Act, 2017</div>
+                                @if($return->isCancelled())
+                                    <div style="margin-top: 4px;"><span class="badge badge-cancelled">CANCELLED / REVERSED</span></div>
+                                @endif
+                            </td>
+                        </tr>
+                    </table>
                 </td>
-                <td style="width: 40%;" class="text-right">
+                <td style="width: 35%; vertical-align: middle;" class="text-right">
                     <span class="badge {{ $return->type === 'sale_return' ? 'badge-sale' : 'badge-purchase' }}">
                         {{ $return->type === 'sale_return' ? 'Sales Return' : 'Purchase Return' }}
                     </span>
@@ -295,9 +314,24 @@
                     * This is a computer-generated document and does not require a physical signature.
                 </td>
                 <td style="width: 35%; text-align: right; vertical-align: bottom;">
-                    <div style="border-top: 1px solid #94a3b8; display: inline-block; padding-top: 4px; width: 140px; text-align: center;">
-                        Authorized Signatory
-                    </div>
+                    @if(!empty($businessSignatureDataUri))
+                        <div style="margin-bottom: 4px; text-align: center; display: inline-block; width: 150px;">
+                            <img src="{{ $businessSignatureDataUri }}" alt="Authorised Signature" style="max-width: 140px; max-height: 48px; width: auto; height: auto; object-fit: contain; display: block; margin: 0 auto 4px auto;" />
+                            <div style="border-top: 1px solid #94a3b8; padding-top: 4px; text-align: center;">
+                                Authorised Signatory
+                            </div>
+                            @if(!empty($businessSignatoryName))
+                                <div style="font-weight: bold; font-size: 9px; color: #0f172a; margin-top: 1px;">{{ $businessSignatoryName }}</div>
+                            @endif
+                            @if(!empty($businessSignatoryDesignation))
+                                <div style="font-size: 8px; color: #64748b;">{{ $businessSignatoryDesignation }}</div>
+                            @endif
+                        </div>
+                    @else
+                        <div style="border-top: 1px solid #94a3b8; display: inline-block; padding-top: 4px; width: 140px; text-align: center;">
+                            Authorised Signatory
+                        </div>
+                    @endif
                 </td>
             </tr>
         </table>

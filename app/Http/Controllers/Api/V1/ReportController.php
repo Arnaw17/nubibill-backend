@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Services\InventoryStockService;
+use App\Services\UnitConversionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -64,7 +66,8 @@ class ReportController extends Controller
                 $cat = $fields['category'] ?? $fields['categoryName'] ?? $pr->category ?? 'General Hardware';
                 $productCategoryMap[$pId] = $cat;
             }
-        } catch (\Throwable $e) {}
+        } catch (\Throwable $e) {
+        }
 
         foreach ($invoices as $inv) {
             $p = json_decode($inv->payload ?? '{}', true) ?: [];
@@ -105,10 +108,11 @@ class ReportController extends Controller
                         $iPayload = json_decode($iRow->payload ?? '{}', true) ?: [];
                         $items[] = $iPayload['fields'] ?? [];
                     }
-                } catch (\Throwable $e) {}
+                } catch (\Throwable $e) {
+                }
             }
 
-            if (is_array($items) && !empty($items)) {
+            if (is_array($items) && ! empty($items)) {
                 foreach ($items as $item) {
                     $pId = (string) ($item['productId'] ?? $item['product_id'] ?? '');
                     $cat = $item['category'] ?? $item['productCategory'] ?? ($pId && isset($productCategoryMap[$pId]) ? $productCategoryMap[$pId] : 'General Hardware');
@@ -406,7 +410,8 @@ class ReportController extends Controller
                         $iPayload = json_decode($iRow->payload ?? '{}', true) ?: [];
                         $items[] = $iPayload['fields'] ?? [];
                     }
-                } catch (\Throwable $e) {}
+                } catch (\Throwable $e) {
+                }
             }
 
             return [
@@ -554,6 +559,20 @@ class ReportController extends Controller
             ->where('is_deleted', 0)
             ->get();
 
+        $variantsByProduct = [];
+        $variantRows = DB::table('product_variants')
+            ->where('business_id', $businessId)
+            ->where('is_deleted', 0)
+            ->get();
+        foreach ($variantRows as $vr) {
+            $vp = json_decode($vr->payload ?? '{}', true) ?: [];
+            $vf = $vp['fields'] ?? [];
+            $vPid = (string) ($vr->product_id ?? $vf['productId'] ?? '');
+            if ($vPid !== '' && ! isset($variantsByProduct[$vPid])) {
+                $variantsByProduct[$vPid] = $vf;
+            }
+        }
+
         $totalValuationRupees = 0.0;
         $outOfStockItems = [];
         $lowStockItems = [];
@@ -563,33 +582,68 @@ class ReportController extends Controller
         $stockByProduct = $this->stockByProduct($businessId, $outletId);
         $hasStockBalances = $stockByProduct !== null;
 
+        $unitService = new UnitConversionService;
+        $stockSvc = new InventoryStockService($unitService);
         foreach ($products as $pr) {
             $p = json_decode($pr->payload ?? '{}', true) ?: [];
             $fields = $p['fields'] ?? [];
 
             $productId = (string) ($fields['productId'] ?? $pr->id);
+            $variantFields = $variantsByProduct[$productId] ?? [];
+            $unitConf = $unitService->resolveVariantUnitConfig($variantFields, $fields, $businessId);
+            $unitSymbol = (string) ($fields['unitSymbol'] ?? $variantFields['unitSymbol'] ?? $unitConf['baseUnitSymbol']);
+            $invBehaviour = $stockSvc->normalizeBehaviour(
+                $fields['inventoryBehaviour'] ?? ($pr->inventory_behaviour ?? null),
+                $fields
+            );
             $stock = $hasStockBalances
-                ? ($stockByProduct[$productId] ?? 0)
-                : (int) ($fields['currentStock'] ?? $fields['stockQuantity'] ?? $pr->current_stock ?? $pr->stock_quantity ?? 0);
-            $reorder = (int) ($fields['reorderLevel'] ?? $pr->reorder_level ?? 5);
+                ? ($stockByProduct[$productId] ?? 0.0)
+                : (float) ($fields['currentStock'] ?? $fields['stockQuantity'] ?? $pr->current_stock ?? $pr->stock_quantity ?? 0);
+            $reorder = (float) ($fields['reorderLevel'] ?? $pr->reorder_level ?? 5);
             $cost = (float) ($fields['costPrice'] ?? $fields['purchasePrice'] ?? $pr->cost_price ?? $pr->purchase_price ?? 0);
+            if ($invBehaviour === InventoryStockService::BEHAVIOUR_UNIFIED_PARENT && $hasStockBalances) {
+                $target = $stockSvc->inspectStockTarget(
+                    $businessId,
+                    $outletId && $outletId !== 'ALL' ? $outletId : '',
+                    $productId,
+                    null,
+                    $invBehaviour
+                );
+                if ($outletId && $outletId !== 'ALL') {
+                    $stock = round($target['totalMilli'] / 1000.0, 3);
+                }
+                if (($target['weightedAvgCostPaise'] ?? 0) > 0) {
+                    $cost = round($target['weightedAvgCostPaise'] / 100.0, 4);
+                }
+            }
             $totalValuationRupees += ($stock * $cost);
 
+            $attrs = is_array($fields['attributeValues'] ?? null) ? $fields['attributeValues'] : [];
+            $attrMeta = [
+                'aggregateSize' => $attrs['aggregateSize'] ?? $attrs['size'] ?? null,
+                'gradeQuality' => $attrs['gradeQuality'] ?? $attrs['quality'] ?? null,
+                'attributeValues' => ! empty($attrs) ? $attrs : null,
+            ];
+
             if ($stock <= 0) {
-                $outOfStockItems[] = [
-                    'productId' => (string) ($fields['productId'] ?? $pr->id),
-                    'name' => (string) ($fields['name'] ?? $pr->name),
+                $outOfStockItems[] = array_merge([
+                    'productId' => $productId,
+                    'name' => (string) ($fields['name'] ?? $fields['productName'] ?? $pr->name),
                     'sku' => (string) ($fields['sku'] ?? $pr->sku ?? ''),
-                    'currentStock' => $stock,
-                ];
+                    'currentStock' => round($stock, 3),
+                    'unit' => $unitSymbol,
+                    'unitSymbol' => $unitSymbol,
+                ], array_filter($attrMeta, fn ($v) => $v !== null));
             } elseif ($stock <= $reorder) {
-                $lowStockItems[] = [
-                    'productId' => (string) ($fields['productId'] ?? $pr->id),
-                    'name' => (string) ($fields['name'] ?? $pr->name),
+                $lowStockItems[] = array_merge([
+                    'productId' => $productId,
+                    'name' => (string) ($fields['name'] ?? $fields['productName'] ?? $pr->name),
                     'sku' => (string) ($fields['sku'] ?? $pr->sku ?? ''),
-                    'currentStock' => $stock,
+                    'currentStock' => round($stock, 3),
                     'reorderLevel' => $reorder,
-                ];
+                    'unit' => $unitSymbol,
+                    'unitSymbol' => $unitSymbol,
+                ], array_filter($attrMeta, fn ($v) => $v !== null));
             }
         }
 
@@ -632,37 +686,13 @@ class ReportController extends Controller
             }
         }
 
-        $balanceQuery = DB::table('stock_balances')
-            ->where('business_id', $businessId)
-            ->where('is_deleted', 0);
-        if ($outletId && $outletId !== 'ALL') {
-            $balanceQuery->where('outlet_id', $outletId);
-        }
+        $stockSvc = new InventoryStockService;
+        $snapshot = $stockSvc->getConsolidatedStockSnapshot(
+            $businessId,
+            ($outletId && $outletId !== 'ALL') ? $outletId : null
+        );
 
-        $stockByProduct = [];
-        foreach ($balanceQuery->get() as $balanceRow) {
-            $balancePayload = json_decode($balanceRow->payload ?? '{}', true) ?: [];
-            $balanceFields = $balancePayload['fields'] ?? $balancePayload;
-            $variantId = (string) ($balanceFields['variantId'] ?? $balanceRow->variant_id ?? '');
-            $productId = (string) ($balanceFields['productId'] ?? $balanceRow->product_id ?? '');
-            $productId = $productId !== ''
-                ? $productId
-                : ($variantToProduct[$variantId] ?? $variantId);
-            if ($productId === '') {
-                continue;
-            }
-
-            $rawQuantity = (float) ($balanceFields['quantityOnHand']
-                ?? $balanceFields['currentStock']
-                ?? $balanceRow->quantity_on_hand
-                ?? 0);
-            $quantity = $rawQuantity >= 1000
-                ? (int) floor($rawQuantity / 1000)
-                : (int) round($rawQuantity);
-            $stockByProduct[$productId] = ($stockByProduct[$productId] ?? 0) + $quantity;
-        }
-
-        return $stockByProduct;
+        return $snapshot['parentStockUnitsMap'];
     }
 
     /**
@@ -964,7 +994,7 @@ class ReportController extends Controller
                 foreach ($items as $item) {
                     $rate = (float) ($item['gstRate'] ?? (($item['gstRateBps'] ?? 1800) / 100));
                     $itemTaxable = (int) ($item['taxablePaise'] ?? $item['taxableAmount'] ?? (($item['amount'] ?? 0) * 100));
-                    if ($itemTaxable > 0 && !isset($item['taxablePaise']) && !isset($item['taxableAmount']) && $itemTaxable < 10000) {
+                    if ($itemTaxable > 0 && ! isset($item['taxablePaise']) && ! isset($item['taxableAmount']) && $itemTaxable < 10000) {
                         $itemTaxable = (int) ($itemTaxable * 100);
                     }
                     $gstRateMap[$rate] = ($gstRateMap[$rate] ?? 0) + $itemTaxable;
@@ -1060,27 +1090,24 @@ class ReportController extends Controller
             $expenseBreakdown[$cat] = ($expenseBreakdown[$cat] ?? 0) + $amt;
         }
 
-        // Query stock balances for current outlet or business
-        $sbQuery = DB::table('stock_balances')->where('business_id', $businessId)->where('is_deleted', 0);
-        if ($outletId && $outletId !== 'ALL') {
-            $sbQuery->where('outlet_id', $outletId);
-        }
-        $stockBalances = $sbQuery->get();
+        // Query stock balances for current outlet or business using normalized stock snapshot
+        $stockSvc = new InventoryStockService;
+        $snapshot = $stockSvc->getConsolidatedStockSnapshot(
+            $businessId,
+            ($outletId && $outletId !== 'ALL') ? $outletId : null
+        );
         $stockByProduct = [];
-        foreach ($stockBalances as $sb) {
-            $sp = json_decode($sb->payload ?? '{}', true) ?: [];
-            $sf = $sp['fields'] ?? [];
-            $pId = $sf['productId'] ?? $sb->product_id;
-            $rawStock = (float) ($sf['currentStock'] ?? $sf['quantityOnHand'] ?? $sb->quantity_on_hand ?? 0);
-            $qty = $rawStock >= 1000 ? $rawStock / 1000.0 : $rawStock;
-            $costPaise = (int) ($sf['avgCostPaise'] ?? $sf['averageCost'] ?? $sf['lastPurchasePricePaise'] ?? 0);
-            $valPaise = (int) ($sf['totalValue'] ?? ($qty * $costPaise));
+        foreach ($snapshot['balances'] as $sb) {
+            $pId = (string) ($sb['productId'] ?? '');
+            $qty = (float) ($sb['quantityOnHandUnits'] ?? 0.0);
+            $costPaise = (int) ($sb['avgCostPaise'] ?? $sb['lastPurchasePricePaise'] ?? 0);
+            $valPaise = (int) ($sb['totalValue'] ?? ($qty * $costPaise));
 
-            if ($pId) {
+            if ($pId !== '') {
                 if (! isset($stockByProduct[$pId])) {
                     $stockByProduct[$pId] = ['qty' => 0.0, 'costPaise' => $costPaise, 'valPaise' => 0];
                 }
-                $stockByProduct[$pId]['qty'] += $qty;
+                $stockByProduct[$pId]['qty'] = round($stockByProduct[$pId]['qty'] + $qty, 3);
                 $stockByProduct[$pId]['valPaise'] += $valPaise;
                 if ($costPaise > 0) {
                     $stockByProduct[$pId]['costPaise'] = $costPaise;

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\ReviewDocumentRequest;
 use App\Http\Requests\Admin\UpdateUserStatusRequest;
 use App\Http\Responses\ApiResponse;
+use App\Jobs\SendFcmNotificationJob;
 use App\Models\User;
 use App\Models\UserDocument;
 use Illuminate\Http\JsonResponse;
@@ -58,6 +59,18 @@ class AdminController extends Controller
             $user->activated_at = now();
             $user->activated_by = $request->user()->id;
             $user->save();
+
+            SendFcmNotificationJob::dispatch(
+                [(string) $user->id],
+                null,
+                'Account Approved',
+                'Your NubiBill account is now active. You can sign in and start billing.',
+                [
+                    'target_screen' => 'dashboard',
+                    'type' => 'account_activated',
+                    'user_id' => (string) $user->id,
+                ]
+            );
         } else {
             // INACTIVE
             $user->status = 'INACTIVE';
@@ -106,6 +119,27 @@ class AdminController extends Controller
         }
 
         $document->save();
+
+        $docLabel = strtoupper((string) $document->type);
+        $pushTitle = $status === 'APPROVED'
+            ? "{$docLabel} Document Approved"
+            : "{$docLabel} Document Rejected";
+        $pushBody = $status === 'APPROVED'
+            ? "Your {$docLabel} verification document has been approved."
+            : ('Your '.$docLabel.' document was rejected'.($document->reject_reason ? ": {$document->reject_reason}" : '. Please re-upload.'));
+
+        SendFcmNotificationJob::dispatch(
+            [(string) $document->user_id],
+            null,
+            $pushTitle,
+            $pushBody,
+            [
+                'target_screen' => 'kyc_status',
+                'type' => 'kyc_review',
+                'document_type' => $docLabel,
+                'status' => $status,
+            ]
+        );
 
         return ApiResponse::success(
             $document,

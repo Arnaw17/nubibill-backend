@@ -724,13 +724,57 @@ class CustomerController extends Controller
         foreach ($rows as $row) {
             $p = json_decode($row->payload, true) ?: [];
             $f = $p['fields'] ?? [];
+            $invoiceId = $f['invoiceId'] ?? null;
+            $description = (string) ($f['description'] ?? '');
+            $itemsSummary = (string) ($f['itemsSummary'] ?? '');
+            $invoiceItems = [];
+
+            if (! empty($invoiceId) && (empty($itemsSummary) || $description === '' || $description === 'Transaction')) {
+                $invRow = DB::table('invoices')->where('id', $invoiceId)->first();
+                if ($invRow) {
+                    $invP = json_decode($invRow->payload ?? '{}', true) ?: [];
+                    $invF = $invP['fields'] ?? [];
+                    $invNo = (string) ($invF['invoiceNumber'] ?? $invoiceId);
+                    $invItems = $invF['items'] ?? [];
+                    if (is_array($invItems) && count($invItems) > 0) {
+                        $summaryParts = [];
+                        foreach ($invItems as $invItem) {
+                            $qVal = (float) ($invItem['quantity'] ?? 0);
+                            $qStr = rtrim(rtrim(number_format($qVal, 3, '.', ''), '0'), '.');
+                            $uStr = (string) ($invItem['unitSymbol'] ?? $invItem['unit'] ?? '');
+                            $iName = (string) ($invItem['name'] ?? $invItem['productName'] ?? 'Item');
+                            $summaryParts[] = trim("{$iName} ({$qStr} {$uStr})");
+                            $invoiceItems[] = [
+                                'name' => $iName,
+                                'quantity' => $qVal,
+                                'unit' => $uStr,
+                                'unitPricePaise' => (int) ($invItem['unitPricePaise'] ?? 0),
+                                'lineTotalPaise' => (int) ($invItem['lineTotalPaise'] ?? 0),
+                            ];
+                        }
+                        if ($itemsSummary === '') {
+                            $itemsSummary = implode(', ', $summaryParts);
+                        }
+                        if ($description === '' || $description === 'Transaction') {
+                            $txType = (string) ($f['transactionType'] ?? 'Transaction');
+                            $description = "{$txType} {$invNo}: {$itemsSummary}";
+                        }
+                    }
+                }
+            }
+            if ($description === '') {
+                $description = (string) ($f['transactionType'] ?? 'Transaction');
+            }
 
             $entries[] = [
-                'ledgerId' => (string) ($f['ledgerId'] ?? $row->id),
+                'ledgerId' => (string) ($f['ledgerId'] ?? $f['transactionId'] ?? $row->id),
                 'customerId' => $id,
-                'invoiceId' => $f['invoiceId'] ?? null,
+                'invoiceId' => $invoiceId,
+                'invoiceNumber' => $f['invoiceNumber'] ?? null,
                 'paymentId' => $f['paymentId'] ?? null,
-                'description' => (string) ($f['description'] ?? 'Transaction'),
+                'description' => $description,
+                'itemsSummary' => $itemsSummary,
+                'items' => $invoiceItems,
                 'debitPaise' => (int) ($f['debitPaise'] ?? 0),
                 'creditPaise' => (int) ($f['creditPaise'] ?? 0),
                 'balancePaise' => (int) ($f['balancePaise'] ?? 0),

@@ -67,7 +67,8 @@ class BusinessController extends Controller
                 'address' => $fields['address'] ?? null,
                 'gstin' => $fields['gstin'] ?? null,
                 'gstinVerified' => (bool) ($fields['gstinVerified'] ?? false),
-                'logoUrl' => $fields['logoUrl'] ?? null,
+                ...self::extractLogoMetadata($fields),
+                ...self::extractSignatureMetadata($fields),
                 'isActive' => true,
                 'status' => 'active',
                 'createdAt' => $fields['createdAt'] ?? $row->created_at,
@@ -137,22 +138,55 @@ class BusinessController extends Controller
 
         $logoPath = null;
         $logoUrl = null;
+        $logoVersion = null;
+        $logoHash = null;
+        $logoMimeType = null;
+        $logoSizeBytes = null;
+        $logoWidth = null;
+        $logoHeight = null;
+        $logoHistory = [];
 
-        if ($request->hasFile('logo')) {
-            $logoPath = $request->file('logo')->store('business_logos', 'public');
-            $logoUrl = route('api.v1.businesses.logo', ['id' => $businessId]);
+        $initialLogoBytes = null;
+        if ($request->hasFile('logo') && $request->file('logo')->isValid()) {
+            $initialLogoBytes = file_get_contents($request->file('logo')->getRealPath()) ?: null;
         } elseif ($request->filled('logo_base64')) {
             $base64 = (string) $request->input('logo_base64');
             if (str_contains($base64, ',')) {
                 $base64 = substr($base64, strpos($base64, ',') + 1);
             }
-            $decoded = base64_decode($base64);
-            if ($decoded !== false) {
-                $filename = 'business_logos/'.$businessId.'.png';
-                Storage::disk('public')->put($filename, $decoded);
-                $logoPath = $filename;
-                $logoUrl = route('api.v1.businesses.logo', ['id' => $businessId]);
+            $decoded = base64_decode($base64, true);
+            if ($decoded !== false && $decoded !== '') {
+                $initialLogoBytes = $decoded;
             }
+        }
+
+        if ($initialLogoBytes !== null) {
+            $mime = $this->detectImageMimeType($initialLogoBytes);
+            $extMap = ['image/png' => 'png', 'image/jpeg' => 'jpg', 'image/jpg' => 'jpg', 'image/webp' => 'webp'];
+            $ext = $mime !== null ? ($extMap[$mime] ?? 'png') : 'png';
+            $logoVersion = now()->format('YmdHis').'_'.Str::lower(Str::random(6));
+            $logoPath = "business_logos/{$businessId}_{$logoVersion}.{$ext}";
+            Storage::disk('public')->put($logoPath, $initialLogoBytes);
+            $logoUrl = route('api.v1.businesses.logo', ['id' => $businessId], false).'?v='.$logoVersion;
+            $logoHash = hash('sha256', $initialLogoBytes);
+            $logoMimeType = $mime === 'image/jpg' ? 'image/jpeg' : $mime;
+            $logoSizeBytes = strlen($initialLogoBytes);
+            $imgInfo = @getimagesizefromstring($initialLogoBytes);
+            if (is_array($imgInfo)) {
+                $logoWidth = (int) ($imgInfo[0] ?? 0) ?: null;
+                $logoHeight = (int) ($imgInfo[1] ?? 0) ?: null;
+            }
+            $logoHistory[$logoVersion] = [
+                'version' => $logoVersion,
+                'path' => $logoPath,
+                'url' => $logoUrl,
+                'hash' => $logoHash,
+                'mimeType' => $logoMimeType,
+                'sizeBytes' => $logoSizeBytes,
+                'width' => $logoWidth,
+                'height' => $logoHeight,
+                'uploadedAt' => $now,
+            ];
         } elseif ($request->filled('logo_url')) {
             $logoUrl = (string) $request->input('logo_url');
         }
@@ -171,6 +205,27 @@ class BusinessController extends Controller
             'gstinVerified' => false,
             'logoPath' => $logoPath,
             'logoUrl' => $logoUrl,
+            'logoVersion' => $logoVersion,
+            'logoHash' => $logoHash,
+            'logoMimeType' => $logoMimeType,
+            'logoSizeBytes' => $logoSizeBytes,
+            'logoWidth' => $logoWidth,
+            'logoHeight' => $logoHeight,
+            'logoUpdatedAt' => $logoPath !== null ? $now : null,
+            'logoHistory' => $logoHistory,
+            'signaturePath' => null,
+            'signatureUrl' => null,
+            'signatureVersion' => null,
+            'signatureHash' => null,
+            'signatureMimeType' => null,
+            'signatureSizeBytes' => null,
+            'signatureWidth' => null,
+            'signatureHeight' => null,
+            'signatureUpdatedAt' => null,
+            'signatureEnabled' => false,
+            'signatoryName' => null,
+            'signatoryDesignation' => null,
+            'signatureHistory' => [],
             'isActive' => true,
             'status' => 'active',
             'createdAt' => $now,
@@ -582,8 +637,13 @@ class BusinessController extends Controller
             return ApiResponse::error('Business not found.', 404);
         }
 
-        $payload = json_decode($row->payload, true) ?: [];
-        $settings = $payload['fields']['settings'] ?? [
+        $payload = json_decode((string) $row->payload, true) ?: [];
+        $fields = $payload['fields'] ?? [];
+        if (is_array($fields)) {
+            $fields = SyncController::decodeFields($fields);
+        }
+
+        $settings = $fields['settings'] ?? [
             'businessId' => $id,
             'invoicePrefix' => 'INV-',
             'nextInvoiceNumber' => 1,
@@ -592,6 +652,10 @@ class BusinessController extends Controller
             'printFormat' => 'THERMAL_3INCH',
             'termsAndConditions' => 'Thank you for your business!',
         ];
+
+        $logoMeta = self::extractLogoMetadata($fields);
+        $sigMeta = self::extractSignatureMetadata($fields);
+        $settings = array_merge($settings, $logoMeta, $sigMeta);
 
         return ApiResponse::success($settings, 'Business settings retrieved successfully.');
     }
@@ -606,10 +670,38 @@ class BusinessController extends Controller
             return ApiResponse::error('Business not found.', 404);
         }
 
-        $payload = json_decode($row->payload, true) ?: [];
+        $payload = json_decode((string) $row->payload, true) ?: [];
         $fields = $payload['fields'] ?? [];
+        if (is_array($fields)) {
+            $fields = SyncController::decodeFields($fields);
+        }
+
         $newSettings = $request->all();
         $fields['settings'] = array_merge($fields['settings'] ?? [], $newSettings);
+
+        $signatureUpdates = [];
+        if (array_key_exists('signatureEnabled', $newSettings)) {
+            $signatureUpdates['signatureEnabled'] = (bool) filter_var(
+                $newSettings['signatureEnabled'],
+                FILTER_VALIDATE_BOOLEAN,
+                FILTER_NULL_ON_FAILURE
+            );
+        }
+        if (array_key_exists('signatoryName', $newSettings)) {
+            $trimmedName = trim((string) ($newSettings['signatoryName'] ?? ''));
+            $signatureUpdates['signatoryName'] = $trimmedName === '' ? null : Str::limit($trimmedName, 160, '');
+        }
+        if (array_key_exists('signatoryDesignation', $newSettings)) {
+            $trimmedDesig = trim((string) ($newSettings['signatoryDesignation'] ?? ''));
+            $signatureUpdates['signatoryDesignation'] = $trimmedDesig === '' ? null : Str::limit($trimmedDesig, 160, '');
+        }
+        if (! empty($signatureUpdates)) {
+            $nowIso = now()->toISOString();
+            $fields = array_merge($fields, $signatureUpdates, ['updatedAt' => $nowIso]);
+            $fields['settings'] = array_merge($fields['settings'], $signatureUpdates);
+            $this->syncBusinessSettingsFields($id, $signatureUpdates, $nowIso);
+        }
+
         $payload['fields'] = $fields;
 
         DB::table('businesses')->where('id', $id)->update([
@@ -617,26 +709,628 @@ class BusinessController extends Controller
             'updated_at' => now(),
         ]);
 
-        return ApiResponse::success($fields['settings'], 'Business settings saved successfully.');
+        return ApiResponse::success(
+            array_merge($fields['settings'], self::extractSignatureMetadata($fields)),
+            'Business settings saved successfully.'
+        );
     }
 
     /**
-     * Stream business logo image.
+     * Upload or replace a business logo (multipart 'logo' or 'logo_base64').
      */
-    public function logo(string $id): StreamedResponse|JsonResponse
+    public function uploadLogo(Request $request, string $id): JsonResponse
+    {
+        return $this->uploadBusinessAsset($request, $id, [
+            'kind' => 'logo',
+            'fileKey' => 'logo',
+            'base64Key' => 'logo_base64',
+            'directory' => 'business_logos',
+            'routeName' => 'api.v1.businesses.logo',
+            'historyKey' => 'logoHistory',
+            'codePrefix' => 'LOGO',
+            'label' => 'Logo',
+            'minWidth' => 64,
+            'minHeight' => 64,
+        ]);
+    }
+
+    /**
+     * Remove the active business logo while retaining historical logo versions for past bills.
+     */
+    public function deleteLogo(Request $request, string $id): JsonResponse
+    {
+        return $this->deleteBusinessAsset($request, $id, 'logo', 'Business logo removed successfully.');
+    }
+
+    /**
+     * Stream business logo image (supports optional immutable ?v= or ?version= for historical documents).
+     */
+    public function logo(Request $request, string $id): StreamedResponse|JsonResponse
+    {
+        return $this->streamBusinessAsset($request, $id, 'logo', 'logoHistory', 'Business logo');
+    }
+
+    /**
+     * Upload or replace an authorised signature image (multipart 'signature' or 'signature_base64').
+     */
+    public function uploadSignature(Request $request, string $id): JsonResponse
+    {
+        $extra = [];
+        if ($request->has('signatureEnabled')) {
+            $extra['signatureEnabled'] = $request->boolean('signatureEnabled');
+        } else {
+            $extra['signatureEnabled'] = true;
+        }
+        if ($request->has('signatoryName')) {
+            $name = trim((string) ($request->input('signatoryName') ?? ''));
+            $extra['signatoryName'] = $name === '' ? null : Str::limit($name, 160, '');
+        }
+        if ($request->has('signatoryDesignation')) {
+            $desig = trim((string) ($request->input('signatoryDesignation') ?? ''));
+            $extra['signatoryDesignation'] = $desig === '' ? null : Str::limit($desig, 160, '');
+        }
+
+        return $this->uploadBusinessAsset($request, $id, [
+            'kind' => 'signature',
+            'fileKey' => 'signature',
+            'base64Key' => 'signature_base64',
+            'directory' => 'business_signatures',
+            'routeName' => 'api.v1.businesses.signature',
+            'historyKey' => 'signatureHistory',
+            'codePrefix' => 'SIGNATURE',
+            'label' => 'Signature',
+            'minWidth' => 48,
+            'minHeight' => 24,
+        ], $extra);
+    }
+
+    /**
+     * Save signature toggle & signatory metadata (Authorised Signatory Name & Designation).
+     */
+    public function saveSignatureSettings(Request $request, string $id): JsonResponse
+    {
+        $user = $request->user();
+        $row = DB::table('businesses')->where('id', $id)->where('is_deleted', 0)->first();
+        if (! $row) {
+            return ApiResponse::error('Business not found.', 404);
+        }
+
+        $payload = json_decode((string) $row->payload, true) ?: [];
+        $fields = $payload['fields'] ?? [];
+        if (is_array($fields)) {
+            $fields = SyncController::decodeFields($fields);
+        }
+
+        $ownerUid = (string) ($fields['ownerUid'] ?? $row->owner_uid ?? '');
+        if (! $user->isAdmin() && $ownerUid !== (string) $user->id
+            && ! $this->employeeHasBusiness($user, $id)) {
+            return ApiResponse::error('Unauthorized access to this business.', 403);
+        }
+
+        $updates = [];
+        if ($request->has('signatureEnabled')) {
+            $updates['signatureEnabled'] = $request->boolean('signatureEnabled');
+        }
+        if ($request->has('signatoryName')) {
+            $trimmed = trim((string) ($request->input('signatoryName') ?? ''));
+            $updates['signatoryName'] = $trimmed === '' ? null : Str::limit($trimmed, 160, '');
+        }
+        if ($request->has('signatoryDesignation')) {
+            $trimmed = trim((string) ($request->input('signatoryDesignation') ?? ''));
+            $updates['signatoryDesignation'] = $trimmed === '' ? null : Str::limit($trimmed, 160, '');
+        }
+
+        $nowIso = now()->toISOString();
+        $fields = array_merge($fields, $updates, ['updatedAt' => $nowIso]);
+        $fields['settings'] = array_merge(is_array($fields['settings'] ?? null) ? $fields['settings'] : ['businessId' => $id], $updates);
+        $payload['fields'] = $fields;
+
+        DB::table('businesses')->where('id', $id)->update([
+            'payload' => json_encode($payload),
+            'updated_at' => now(),
+        ]);
+
+        $this->syncBusinessSettingsFields($id, $updates, $nowIso);
+
+        return ApiResponse::success(self::extractSignatureMetadata($fields), 'Signature settings updated successfully.');
+    }
+
+    /**
+     * Remove the active signature while retaining historical signature versions for past bills.
+     */
+    public function deleteSignature(Request $request, string $id): JsonResponse
+    {
+        return $this->deleteBusinessAsset(
+            $request,
+            $id,
+            'signature',
+            'Authorised signature removed successfully.',
+            ['signatureEnabled' => false]
+        );
+    }
+
+    /**
+     * Stream authorised signature image (supports optional immutable ?v= or ?version= for historical documents).
+     */
+    public function signature(Request $request, string $id): StreamedResponse|JsonResponse
+    {
+        return $this->streamBusinessAsset($request, $id, 'signature', 'signatureHistory', 'Authorised signature');
+    }
+
+    private function uploadBusinessAsset(Request $request, string $id, array $cfg, array $extraFields = []): JsonResponse
+    {
+        $user = $request->user();
+        $row = DB::table('businesses')->where('id', $id)->where('is_deleted', 0)->first();
+        if (! $row) {
+            return ApiResponse::error('Business not found.', 404);
+        }
+
+        $payload = json_decode((string) $row->payload, true) ?: [];
+        $fields = $payload['fields'] ?? [];
+        if (is_array($fields)) {
+            $fields = SyncController::decodeFields($fields);
+        }
+
+        $ownerUid = (string) ($fields['ownerUid'] ?? $row->owner_uid ?? '');
+        if (! $user->isAdmin() && $ownerUid !== (string) $user->id
+            && ! $this->employeeHasBusiness($user, $id)) {
+            return ApiResponse::error('Unauthorized access to this business.', 403);
+        }
+
+        $fileKey = $cfg['fileKey'];
+        $base64Key = $cfg['base64Key'];
+        $codePrefix = $cfg['codePrefix'];
+        $label = $cfg['label'];
+        $labelLower = strtolower($label);
+        $prefix = $cfg['kind'];
+        $minW = (int) $cfg['minWidth'];
+        $minH = (int) $cfg['minHeight'];
+
+        $rawBytes = null;
+        if ($request->hasFile($fileKey)) {
+            $file = $request->file($fileKey);
+            if (! $file->isValid()) {
+                return ApiResponse::error("Uploaded {$labelLower} file is invalid.", 422, [$fileKey => ["Uploaded {$labelLower} file is invalid."]], "{$codePrefix}_INVALID_FILE");
+            }
+            $rawBytes = file_get_contents($file->getRealPath());
+        } elseif ($request->filled($base64Key)) {
+            $base64 = (string) $request->input($base64Key);
+            if (str_contains($base64, ',')) {
+                $base64 = substr($base64, strpos($base64, ',') + 1);
+            }
+            $decoded = base64_decode($base64, true);
+            if ($decoded === false) {
+                return ApiResponse::error('Invalid base64 image payload.', 422, [$base64Key => ['Invalid base64 image payload.']], "{$codePrefix}_INVALID_BASE64");
+            }
+            $rawBytes = $decoded;
+        } else {
+            return ApiResponse::error("Please provide a {$labelLower} image file.", 422, [$fileKey => ["A PNG, JPG, JPEG, or WEBP {$labelLower} image is required."]], "{$codePrefix}_REQUIRED");
+        }
+
+        if ($rawBytes === false || $rawBytes === '') {
+            return ApiResponse::error("{$label} image file is empty.", 422, [$fileKey => ["{$label} image file is empty."]], "{$codePrefix}_EMPTY");
+        }
+
+        $maxSizeBytes = 2 * 1024 * 1024; // 2 MB
+        $sizeBytes = strlen($rawBytes);
+        if ($sizeBytes > $maxSizeBytes) {
+            return ApiResponse::error(
+                "{$label} image exceeds maximum allowed size of 2 MB.",
+                422,
+                [$fileKey => ["{$label} file size must not exceed 2 MB."]],
+                "{$codePrefix}_TOO_LARGE"
+            );
+        }
+
+        $mimeType = $this->detectImageMimeType($rawBytes);
+        $allowedMimes = [
+            'image/png' => 'png',
+            'image/jpeg' => 'jpg',
+            'image/jpg' => 'jpg',
+            'image/webp' => 'webp',
+        ];
+
+        if ($mimeType === null || ! isset($allowedMimes[$mimeType])) {
+            return ApiResponse::error(
+                "Unsupported {$labelLower} format. Allowed formats: PNG, JPG, JPEG, WEBP.",
+                422,
+                [$fileKey => ["{$label} must be a valid PNG, JPG, JPEG, or WEBP image."]],
+                "{$codePrefix}_INVALID_FORMAT"
+            );
+        }
+
+        $imageInfo = @getimagesizefromstring($rawBytes);
+        if ($imageInfo === false || empty($imageInfo[0]) || empty($imageInfo[1])) {
+            return ApiResponse::error(
+                'Unable to decode image dimensions. Please upload a valid raster image.',
+                422,
+                [$fileKey => ['Invalid or corrupted image content.']],
+                "{$codePrefix}_CORRUPTED"
+            );
+        }
+
+        $width = (int) $imageInfo[0];
+        $height = (int) $imageInfo[1];
+        if ($width < $minW || $height < $minH || $width > 4096 || $height > 4096) {
+            return ApiResponse::error(
+                "{$label} dimensions must be between {$minW}x{$minH} and 4096x4096 pixels.",
+                422,
+                [$fileKey => ["Image width ({$minW}-4096 px) and height ({$minH}-4096 px) out of range."]],
+                "{$codePrefix}_INVALID_DIMENSIONS"
+            );
+        }
+
+        $ext = $allowedMimes[$mimeType];
+        $version = now()->format('YmdHis').'_'.Str::lower(Str::random(6));
+        $assetPath = "{$cfg['directory']}/{$id}_{$version}.{$ext}";
+        Storage::disk('public')->put($assetPath, $rawBytes);
+
+        $hash = hash('sha256', $rawBytes);
+        $assetUrl = route($cfg['routeName'], ['id' => $id], false).'?v='.$version;
+        $nowIso = now()->toISOString();
+        $normalizedMime = $mimeType === 'image/jpg' ? 'image/jpeg' : $mimeType;
+
+        $assetMeta = array_merge([
+            "{$prefix}Path" => $assetPath,
+            "{$prefix}Url" => $assetUrl,
+            "{$prefix}Version" => $version,
+            "{$prefix}Hash" => $hash,
+            "{$prefix}MimeType" => $normalizedMime,
+            "{$prefix}SizeBytes" => $sizeBytes,
+            "{$prefix}Width" => $width,
+            "{$prefix}Height" => $height,
+            "{$prefix}UpdatedAt" => $nowIso,
+        ], $extraFields);
+
+        $historyKey = $cfg['historyKey'];
+        $history = is_array($fields[$historyKey] ?? null) ? $fields[$historyKey] : [];
+        $history[$version] = [
+            'version' => $version,
+            'path' => $assetPath,
+            'url' => $assetUrl,
+            'hash' => $hash,
+            'mimeType' => $normalizedMime,
+            'sizeBytes' => $sizeBytes,
+            'width' => $width,
+            'height' => $height,
+            'uploadedAt' => $nowIso,
+        ];
+
+        $fields = array_merge($fields, $assetMeta, [
+            $historyKey => $history,
+            'updatedAt' => $nowIso,
+        ]);
+        $fields['settings'] = array_merge(is_array($fields['settings'] ?? null) ? $fields['settings'] : ['businessId' => $id], $assetMeta);
+        $payload['fields'] = $fields;
+
+        DB::table('businesses')->where('id', $id)->update([
+            'payload' => json_encode($payload),
+            'updated_at' => now(),
+        ]);
+
+        $this->syncBusinessSettingsFields($id, $assetMeta, $nowIso);
+
+        Log::info("Business {$prefix} uploaded: {$id} v={$version} ({$width}x{$height}, {$sizeBytes} bytes) by User {$user->id}");
+
+        $responseData = $prefix === 'signature'
+            ? array_merge($assetMeta, self::extractSignatureMetadata($fields))
+            : $assetMeta;
+
+        return ApiResponse::success($responseData, "Business {$prefix} uploaded successfully.");
+    }
+
+    private function deleteBusinessAsset(Request $request, string $id, string $prefix, string $message, array $extraFields = []): JsonResponse
+    {
+        $user = $request->user();
+        $row = DB::table('businesses')->where('id', $id)->where('is_deleted', 0)->first();
+        if (! $row) {
+            return ApiResponse::error('Business not found.', 404);
+        }
+
+        $payload = json_decode((string) $row->payload, true) ?: [];
+        $fields = $payload['fields'] ?? [];
+        if (is_array($fields)) {
+            $fields = SyncController::decodeFields($fields);
+        }
+
+        $ownerUid = (string) ($fields['ownerUid'] ?? $row->owner_uid ?? '');
+        if (! $user->isAdmin() && $ownerUid !== (string) $user->id
+            && ! $this->employeeHasBusiness($user, $id)) {
+            return ApiResponse::error('Unauthorized access to this business.', 403);
+        }
+
+        $nowIso = now()->toISOString();
+        $clearedMeta = array_merge([
+            "{$prefix}Path" => null,
+            "{$prefix}Url" => null,
+            "{$prefix}Version" => null,
+            "{$prefix}Hash" => null,
+            "{$prefix}MimeType" => null,
+            "{$prefix}SizeBytes" => null,
+            "{$prefix}Width" => null,
+            "{$prefix}Height" => null,
+            "{$prefix}UpdatedAt" => $nowIso,
+        ], $extraFields);
+
+        $fields = array_merge($fields, $clearedMeta, ['updatedAt' => $nowIso]);
+        if (is_array($fields['settings'] ?? null)) {
+            $fields['settings'] = array_merge($fields['settings'], $clearedMeta);
+        }
+        $payload['fields'] = $fields;
+
+        DB::table('businesses')->where('id', $id)->update([
+            'payload' => json_encode($payload),
+            'updated_at' => now(),
+        ]);
+
+        $this->syncBusinessSettingsFields($id, $clearedMeta, $nowIso);
+
+        Log::info("Business {$prefix} removed: {$id} by User {$user->id}");
+
+        $responseData = $prefix === 'signature'
+            ? array_merge($clearedMeta, self::extractSignatureMetadata($fields))
+            : $clearedMeta;
+
+        return ApiResponse::success($responseData, $message);
+    }
+
+    private function streamBusinessAsset(Request $request, string $id, string $prefix, string $historyKey, string $label): StreamedResponse|JsonResponse
     {
         $row = DB::table('businesses')->where('id', $id)->first();
         if (! $row) {
             return ApiResponse::error('Business not found.', 404);
         }
 
-        $payload = json_decode($row->payload, true) ?: [];
-        $logoPath = $payload['fields']['logoPath'] ?? null;
-
-        if (! $logoPath || ! Storage::disk('public')->exists($logoPath)) {
-            return ApiResponse::error('Business logo not found.', 404);
+        $payload = json_decode((string) $row->payload, true) ?: [];
+        $fields = $payload['fields'] ?? [];
+        if (is_array($fields)) {
+            $fields = SyncController::decodeFields($fields);
         }
 
-        return Storage::disk('public')->response($logoPath);
+        $requestedVersion = trim((string) ($request->query('v') ?? $request->query('version') ?? ''));
+        $assetPath = null;
+        $mimeType = null;
+        $isVersioned = false;
+
+        if ($requestedVersion !== '') {
+            if (! preg_match('/^[A-Za-z0-9._-]{3,80}$/', $requestedVersion)) {
+                return ApiResponse::error("Invalid {$prefix} version identifier.", 400);
+            }
+            $isVersioned = true;
+            $history = is_array($fields[$historyKey] ?? null) ? $fields[$historyKey] : [];
+            if (isset($history[$requestedVersion]) && is_array($history[$requestedVersion])) {
+                $assetPath = $history[$requestedVersion]['path'] ?? null;
+                $mimeType = $history[$requestedVersion]['mimeType'] ?? null;
+            } elseif (($fields["{$prefix}Version"] ?? null) === $requestedVersion) {
+                $assetPath = $fields["{$prefix}Path"] ?? null;
+                $mimeType = $fields["{$prefix}MimeType"] ?? null;
+            }
+        } else {
+            $assetPath = $fields["{$prefix}Path"] ?? null;
+            $mimeType = $fields["{$prefix}MimeType"] ?? null;
+        }
+
+        if (! $assetPath || ! Storage::disk('public')->exists($assetPath)) {
+            return ApiResponse::error("{$label} not found.", 404);
+        }
+
+        $headers = [
+            'Cache-Control' => $isVersioned ? 'public, max-age=31536000, immutable' : 'no-cache, must-revalidate',
+        ];
+        if (! empty($mimeType)) {
+            $headers['Content-Type'] = $mimeType;
+        }
+
+        return Storage::disk('public')->response($assetPath, null, $headers);
+    }
+
+    /**
+     * Resolve the active logo snapshot fields to stamp onto newly created bills/returns.
+     *
+     * @return array{hasBusinessLogoSnapshot: bool, businessLogoUrl: ?string, businessLogoPath: ?string, businessLogoVersion: ?string, businessLogoHash: ?string}
+     */
+    public static function resolveActiveLogoSnapshot(?string $businessId): array
+    {
+        $empty = [
+            'hasBusinessLogoSnapshot' => true,
+            'businessLogoUrl' => null,
+            'businessLogoPath' => null,
+            'businessLogoVersion' => null,
+            'businessLogoHash' => null,
+        ];
+
+        $businessId = trim((string) $businessId);
+        if ($businessId === '') {
+            return $empty;
+        }
+
+        $row = DB::table('businesses')
+            ->where('id', $businessId)
+            ->where('is_deleted', 0)
+            ->first();
+
+        if (! $row) {
+            return $empty;
+        }
+
+        $payload = json_decode((string) $row->payload, true) ?: [];
+        $fields = $payload['fields'] ?? [];
+        if (is_array($fields)) {
+            $fields = SyncController::decodeFields($fields);
+        }
+
+        $logoPath = ! empty($fields['logoPath']) ? (string) $fields['logoPath'] : null;
+        $logoUrl = ! empty($fields['logoUrl']) ? (string) $fields['logoUrl'] : null;
+        $logoVersion = ! empty($fields['logoVersion']) ? (string) $fields['logoVersion'] : null;
+        $logoHash = ! empty($fields['logoHash']) ? (string) $fields['logoHash'] : null;
+
+        if ($logoUrl === null && $logoPath !== null) {
+            $logoUrl = route('api.v1.businesses.logo', ['id' => $businessId], false)
+                .($logoVersion ? ('?v='.$logoVersion) : '');
+        }
+
+        return [
+            'hasBusinessLogoSnapshot' => true,
+            'businessLogoUrl' => $logoUrl,
+            'businessLogoPath' => $logoPath,
+            'businessLogoVersion' => $logoVersion,
+            'businessLogoHash' => $logoHash,
+        ];
+    }
+
+    /**
+     * Resolve the active signature snapshot fields to stamp onto newly created bills/returns.
+     *
+     * @return array{hasBusinessSignatureSnapshot: bool, businessSignatureEnabled: bool, businessSignatureUrl: ?string, businessSignaturePath: ?string, businessSignatureVersion: ?string, businessSignatureHash: ?string, businessSignatoryName: ?string, businessSignatoryDesignation: ?string}
+     */
+    public static function resolveActiveSignatureSnapshot(?string $businessId): array
+    {
+        $empty = [
+            'hasBusinessSignatureSnapshot' => true,
+            'businessSignatureEnabled' => false,
+            'businessSignatureUrl' => null,
+            'businessSignaturePath' => null,
+            'businessSignatureVersion' => null,
+            'businessSignatureHash' => null,
+            'businessSignatoryName' => null,
+            'businessSignatoryDesignation' => null,
+        ];
+
+        $businessId = trim((string) $businessId);
+        if ($businessId === '') {
+            return $empty;
+        }
+
+        $row = DB::table('businesses')
+            ->where('id', $businessId)
+            ->where('is_deleted', 0)
+            ->first();
+
+        if (! $row) {
+            return $empty;
+        }
+
+        $payload = json_decode((string) $row->payload, true) ?: [];
+        $fields = $payload['fields'] ?? [];
+        if (is_array($fields)) {
+            $fields = SyncController::decodeFields($fields);
+        }
+
+        $sigPath = ! empty($fields['signaturePath']) ? (string) $fields['signaturePath'] : null;
+        $enabled = (bool) ($fields['signatureEnabled'] ?? false) && $sigPath !== null;
+        if (! $enabled) {
+            return $empty;
+        }
+
+        $sigUrl = ! empty($fields['signatureUrl']) ? (string) $fields['signatureUrl'] : null;
+        $sigVersion = ! empty($fields['signatureVersion']) ? (string) $fields['signatureVersion'] : null;
+        $sigHash = ! empty($fields['signatureHash']) ? (string) $fields['signatureHash'] : null;
+
+        if ($sigUrl === null) {
+            $sigUrl = route('api.v1.businesses.signature', ['id' => $businessId], false)
+                .($sigVersion ? ('?v='.$sigVersion) : '');
+        }
+
+        return [
+            'hasBusinessSignatureSnapshot' => true,
+            'businessSignatureEnabled' => true,
+            'businessSignatureUrl' => $sigUrl,
+            'businessSignaturePath' => $sigPath,
+            'businessSignatureVersion' => $sigVersion,
+            'businessSignatureHash' => $sigHash,
+            'businessSignatoryName' => ! empty($fields['signatoryName']) ? (string) $fields['signatoryName'] : null,
+            'businessSignatoryDesignation' => ! empty($fields['signatoryDesignation']) ? (string) $fields['signatoryDesignation'] : null,
+        ];
+    }
+
+    /**
+     * Extract public logo metadata from decoded business fields.
+     */
+    public static function extractLogoMetadata(array $fields): array
+    {
+        return [
+            'logoPath' => $fields['logoPath'] ?? null,
+            'logoUrl' => $fields['logoUrl'] ?? null,
+            'logoVersion' => $fields['logoVersion'] ?? null,
+            'logoHash' => $fields['logoHash'] ?? null,
+            'logoMimeType' => $fields['logoMimeType'] ?? null,
+            'logoSizeBytes' => isset($fields['logoSizeBytes']) ? (int) $fields['logoSizeBytes'] : null,
+            'logoWidth' => isset($fields['logoWidth']) ? (int) $fields['logoWidth'] : null,
+            'logoHeight' => isset($fields['logoHeight']) ? (int) $fields['logoHeight'] : null,
+            'logoUpdatedAt' => $fields['logoUpdatedAt'] ?? null,
+        ];
+    }
+
+    /**
+     * Extract public signature metadata from decoded business fields.
+     */
+    public static function extractSignatureMetadata(array $fields): array
+    {
+        $sigPath = $fields['signaturePath'] ?? null;
+
+        return [
+            'signaturePath' => $sigPath,
+            'signatureUrl' => $fields['signatureUrl'] ?? null,
+            'signatureVersion' => $fields['signatureVersion'] ?? null,
+            'signatureHash' => $fields['signatureHash'] ?? null,
+            'signatureMimeType' => $fields['signatureMimeType'] ?? null,
+            'signatureSizeBytes' => isset($fields['signatureSizeBytes']) ? (int) $fields['signatureSizeBytes'] : null,
+            'signatureWidth' => isset($fields['signatureWidth']) ? (int) $fields['signatureWidth'] : null,
+            'signatureHeight' => isset($fields['signatureHeight']) ? (int) $fields['signatureHeight'] : null,
+            'signatureUpdatedAt' => $fields['signatureUpdatedAt'] ?? null,
+            'signatureEnabled' => (bool) ($fields['signatureEnabled'] ?? false) && ! empty($sigPath),
+            'signatoryName' => $fields['signatoryName'] ?? null,
+            'signatoryDesignation' => $fields['signatoryDesignation'] ?? null,
+        ];
+    }
+
+    private function detectImageMimeType(string $bytes): ?string
+    {
+        if (class_exists(\finfo::class)) {
+            $finfo = new \finfo(FILEINFO_MIME_TYPE);
+            $detected = $finfo->buffer($bytes);
+            if (is_string($detected) && $detected !== '') {
+                return strtolower($detected);
+            }
+        }
+
+        $info = @getimagesizefromstring($bytes);
+        if (is_array($info) && ! empty($info['mime'])) {
+            return strtolower((string) $info['mime']);
+        }
+
+        return null;
+    }
+
+    private function syncBusinessSettingsFields(string $businessId, array $meta, string $nowIso): void
+    {
+        if (! \Illuminate\Support\Facades\Schema::hasTable('business_settings')) {
+            return;
+        }
+
+        $settingsRow = DB::table('business_settings')
+            ->where(function ($q) use ($businessId) {
+                $q->where('id', $businessId)->orWhere('business_id', $businessId);
+            })
+            ->where('is_deleted', 0)
+            ->first();
+
+        if (! $settingsRow) {
+            return;
+        }
+
+        $sPayload = json_decode((string) $settingsRow->payload, true) ?: [];
+        $sFields = $sPayload['fields'] ?? [];
+        if (is_array($sFields)) {
+            $sFields = SyncController::decodeFields($sFields);
+        }
+
+        $sFields = array_merge($sFields, $meta, ['updatedAt' => $nowIso]);
+        $sPayload['fields'] = $sFields;
+
+        DB::table('business_settings')->where('id', $settingsRow->id)->update([
+            'payload' => json_encode($sPayload),
+            'updated_at' => now(),
+        ]);
     }
 }

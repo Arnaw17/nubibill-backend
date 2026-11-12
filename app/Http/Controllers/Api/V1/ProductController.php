@@ -4,16 +4,19 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Services\UnitConversionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 class ProductController extends Controller
 {
+    public function __construct(private readonly UnitConversionService $unitService = new UnitConversionService) {}
     public static function extractInt($val, int $default = 0): int
     {
         if ($val === null) return $default;
@@ -204,6 +207,8 @@ class ProductController extends Controller
                 }
             }
 
+            $vUnitResolved = $this->unitService->resolveVariantUnitConfig($vFields, [], $businessId);
+
             $variantsByProduct[$vProdId][] = [
                 'variantId' => $vId,
                 'productId' => $vProdId,
@@ -214,16 +219,27 @@ class ProductController extends Controller
                 'sku' => $vFields['sku'] ?? $vFields['variantCode'] ?? null,
                 'barcode' => $vFields['barcode'] ?? null,
                 'hsnCode' => $vFields['hsnCode'] ?? null,
-                'baseUnitId' => (string) ($vFields['baseUnitId'] ?? $vFields['unitId'] ?? 'UNIT'),
+                'baseUnitId' => $vUnitResolved['baseUnitId'],
                 'packUnitId' => $vFields['packUnitId'] ?? null,
-                'commercialUnitId' => $vFields['commercialUnitId'] ?? null,
-                'commercialUnitName' => $vFields['commercialUnitName'] ?? null,
-                'baseQuantityPerCommercialUnit' => self::extractFloat($vFields['baseQuantityPerCommercialUnit'] ?? null, 1.0),
+                'commercialUnitId' => $vFields['commercialUnitId'] ?? $vUnitResolved['defaultSalesUnitId'],
+                'commercialUnitName' => $vFields['commercialUnitName'] ?? $vUnitResolved['unitDisplayName'],
+                'baseQuantityPerCommercialUnit' => self::extractFloat($vFields['baseQuantityPerCommercialUnit'] ?? null, $vUnitResolved['salesConversionFactor']),
+                'purchaseUnitId' => $vUnitResolved['purchaseUnitId'],
+                'purchaseConversionFactor' => $vUnitResolved['purchaseConversionFactor'],
+                'defaultSalesUnitId' => $vUnitResolved['defaultSalesUnitId'],
+                'salesConversionFactor' => $vUnitResolved['salesConversionFactor'],
+                'purchasePricePerUnit' => $vUnitResolved['purchasePricePerUnit'] > 0 ? $vUnitResolved['purchasePricePerUnit'] : $vPurchaseRate,
+                'sellingPricePerUnit' => $vUnitResolved['sellingPricePerUnit'] > 0 ? $vUnitResolved['sellingPricePerUnit'] : $vSellingPrice,
+                'allowFractionalQuantity' => $vUnitResolved['allowFractionalQuantity'],
+                'allowManualUnitOverride' => $vUnitResolved['allowManualUnitOverride'],
+                'unitDisplayName' => $vUnitResolved['unitDisplayName'],
+                'unitSymbol' => $vUnitResolved['unitSymbol'],
                 'packSize' => $vFields['packSize'] ?? ($vFields['attributeValues']['packSize'] ?? null),
                 'purchaseRate' => $vPurchaseRate,
                 'sellingPrice' => $vSellingPrice,
                 'mrp' => $vMrp,
                 'defaultGstRateBps' => self::extractInt($vFields['defaultGstRateBps'] ?? $vFields['defaultGstRate'] ?? null, 0),
+                'reorderLevel' => self::extractInt($vFields['reorderLevel'] ?? $vFields['reorder_level'] ?? null, 0),
                 'rackId' => $vFields['rackId'] ?? $vFields['rack'] ?? ($vFields['attributeValues']['rack'] ?? null),
                 'status' => (string) ($vFields['status'] ?? 'ACTIVE'),
                 'isActive' => (($vFields['status'] ?? 'ACTIVE') === 'ACTIVE'),
@@ -307,6 +323,9 @@ class ProductController extends Controller
                 if (empty($pv['defaultGstRateBps']) && $parentGst > 0) {
                     $pv['defaultGstRateBps'] = $parentGst;
                 }
+                if (empty($pv['reorderLevel']) && ! empty($fields['reorderLevel'])) {
+                    $pv['reorderLevel'] = self::extractInt($fields['reorderLevel'], 0);
+                }
                 if ((empty($pv['baseUnitId']) || strtoupper($pv['baseUnitId']) === 'UNIT') && ! empty($parentBaseUnit)) {
                     $pv['baseUnitId'] = $parentBaseUnit;
                 }
@@ -322,8 +341,34 @@ class ProductController extends Controller
                         $pv['commercialUnitName'] = $attrSoldAs;
                     }
                 }
+                $mergedResolved = $this->unitService->resolveVariantUnitConfig($pv, $fields, $businessId);
+                $pv['baseUnitId'] = $mergedResolved['baseUnitId'];
+                $pv['purchaseUnitId'] = $mergedResolved['purchaseUnitId'];
+                $pv['purchaseConversionFactor'] = $mergedResolved['purchaseConversionFactor'];
+                $pv['defaultSalesUnitId'] = $mergedResolved['defaultSalesUnitId'];
+                $pv['salesConversionFactor'] = $mergedResolved['salesConversionFactor'];
+                $pv['allowFractionalQuantity'] = $mergedResolved['allowFractionalQuantity'];
+                $pv['allowManualUnitOverride'] = $mergedResolved['allowManualUnitOverride'];
+                $pv['unitDisplayName'] = $mergedResolved['unitDisplayName'];
+                $pv['unitSymbol'] = $mergedResolved['unitSymbol'];
+                $pv['purchasePricePerUnit'] = $mergedResolved['purchasePricePerUnit'];
+                $pv['sellingPricePerUnit'] = $mergedResolved['sellingPricePerUnit'];
             }
             unset($pv);
+
+            $productLevelUnits = ! empty($prodVariants)
+                ? $prodVariants[0]
+                : $this->unitService->resolveVariantUnitConfig([], $fields, $businessId);
+
+            $stockSvc = $this->stockService();
+            $rawInvBehaviour = $fields['inventoryBehaviour'] ?? ($row->inventory_behaviour ?? null);
+            $invBehaviour = $stockSvc->normalizeBehaviour($rawInvBehaviour, $fields);
+            if (($rawInvBehaviour === null || $rawInvBehaviour === '') && $stockSvc->isSandOrGravelCftProduct($fields, $prodVariants[0] ?? null)) {
+                $hasOpts = ! empty($purchaseOptionsByProduct[$prodId] ?? []);
+                if ($hasOpts || count($prodVariants) > 1) {
+                    $invBehaviour = \App\Services\InventoryStockService::BEHAVIOUR_UNIFIED_PARENT;
+                }
+            }
 
             $products[] = [
                 'productId' => $prodId,
@@ -343,6 +388,26 @@ class ProductController extends Controller
                 'productImage' => $fields['productImage'] ?? $fields['imageUrl'] ?? $row->image_url ?? null,
                 'defaultGstRateBps' => (int) ($fields['defaultGstRateBps'] ?? 0),
                 'hsnCode' => $fields['hsnCode'] ?? null,
+                'inventoryBehaviour' => $invBehaviour,
+                'defaultPurchaseOptionId' => $fields['defaultPurchaseOptionId'] ?? ($row->default_purchase_option_id ?? null),
+                'allowMultiplePurchaseOptions' => array_key_exists('allowMultiplePurchaseOptions', $fields)
+                    ? (bool) $fields['allowMultiplePurchaseOptions']
+                    : (bool) ($row->allow_multiple_purchase_options ?? true),
+                'allowMultipleSalesOptions' => array_key_exists('allowMultipleSalesOptions', $fields)
+                    ? (bool) $fields['allowMultipleSalesOptions']
+                    : (bool) ($row->allow_multiple_sales_options ?? false),
+                'trackStock' => array_key_exists('trackStock', $fields)
+                    ? (bool) $fields['trackStock']
+                    : (bool) ($row->track_stock ?? true),
+                'baseUnitId' => $fields['baseUnitId'] ?? $productLevelUnits['baseUnitId'],
+                'purchaseUnitId' => $fields['purchaseUnitId'] ?? $productLevelUnits['purchaseUnitId'],
+                'purchaseConversionFactor' => $fields['purchaseConversionFactor'] ?? $productLevelUnits['purchaseConversionFactor'],
+                'defaultSalesUnitId' => $fields['defaultSalesUnitId'] ?? $productLevelUnits['defaultSalesUnitId'],
+                'salesConversionFactor' => $fields['salesConversionFactor'] ?? $productLevelUnits['salesConversionFactor'],
+                'allowFractionalQuantity' => $fields['allowFractionalQuantity'] ?? $productLevelUnits['allowFractionalQuantity'],
+                'allowManualUnitOverride' => $fields['allowManualUnitOverride'] ?? $productLevelUnits['allowManualUnitOverride'],
+                'unitDisplayName' => $fields['unitDisplayName'] ?? $productLevelUnits['unitDisplayName'],
+                'unitSymbol' => $fields['unitSymbol'] ?? $productLevelUnits['unitSymbol'],
                 'status' => (string) ($fields['status'] ?? 'ACTIVE'),
                 'isActive' => (($fields['status'] ?? 'ACTIVE') === 'ACTIVE'),
                 'quantitySlabs' => $fields['quantitySlabs'] ?? $fields['quantity_slabs'] ?? [],
@@ -352,6 +417,15 @@ class ProductController extends Controller
                 'updatedAt' => $fields['updatedAt'] ?? $row->updated_at,
             ];
         }
+
+        $optionsByProduct = $this->stockService()->getPurchaseOptionsByProductIds(
+            $businessId,
+            array_column($products, 'productId')
+        );
+        foreach ($products as &$prodItem) {
+            $prodItem['purchaseOptions'] = $optionsByProduct[$prodItem['productId']] ?? [];
+        }
+        unset($prodItem);
 
         return ApiResponse::success($products, 'Products retrieved successfully.');
     }
@@ -447,7 +521,7 @@ class ProductController extends Controller
                     }
                 }
 
-                $variants[] = [
+                $baseVariantRow = [
                     'variantId' => $singleVid,
                     'productId' => $id,
                     'businessId' => $businessId,
@@ -469,13 +543,42 @@ class ProductController extends Controller
                     'sellingPrice' => $vSellingPrice,
                     'mrp' => $vMrp,
                     'defaultGstRateBps' => self::extractInt($vFields['defaultGstRateBps'] ?? $fields['defaultGstRateBps'] ?? null, 0),
+                    'reorderLevel' => self::extractInt($vFields['reorderLevel'] ?? $vFields['reorder_level'] ?? $fields['reorderLevel'] ?? null, 0),
                     'status' => (string) ($vFields['status'] ?? 'ACTIVE'),
                     'isActive' => (($vFields['status'] ?? 'ACTIVE') === 'ACTIVE'),
                     'quantitySlabs' => $vFields['quantitySlabs'] ?? $vFields['quantity_slabs'] ?? ($fields['quantitySlabs'] ?? $fields['quantity_slabs'] ?? []),
                     'attributeValues' => ! empty($vAttrs) ? $vAttrs : (object) [],
                 ];
+                $vResolved = $this->unitService->resolveVariantUnitConfig(array_merge($vFields, $baseVariantRow), $fields, $businessId);
+                $variants[] = array_merge($baseVariantRow, [
+                    'baseUnitId' => $vResolved['baseUnitId'],
+                    'commercialUnitId' => $vFields['commercialUnitId'] ?? $vResolved['defaultSalesUnitId'],
+                    'commercialUnitName' => $vCommUnitName ?: $vResolved['unitDisplayName'],
+                    'baseQuantityPerCommercialUnit' => self::extractFloat($vFields['baseQuantityPerCommercialUnit'] ?? null, $vResolved['salesConversionFactor']),
+                    'purchaseUnitId' => $vResolved['purchaseUnitId'],
+                    'purchaseConversionFactor' => $vResolved['purchaseConversionFactor'],
+                    'defaultSalesUnitId' => $vResolved['defaultSalesUnitId'],
+                    'salesConversionFactor' => $vResolved['salesConversionFactor'],
+                    'purchasePricePerUnit' => $vResolved['purchasePricePerUnit'] > 0 ? $vResolved['purchasePricePerUnit'] : $vPurchaseRate,
+                    'sellingPricePerUnit' => $vResolved['sellingPricePerUnit'] > 0 ? $vResolved['sellingPricePerUnit'] : $vSellingPrice,
+                    'allowFractionalQuantity' => $vResolved['allowFractionalQuantity'],
+                    'allowManualUnitOverride' => $vResolved['allowManualUnitOverride'],
+                    'unitDisplayName' => $vResolved['unitDisplayName'],
+                    'unitSymbol' => $vResolved['unitSymbol'],
+                ]);
             }
         }
+
+        $productUnitSummary = ! empty($variants)
+            ? $variants[0]
+            : $this->unitService->resolveVariantUnitConfig([], $fields, $businessId);
+
+        $stockSvc = $this->stockService();
+        $invBehaviour = $stockSvc->normalizeBehaviour(
+            $fields['inventoryBehaviour'] ?? ($row->inventory_behaviour ?? null),
+            $fields
+        );
+        $purchaseOptions = ($stockSvc->getPurchaseOptionsByProductIds($businessId, [$id]))[$id] ?? [];
 
         $product = [
             'productId' => $id,
@@ -494,11 +597,32 @@ class ProductController extends Controller
             'productImage' => $fields['productImage'] ?? $fields['imageUrl'] ?? null,
             'defaultGstRateBps' => (int) ($fields['defaultGstRateBps'] ?? 0),
             'hsnCode' => $fields['hsnCode'] ?? null,
+            'inventoryBehaviour' => $invBehaviour,
+            'defaultPurchaseOptionId' => $fields['defaultPurchaseOptionId'] ?? ($row->default_purchase_option_id ?? null),
+            'allowMultiplePurchaseOptions' => array_key_exists('allowMultiplePurchaseOptions', $fields)
+                ? (bool) $fields['allowMultiplePurchaseOptions']
+                : (bool) ($row->allow_multiple_purchase_options ?? true),
+            'allowMultipleSalesOptions' => array_key_exists('allowMultipleSalesOptions', $fields)
+                ? (bool) $fields['allowMultipleSalesOptions']
+                : (bool) ($row->allow_multiple_sales_options ?? false),
+            'trackStock' => array_key_exists('trackStock', $fields)
+                ? (bool) $fields['trackStock']
+                : (bool) ($row->track_stock ?? true),
+            'baseUnitId' => $fields['baseUnitId'] ?? $productUnitSummary['baseUnitId'],
+            'purchaseUnitId' => $fields['purchaseUnitId'] ?? $productUnitSummary['purchaseUnitId'],
+            'purchaseConversionFactor' => $fields['purchaseConversionFactor'] ?? $productUnitSummary['purchaseConversionFactor'],
+            'defaultSalesUnitId' => $fields['defaultSalesUnitId'] ?? $productUnitSummary['defaultSalesUnitId'],
+            'salesConversionFactor' => $fields['salesConversionFactor'] ?? $productUnitSummary['salesConversionFactor'],
+            'allowFractionalQuantity' => $fields['allowFractionalQuantity'] ?? $productUnitSummary['allowFractionalQuantity'],
+            'allowManualUnitOverride' => $fields['allowManualUnitOverride'] ?? $productUnitSummary['allowManualUnitOverride'],
+            'unitDisplayName' => $fields['unitDisplayName'] ?? $productUnitSummary['unitDisplayName'],
+            'unitSymbol' => $fields['unitSymbol'] ?? $productUnitSummary['unitSymbol'],
             'status' => (string) ($fields['status'] ?? 'ACTIVE'),
             'isActive' => (($fields['status'] ?? 'ACTIVE') === 'ACTIVE'),
             'quantitySlabs' => $fields['quantitySlabs'] ?? $fields['quantity_slabs'] ?? [],
             'attributeValues' => ! empty($fields['attributeValues']) ? $fields['attributeValues'] : (object) [],
             'variants' => $variants,
+            'purchaseOptions' => $purchaseOptions,
             'createdAt' => $fields['createdAt'] ?? $row->created_at,
             'updatedAt' => $fields['updatedAt'] ?? $row->updated_at,
         ];
@@ -690,6 +814,8 @@ class ProductController extends Controller
             'product_image_file' => ['nullable', 'image', 'mimes:jpg,jpeg,png', 'max:5120'],
             'default_gst_rate_bps' => ['nullable', 'integer'],
             'defaultGstRateBps' => ['nullable', 'integer'],
+            'reorder_level' => ['nullable', 'integer', 'min:0'],
+            'reorderLevel' => ['nullable', 'integer', 'min:0'],
             'hsn_code' => ['nullable', 'string'],
             'hsnCode' => ['nullable', 'string'],
             'variants' => ['nullable', 'array'],
@@ -714,6 +840,7 @@ class ProductController extends Controller
             $productImage = Storage::disk('public')->url($imagePath);
         }
         $defaultGstRateBps = (int) ($request->input('default_gst_rate_bps') ?? $request->input('defaultGstRateBps') ?? 0);
+        $productReorderLevel = (int) ($request->input('reorder_level') ?? $request->input('reorderLevel') ?? 0);
         $hsnCode = $request->input('hsn_code') ?? $request->input('hsnCode');
         $attributeValues = (array) ($request->input('attribute_values') ?? $request->input('attributeValues') ?? []);
         $quantitySlabs = (array) ($request->input('quantity_slabs') ?? $request->input('quantitySlabs') ?? []);
@@ -740,6 +867,7 @@ class ProductController extends Controller
             'productImage' => $productImage,
             'imageUrl' => $productImage,
             'defaultGstRateBps' => $defaultGstRateBps,
+            'reorderLevel' => $productReorderLevel,
             'hsnCode' => $hsnCode,
             'attributeValues' => $attributeValues,
             'quantitySlabs' => $quantitySlabs,
@@ -789,6 +917,29 @@ class ProductController extends Controller
             $vBarcode = $v['barcode'] ?? null;
             $vSku = $v['sku'] ?? 'SKU-'.strtoupper(Str::random(6));
 
+            $vAttrs = (array) ($v['attributeValues'] ?? $v['attribute_values'] ?? []);
+            $vUnitResolved = $this->unitService->resolveVariantUnitConfig(
+                array_merge($v, [
+                    'baseUnitId' => $vUnit,
+                    'commercialUnitId' => $v['commercialUnitId'] ?? $v['commercial_unit_id'] ?? $request->input('defaultSalesUnitId') ?? $request->input('default_sales_unit_id') ?? null,
+                    'commercialUnitName' => $vCommUnitName,
+                    'baseQuantityPerCommercialUnit' => (float) ($v['baseQuantityPerCommercialUnit'] ?? $v['salesConversionFactor'] ?? $v['sales_conversion_factor'] ?? 1),
+                    'purchaseUnitId' => $v['purchaseUnitId'] ?? $v['purchase_unit_id'] ?? $request->input('purchaseUnitId') ?? $request->input('purchase_unit_id') ?? null,
+                    'purchaseConversionFactor' => $v['purchaseConversionFactor'] ?? $v['purchase_conversion_factor'] ?? $v['purchaseUnitConversionFactor'] ?? $request->input('purchaseConversionFactor') ?? $request->input('purchase_conversion_factor') ?? null,
+                    'defaultSalesUnitId' => $v['defaultSalesUnitId'] ?? $v['default_sales_unit_id'] ?? $v['salesUnitId'] ?? $request->input('defaultSalesUnitId') ?? $request->input('default_sales_unit_id') ?? null,
+                    'salesConversionFactor' => $v['salesConversionFactor'] ?? $v['sales_conversion_factor'] ?? null,
+                    'purchasePricePerUnit' => $v['purchasePricePerUnit'] ?? $v['purchase_price_per_unit'] ?? $vPurchase,
+                    'sellingPricePerUnit' => $v['sellingPricePerUnit'] ?? $v['selling_price_per_unit'] ?? $vSelling,
+                    'allowFractionalQuantity' => $v['allowFractionalQuantity'] ?? $v['allow_fractional_quantity'] ?? $request->input('allowFractionalQuantity') ?? $request->input('allow_fractional_quantity') ?? null,
+                    'allowManualUnitOverride' => $v['allowManualUnitOverride'] ?? $v['allow_manual_unit_override'] ?? $request->input('allowManualUnitOverride') ?? $request->input('allow_manual_unit_override') ?? null,
+                    'unitDisplayName' => $v['unitDisplayName'] ?? $v['unit_display_name'] ?? $request->input('unitDisplayName') ?? $request->input('unit_display_name') ?? null,
+                    'unitSymbol' => $v['unitSymbol'] ?? $v['unit_symbol'] ?? $request->input('unitSymbol') ?? $request->input('unit_symbol') ?? null,
+                    'attributeValues' => $vAttrs,
+                ]),
+                $productFields,
+                $businessId
+            );
+
             $vFields = [
                 'variantId' => $variantId,
                 'productId' => $productId,
@@ -800,18 +951,29 @@ class ProductController extends Controller
                 'displayName' => $vName,
                 'sku' => $vSku,
                 'barcode' => $vBarcode,
-                'baseUnitId' => $vUnit,
-                'packUnitId' => $v['packUnitId'] ?? $v['pack_unit_id'] ?? null,
-                'commercialUnitId' => $v['commercialUnitId'] ?? $v['commercial_unit_id'] ?? null,
-                'commercialUnitName' => $vCommUnitName,
-                'baseQuantityPerCommercialUnit' => (float) ($v['baseQuantityPerCommercialUnit'] ?? 1),
+                'baseUnitId' => $vUnitResolved['baseUnitId'],
+                'packUnitId' => $v['packUnitId'] ?? $v['pack_unit_id'] ?? $vUnitResolved['purchaseUnitId'],
+                'commercialUnitId' => $v['commercialUnitId'] ?? $v['commercial_unit_id'] ?? $vUnitResolved['defaultSalesUnitId'],
+                'commercialUnitName' => $vCommUnitName ?: $vUnitResolved['unitDisplayName'],
+                'baseQuantityPerCommercialUnit' => $vUnitResolved['salesConversionFactor'],
+                'purchaseUnitId' => $vUnitResolved['purchaseUnitId'],
+                'purchaseConversionFactor' => $vUnitResolved['purchaseConversionFactor'],
+                'defaultSalesUnitId' => $vUnitResolved['defaultSalesUnitId'],
+                'salesConversionFactor' => $vUnitResolved['salesConversionFactor'],
+                'purchasePricePerUnit' => $vUnitResolved['purchasePricePerUnit'] > 0 ? $vUnitResolved['purchasePricePerUnit'] : $vPurchase,
+                'sellingPricePerUnit' => $vUnitResolved['sellingPricePerUnit'] > 0 ? $vUnitResolved['sellingPricePerUnit'] : $vSelling,
+                'allowFractionalQuantity' => $vUnitResolved['allowFractionalQuantity'],
+                'allowManualUnitOverride' => $vUnitResolved['allowManualUnitOverride'],
+                'unitDisplayName' => $vUnitResolved['unitDisplayName'],
+                'unitSymbol' => $vUnitResolved['unitSymbol'],
                 'packSize' => $v['packSize'] ?? ($v['attributeValues']['packSize'] ?? null),
                 'purchaseRate' => $vPurchase,
                 'sellingPrice' => $vSelling,
                 'mrp' => $vMrp,
                 'defaultGstRateBps' => $defaultGstRateBps,
+                'reorderLevel' => (int) ($v['reorder_level'] ?? $v['reorderLevel'] ?? $productReorderLevel),
                 'quantitySlabs' => $v['quantitySlabs'] ?? $v['quantity_slabs'] ?? $quantitySlabs,
-                'attributeValues' => $v['attributeValues'] ?? $v['attribute_values'] ?? [],
+                'attributeValues' => $vAttrs,
                 'status' => 'ACTIVE',
                 'createdAt' => $now,
                 'updatedAt' => $now,
@@ -837,6 +999,24 @@ class ProductController extends Controller
             ];
         }
 
+        $productFields['inventoryBehaviour'] = $this->stockService()->normalizeBehaviour(
+            $request->input('inventoryBehaviour') ?? $request->input('inventory_behaviour'),
+            $request->all()
+        );
+        $productFields['defaultPurchaseOptionId'] = $request->input('defaultPurchaseOptionId') ?? $request->input('default_purchase_option_id');
+        $productFields['allowMultiplePurchaseOptions'] = $request->has('allowMultiplePurchaseOptions')
+            ? (bool) $request->input('allowMultiplePurchaseOptions')
+            : ($request->has('allow_multiple_purchase_options') ? (bool) $request->input('allow_multiple_purchase_options') : true);
+        $productFields['allowMultipleSalesOptions'] = $request->has('allowMultipleSalesOptions')
+            ? (bool) $request->input('allowMultipleSalesOptions')
+            : ($request->has('allow_multiple_sales_options') ? (bool) $request->input('allow_multiple_sales_options') : false);
+        $productFields['trackStock'] = $request->has('trackStock')
+            ? (bool) $request->input('trackStock')
+            : ($request->has('track_stock') ? (bool) $request->input('track_stock') : true);
+
+        $createdPurchaseOptions = [];
+        $rawPurchaseOptions = (array) ($request->input('purchaseOptions') ?? $request->input('purchase_options') ?? []);
+
         DB::transaction(function () use (
             $productId,
             $businessId,
@@ -844,10 +1024,12 @@ class ProductController extends Controller
             $nowDb,
             $productFields,
             $variantRecords,
-            $userId
+            $userId,
+            $rawPurchaseOptions,
+            &$createdPurchaseOptions
         ) {
             // 1. Insert product
-            DB::table('products')->insert([
+            $prodRowData = [
                 'id' => $productId,
                 'document_path' => "products/$productId",
                 'business_id' => $businessId,
@@ -862,7 +1044,15 @@ class ProductController extends Controller
                     '_documentPath' => "products/$productId",
                     'fields' => $productFields,
                 ]),
-            ]);
+            ];
+            if (\Illuminate\Support\Facades\Schema::hasColumn('products', 'inventory_behaviour')) {
+                $prodRowData['inventory_behaviour'] = $productFields['inventoryBehaviour'];
+                $prodRowData['default_purchase_option_id'] = $productFields['defaultPurchaseOptionId'];
+                $prodRowData['allow_multiple_purchase_options'] = $productFields['allowMultiplePurchaseOptions'] ? 1 : 0;
+                $prodRowData['allow_multiple_sales_options'] = $productFields['allowMultipleSalesOptions'] ? 1 : 0;
+                $prodRowData['track_stock'] = $productFields['trackStock'] ? 1 : 0;
+            }
+            DB::table('products')->insert($prodRowData);
 
             // 2. Insert variants
             foreach ($variantRecords as $vRecord) {
@@ -878,6 +1068,20 @@ class ProductController extends Controller
                     'updated_at' => $vRecord['updated_at'],
                     'payload' => $vRecord['payload'],
                 ]);
+            }
+
+            // 2b. Insert purchase/sales options
+            if (! empty($rawPurchaseOptions)) {
+                $createdPurchaseOptions = $this->syncPurchaseOptionsForProduct(
+                    $businessId,
+                    $outletId,
+                    $userId,
+                    $productId,
+                    $rawPurchaseOptions,
+                    $productFields,
+                    $nowDb,
+                    $nowDb->toISOString()
+                );
             }
 
             // 3. Insert outlet placement if outlet is specified
@@ -916,6 +1120,7 @@ class ProductController extends Controller
         Log::info("Product created: {$productId} ('{$name}') with ".count($variantRecords).' variant(s)');
 
         $productFields['variants'] = array_map(fn ($r) => $r['raw_fields'], $variantRecords);
+        $productFields['purchaseOptions'] = $createdPurchaseOptions;
 
         return ApiResponse::success([
             'product' => $productFields,
@@ -1011,6 +1216,36 @@ class ProductController extends Controller
         if ($request->has('attributeValues')) {
             $fields['attributeValues'] = (array) $request->input('attributeValues');
         }
+        foreach ([
+            'baseUnitId' => ['baseUnitId', 'base_unit_id'],
+            'purchaseUnitId' => ['purchaseUnitId', 'purchase_unit_id'],
+            'purchaseConversionFactor' => ['purchaseConversionFactor', 'purchase_conversion_factor'],
+            'defaultSalesUnitId' => ['defaultSalesUnitId', 'default_sales_unit_id'],
+            'salesConversionFactor' => ['salesConversionFactor', 'sales_conversion_factor'],
+            'purchasePricePerUnit' => ['purchasePricePerUnit', 'purchase_price_per_unit'],
+            'sellingPricePerUnit' => ['sellingPricePerUnit', 'selling_price_per_unit'],
+            'allowFractionalQuantity' => ['allowFractionalQuantity', 'allow_fractional_quantity'],
+            'allowManualUnitOverride' => ['allowManualUnitOverride', 'allow_manual_unit_override'],
+            'unitDisplayName' => ['unitDisplayName', 'unit_display_name'],
+            'unitSymbol' => ['unitSymbol', 'unit_symbol'],
+            'inventoryBehaviour' => ['inventoryBehaviour', 'inventory_behaviour'],
+            'defaultPurchaseOptionId' => ['defaultPurchaseOptionId', 'default_purchase_option_id'],
+            'allowMultiplePurchaseOptions' => ['allowMultiplePurchaseOptions', 'allow_multiple_purchase_options'],
+            'allowMultipleSalesOptions' => ['allowMultipleSalesOptions', 'allow_multiple_sales_options'],
+            'trackStock' => ['trackStock', 'track_stock'],
+            'reorderLevel' => ['reorderLevel', 'reorder_level'],
+        ] as $canonKey => $aliases) {
+            foreach ($aliases as $alias) {
+                if ($request->has($alias)) {
+                    $fields[$canonKey] = $request->input($alias);
+                    break;
+                }
+            }
+        }
+        $fields['inventoryBehaviour'] = $this->stockService()->normalizeBehaviour(
+            $fields['inventoryBehaviour'] ?? null,
+            $fields
+        );
         if ($request->has('status')) {
             $status = strtoupper((string) $request->input('status'));
             $fields['status'] = $status;
@@ -1023,11 +1258,33 @@ class ProductController extends Controller
         $userId = $user ? (string) $user->id : (string) ($prodRow->tenant_id ?? '');
 
         DB::transaction(function () use ($id, $payload, $now, $nowIso, $fields, $request, $prodRow, $businessId, $userId): void {
-            DB::table('products')->where('id', $id)->update([
+            $prodUpdate = [
                 'status' => $fields['status'] ?? 'ACTIVE',
                 'updated_at' => $now,
                 'payload' => json_encode($payload),
-            ]);
+            ];
+            if (\Illuminate\Support\Facades\Schema::hasColumn('products', 'inventory_behaviour')) {
+                $prodUpdate['inventory_behaviour'] = $fields['inventoryBehaviour'];
+                $prodUpdate['default_purchase_option_id'] = $fields['defaultPurchaseOptionId'] ?? null;
+                $prodUpdate['allow_multiple_purchase_options'] = ! empty($fields['allowMultiplePurchaseOptions'] ?? true) ? 1 : 0;
+                $prodUpdate['allow_multiple_sales_options'] = ! empty($fields['allowMultipleSalesOptions'] ?? false) ? 1 : 0;
+                $prodUpdate['track_stock'] = array_key_exists('trackStock', $fields) ? (! empty($fields['trackStock']) ? 1 : 0) : 1;
+            }
+            DB::table('products')->where('id', $id)->update($prodUpdate);
+
+            if ($request->has('purchaseOptions') || $request->has('purchase_options')) {
+                $rawOptions = (array) ($request->input('purchaseOptions') ?? $request->input('purchase_options') ?? []);
+                $this->syncPurchaseOptionsForProduct(
+                    $businessId,
+                    $prodRow->outlet_id ?? null,
+                    $userId ?: (string) ($prodRow->tenant_id ?? ''),
+                    $id,
+                    $rawOptions,
+                    $fields,
+                    $now,
+                    $nowIso
+                );
+            }
 
             if ($request->has('variants')) {
                 $inputVariants = (array) $request->input('variants', []);
@@ -1079,7 +1336,38 @@ class ProductController extends Controller
                             $vFields['sku'] = $v['sku'];
                         }
                         if (isset($v['baseUnitId']) || isset($v['unitId']) || isset($v['base_unit_id'])) {
-                            $vFields['baseUnitId'] = (string) ($v['baseUnitId'] ?? $v['unitId'] ?? $v['base_unit_id']);
+                            $requestedUnitRaw = (string) ($v['baseUnitId'] ?? $v['unitId'] ?? $v['base_unit_id']);
+                            $prevResolvedUnit = $this->unitService->resolveUnit(
+                                (string) ($vFields['baseUnitId'] ?? $vFields['unitId'] ?? 'UNIT'),
+                                $businessId
+                            );
+                            $nextResolvedUnit = $this->unitService->resolveUnit($requestedUnitRaw, $businessId);
+                            $allowUnitChangeWithStock = $request->boolean('allow_unit_change_with_stock')
+                                || ! empty($v['allowUnitChangeWithStock'])
+                                || ! empty($v['unitConversionAdjustment']);
+
+                            if ($prevResolvedUnit['id'] !== $nextResolvedUnit['id'] && ! $allowUnitChangeWithStock && Schema::hasTable('stock_balances')) {
+                                $stockSvc = $this->stockService();
+                                $stockRows = DB::table('stock_balances')
+                                    ->where('business_id', $businessId)
+                                    ->where('is_deleted', 0)
+                                    ->where(function ($q) use ($vId) {
+                                        $q->where('variant_id', $vId)
+                                            ->orWhere('payload', 'like', '%"variantId":"'.$vId.'"%');
+                                    })
+                                    ->get();
+                                $totalStockMilli = 0;
+                                foreach ($stockRows as $sbRow) {
+                                    $totalStockMilli += $stockSvc->parseBalanceMilli($sbRow);
+                                }
+                                if (abs($totalStockMilli) > 0) {
+                                    throw ValidationException::withMessages([
+                                        'baseUnitId' => "Cannot change measurement unit from {$prevResolvedUnit['symbol']} to {$nextResolvedUnit['symbol']} while variant has existing stock. Please convert or adjust stock to zero first.",
+                                    ]);
+                                }
+                            }
+
+                            $vFields['baseUnitId'] = $requestedUnitRaw;
                         }
                         if (array_key_exists('packUnitId', $v) || array_key_exists('pack_unit_id', $v)) {
                             $vFields['packUnitId'] = $v['packUnitId'] ?? $v['pack_unit_id'] ?? null;
@@ -1108,6 +1396,11 @@ class ProductController extends Controller
                         if (isset($v['defaultGstRateBps']) || isset($v['default_gst_rate_bps'])) {
                             $vFields['defaultGstRateBps'] = (int) ($v['defaultGstRateBps'] ?? $v['default_gst_rate_bps']);
                         }
+                        if (isset($v['reorderLevel']) || isset($v['reorder_level'])) {
+                            $vFields['reorderLevel'] = (int) ($v['reorderLevel'] ?? $v['reorder_level']);
+                        } elseif (isset($fields['reorderLevel']) && ! isset($vFields['reorderLevel'])) {
+                            $vFields['reorderLevel'] = (int) $fields['reorderLevel'];
+                        }
                         if (isset($v['quantitySlabs']) || isset($v['quantity_slabs'])) {
                             $vFields['quantitySlabs'] = (array) ($v['quantitySlabs'] ?? $v['quantity_slabs']);
                         } elseif (isset($fields['quantitySlabs'])) {
@@ -1116,6 +1409,27 @@ class ProductController extends Controller
                         if (isset($v['attributeValues']) || isset($v['attribute_values'])) {
                             $vFields['attributeValues'] = (array) ($v['attributeValues'] ?? $v['attribute_values']);
                         }
+                        foreach ([
+                            'purchaseUnitId' => ['purchaseUnitId', 'purchase_unit_id'],
+                            'purchaseConversionFactor' => ['purchaseConversionFactor', 'purchase_conversion_factor', 'purchaseUnitConversionFactor'],
+                            'defaultSalesUnitId' => ['defaultSalesUnitId', 'default_sales_unit_id', 'salesUnitId'],
+                            'salesConversionFactor' => ['salesConversionFactor', 'sales_conversion_factor'],
+                            'purchasePricePerUnit' => ['purchasePricePerUnit', 'purchase_price_per_unit'],
+                            'sellingPricePerUnit' => ['sellingPricePerUnit', 'selling_price_per_unit'],
+                            'allowFractionalQuantity' => ['allowFractionalQuantity', 'allow_fractional_quantity'],
+                            'allowManualUnitOverride' => ['allowManualUnitOverride', 'allow_manual_unit_override'],
+                            'unitDisplayName' => ['unitDisplayName', 'unit_display_name'],
+                            'unitSymbol' => ['unitSymbol', 'unit_symbol'],
+                        ] as $canonKey => $aliases) {
+                            foreach ($aliases as $alias) {
+                                if (array_key_exists($alias, $v)) {
+                                    $vFields[$canonKey] = $v[$alias];
+                                    break;
+                                }
+                            }
+                        }
+                        $resolvedUpd = $this->unitService->resolveVariantUnitConfig($vFields, $fields, $businessId);
+                        $vFields = array_merge($vFields, $resolvedUpd);
                         $vStatus = strtoupper((string) ($v['status'] ?? ($vFields['status'] ?? 'ACTIVE')));
                         $vFields['status'] = $vStatus;
                         $vFields['updatedAt'] = $nowIso;
@@ -1154,7 +1468,7 @@ class ProductController extends Controller
                         $vGst = isset($v['defaultGstRateBps']) ? (int) $v['defaultGstRateBps'] : ($fields['defaultGstRateBps'] ?? 0);
                         $vSlabs = $v['quantitySlabs'] ?? $v['quantity_slabs'] ?? ($fields['quantitySlabs'] ?? []);
 
-                        $vFields = [
+                        $newVBase = [
                             'variantId' => $variantId,
                             'productId' => $id,
                             'businessId' => $businessId,
@@ -1169,12 +1483,23 @@ class ProductController extends Controller
                             'packUnitId' => $v['packUnitId'] ?? $v['pack_unit_id'] ?? null,
                             'commercialUnitId' => $v['commercialUnitId'] ?? $v['commercial_unit_id'] ?? null,
                             'commercialUnitName' => $vCommUnitName,
-                            'baseQuantityPerCommercialUnit' => (float) ($v['baseQuantityPerCommercialUnit'] ?? 1),
+                            'baseQuantityPerCommercialUnit' => (float) ($v['baseQuantityPerCommercialUnit'] ?? $v['salesConversionFactor'] ?? 1),
+                            'purchaseUnitId' => $v['purchaseUnitId'] ?? $v['purchase_unit_id'] ?? null,
+                            'purchaseConversionFactor' => $v['purchaseConversionFactor'] ?? $v['purchase_conversion_factor'] ?? null,
+                            'defaultSalesUnitId' => $v['defaultSalesUnitId'] ?? $v['default_sales_unit_id'] ?? null,
+                            'salesConversionFactor' => $v['salesConversionFactor'] ?? $v['sales_conversion_factor'] ?? null,
+                            'purchasePricePerUnit' => $v['purchasePricePerUnit'] ?? $v['purchase_price_per_unit'] ?? $vPurchase,
+                            'sellingPricePerUnit' => $v['sellingPricePerUnit'] ?? $v['selling_price_per_unit'] ?? $vSelling,
+                            'allowFractionalQuantity' => $v['allowFractionalQuantity'] ?? $v['allow_fractional_quantity'] ?? null,
+                            'allowManualUnitOverride' => $v['allowManualUnitOverride'] ?? $v['allow_manual_unit_override'] ?? null,
+                            'unitDisplayName' => $v['unitDisplayName'] ?? $v['unit_display_name'] ?? null,
+                            'unitSymbol' => $v['unitSymbol'] ?? $v['unit_symbol'] ?? null,
                             'packSize' => $v['packSize'] ?? ($vAttrs['packSize'] ?? null),
                             'purchaseRate' => $vPurchase,
                             'sellingPrice' => $vSelling,
                             'mrp' => $vMrp,
                             'defaultGstRateBps' => $vGst,
+                            'reorderLevel' => (int) ($v['reorderLevel'] ?? $v['reorder_level'] ?? ($fields['reorderLevel'] ?? 0)),
                             'quantitySlabs' => $vSlabs,
                             'attributeValues' => $vAttrs,
                             'status' => 'ACTIVE',
@@ -1183,6 +1508,11 @@ class ProductController extends Controller
                             'createdBy' => $userId ?: $prodRow->tenant_id,
                             'updatedBy' => $userId ?: $prodRow->tenant_id,
                         ];
+                        $newVResolved = $this->unitService->resolveVariantUnitConfig($newVBase, $fields, $businessId);
+                        $vFields = array_merge($newVBase, $newVResolved, [
+                            'commercialUnitId' => $newVBase['commercialUnitId'] ?? $newVResolved['defaultSalesUnitId'],
+                            'commercialUnitName' => $vCommUnitName ?: $newVResolved['unitDisplayName'],
+                        ]);
 
                         DB::table('product_variants')->insert([
                             'id' => $variantId,
@@ -1296,6 +1626,8 @@ class ProductController extends Controller
             ];
         }
         $fields['variants'] = $assembledVariants;
+        $optionsByProduct = $this->stockService()->getPurchaseOptionsByProductIds($businessId, [$id]);
+        $fields['purchaseOptions'] = $optionsByProduct[$id] ?? [];
 
         return ApiResponse::success($fields, 'Product updated successfully.');
     }
@@ -1638,20 +1970,37 @@ class ProductController extends Controller
             ];
         }
 
-        // Units
+        // Units (merge central DB units with standard reusable units)
         $unitRows = DB::table('units')
             ->where('is_deleted', 0)
             ->get();
         $units = [];
+        $seenUnitIds = [];
         foreach ($unitRows as $uRow) {
             $p = json_decode($uRow->payload, true) ?: [];
             $f = $p['fields'] ?? [];
+            $uId = (string) ($f['unitId'] ?? $uRow->id);
+            $seenUnitIds[$uId] = true;
+            $precision = (int) ($uRow->decimal_precision ?? $f['precision'] ?? 0);
+            $name = (string) ($uRow->name ?? $f['name'] ?? $uId);
+            $symbol = (string) ($uRow->symbol ?? $f['symbol'] ?? $name);
             $units[] = [
-                'id' => (string) ($f['unitId'] ?? $uRow->id),
-                'name' => (string) ($f['name'] ?? $uRow->id),
-                'symbol' => $f['symbol'] ?? $f['name'] ?? $uRow->id,
-                'precision' => (int) ($f['precision'] ?? 0),
+                'id' => $uId,
+                'code' => (string) ($uRow->code ?? $f['code'] ?? strtolower($symbol)),
+                'name' => $name,
+                'displayName' => (string) ($uRow->display_name ?? $f['displayName'] ?? $name),
+                'symbol' => $symbol,
+                'allowFractional' => isset($uRow->allow_fractional)
+                    ? (bool) $uRow->allow_fractional
+                    : (bool) ($f['allowFractional'] ?? ($precision > 0)),
+                'precision' => $precision,
+                'measurementDimension' => $uRow->measurement_dimension ?? $f['measurementDimension'] ?? null,
             ];
+        }
+        foreach ($this->unitService->standardUnitsForApi() as $stdUnit) {
+            if (! isset($seenUnitIds[$stdUnit['id']])) {
+                $units[] = $stdUnit;
+            }
         }
 
         // HSN Codes
@@ -1989,6 +2338,10 @@ class ProductController extends Controller
             return ApiResponse::error('Unauthorized access to product stock history.', 403, null, 'FORBIDDEN');
         }
 
+        $outletId = (string) ($request->query('outlet_id') ?? $request->query('outletId') ?? '');
+        $stockSvc = $this->stockService();
+        $meta = $businessId ? $stockSvc->resolveProductMeta($businessId, $id) : ['behaviour' => 'SEPARATE_VARIANT', 'baseUnitSymbol' => 'PCS'];
+
         $movements = [];
         if (DB::getSchemaBuilder()->hasTable('stock_movements')) {
             $query = DB::table('stock_movements')
@@ -1997,42 +2350,65 @@ class ProductController extends Controller
             if ($businessId) {
                 $query->where('business_id', $businessId);
             }
+            if ($outletId !== '' && $outletId !== 'ALL') {
+                $query->where('outlet_id', $outletId);
+            }
 
             $movements = $query->orderBy('created_at', 'desc')
                 ->limit(100)
                 ->get()
-                ->map(fn ($m) => [
-                    'id' => $m->id,
-                    'type' => $m->type,
-                    'qty_change' => (float) $m->qty_change,
-                    'balance_after' => isset($m->balance_after) ? (float) $m->balance_after : null,
-                    'reference_type' => $m->reference_type,
-                    'reference_id' => $m->reference_id,
-                    'condition' => $m->condition ?? null,
-                    'note' => $m->note ?? null,
-                    'created_at' => $m->created_at,
-                ]);
+                ->map(function ($m) {
+                    $mp = json_decode($m->payload ?? '{}', true) ?: [];
+                    $mf = $mp['fields'] ?? [];
+
+                    return [
+                        'id' => $m->id,
+                        'type' => $m->type,
+                        'qty_change' => (float) $m->qty_change,
+                        'balance_after' => isset($m->balance_after) ? (float) $m->balance_after : null,
+                        'reference_type' => $m->reference_type,
+                        'reference_id' => $m->reference_id,
+                        'purchaseOptionId' => $mf['purchaseOptionId'] ?? ($m->purchase_option_id ?? null),
+                        'purchaseOptionName' => $mf['purchaseOptionName'] ?? ($m->purchase_option_name ?? null),
+                        'conversionFactor' => isset($mf['conversionFactor']) ? (float) $mf['conversionFactor'] : null,
+                        'effectiveBaseUnitCost' => isset($mf['effectiveBaseUnitCost'])
+                            ? (int) $mf['effectiveBaseUnitCost']
+                            : (isset($m->effective_base_unit_cost) ? (int) $m->effective_base_unit_cost : null),
+                        'condition' => $m->condition ?? null,
+                        'note' => $m->note ?? null,
+                        'created_at' => $m->created_at,
+                    ];
+                });
         }
 
-        // Current stock balance
+        // Current stock balance (pooled in base units across unified or variant rows)
         $currentStock = 0.0;
-        if (DB::getSchemaBuilder()->hasTable('stock_balances')) {
-            $bal = DB::table('stock_balances')
-                ->where('business_id', $businessId)
-                ->where(function ($q) use ($id) {
-                    $q->where('id', 'like', "%_{$id}")
-                        ->orWhere('payload->fields->productId', $id);
-                })
-                ->first();
-
-            if ($bal && ! empty($bal->payload)) {
-                $p = json_decode($bal->payload, true) ?: [];
-                $currentStock = (float) ($p['fields']['quantityOnHand'] ?? $p['fields']['currentStock'] ?? 0.0);
+        if ($businessId && DB::getSchemaBuilder()->hasTable('stock_balances')) {
+            if ($outletId !== '' && $outletId !== 'ALL') {
+                $target = $stockSvc->inspectStockTarget($businessId, $outletId, $id, null, $meta['behaviour']);
+                $currentStock = round($target['totalMilli'] / 1000.0, 3);
+            } else {
+                $balRows = DB::table('stock_balances')
+                    ->where('business_id', $businessId)
+                    ->where('is_deleted', 0)
+                    ->where(function ($q) use ($id) {
+                        $q->where('product_id', $id)
+                            ->orWhere('payload->fields->productId', $id)
+                            ->orWhere('id', 'like', "%_{$id}");
+                    })
+                    ->get();
+                $totalMilli = 0;
+                foreach ($balRows as $balRow) {
+                    $totalMilli += $stockSvc->parseBalanceMilli($balRow);
+                }
+                $currentStock = round($totalMilli / 1000.0, 3);
             }
         }
 
         return ApiResponse::success([
             'productId' => $id,
+            'inventoryBehaviour' => $meta['behaviour'],
+            'baseUnitSymbol' => $meta['baseUnitSymbol'],
             'currentStock' => $currentStock,
             'movements' => $movements,
         ], 'Stock history timeline retrieved.');
@@ -2052,5 +2428,155 @@ class ProductController extends Controller
         }
 
         $request->merge($payload);
+    }
+
+    private function stockService(): \App\Services\InventoryStockService
+    {
+        return new \App\Services\InventoryStockService($this->unitService);
+    }
+
+    /**
+     * Upsert & soft-delete purchase/sales options for a parent product.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    private function syncPurchaseOptionsForProduct(
+        string $businessId,
+        ?string $outletId,
+        string $tenantId,
+        string $productId,
+        array $inputOptions,
+        array $productFields,
+        \DateTimeInterface|string $now,
+        string $nowIso
+    ): array {
+        if (! \Illuminate\Support\Facades\Schema::hasTable('product_purchase_options')) {
+            return [];
+        }
+
+        $stockSvc = $this->stockService();
+        $existingRows = DB::table('product_purchase_options')
+            ->where('product_id', $productId)
+            ->where('is_deleted', 0)
+            ->get()
+            ->keyBy('id');
+
+        $processedIds = [];
+        $baseUnitId = (string) ($productFields['baseUnitId'] ?? 'UNIT');
+
+        foreach ($inputOptions as $idx => $opt) {
+            if (! is_array($opt)) {
+                continue;
+            }
+            $optId = trim((string) ($opt['purchaseOptionId'] ?? $opt['id'] ?? ''));
+            if ($optId === '') {
+                $optId = 'POPT-'.strtoupper(\Illuminate\Support\Str::random(20));
+            }
+            $optionName = trim((string) ($opt['optionName'] ?? $opt['name'] ?? ("Option ".($idx + 1))));
+            $optionType = strtoupper(trim((string) ($opt['optionType'] ?? 'PURCHASE')));
+            if (! in_array($optionType, ['PURCHASE', 'SALE', 'BOTH'], true)) {
+                $optionType = 'PURCHASE';
+            }
+
+            $diameterMm = isset($opt['diameterMm']) && is_numeric($opt['diameterMm']) ? (float) $opt['diameterMm'] : null;
+            $lengthMetre = isset($opt['lengthMetre']) && is_numeric($opt['lengthMetre']) ? (float) $opt['lengthMetre'] : null;
+            $weightPerPieceKg = isset($opt['weightPerPieceKg']) && is_numeric($opt['weightPerPieceKg']) ? (float) $opt['weightPerPieceKg'] : null;
+            if (($weightPerPieceKg === null || $weightPerPieceKg <= 0) && $diameterMm && $lengthMetre) {
+                $weightPerPieceKg = $stockSvc->calculateTmtBarWeightKg($diameterMm, $lengthMetre);
+            }
+
+            $conversionFactor = (float) ($opt['conversionFactor'] ?? ($weightPerPieceKg ?: 1.0));
+            if ($conversionFactor <= 0) {
+                $conversionFactor = 1.0;
+            }
+            $conversionUnitId = (string) ($opt['conversionUnitId'] ?? $baseUnitId);
+            $conversionUnitDef = $this->unitService->resolveUnit($conversionUnitId, $businessId);
+            $conversionUnitSymbol = (string) ($opt['conversionUnitSymbol'] ?? $conversionUnitDef['symbol']);
+
+            $purchasePrice = self::extractInt($opt['purchasePrice'] ?? $opt['purchase_price'] ?? 0, 0);
+            $defaultSellingPrice = array_key_exists('defaultSellingPrice', $opt) || array_key_exists('default_selling_price', $opt)
+                ? self::extractInt($opt['defaultSellingPrice'] ?? $opt['default_selling_price'], 0)
+                : null;
+            $isActive = array_key_exists('isActive', $opt) ? (bool) $opt['isActive'] : true;
+            $barcode = isset($opt['barcode']) && trim((string) $opt['barcode']) !== '' ? trim((string) $opt['barcode']) : null;
+            $variantId = isset($opt['variantId']) && trim((string) $opt['variantId']) !== '' ? trim((string) $opt['variantId']) : null;
+
+            $optFields = [
+                'purchaseOptionId' => $optId,
+                'productId' => $productId,
+                'variantId' => $variantId,
+                'businessId' => $businessId,
+                'outletId' => $outletId,
+                'tenantId' => $tenantId,
+                'optionName' => $optionName,
+                'optionType' => $optionType,
+                'conversionFactor' => $conversionFactor,
+                'conversionUnitId' => $conversionUnitId,
+                'conversionUnitSymbol' => $conversionUnitSymbol,
+                'purchasePrice' => $purchasePrice,
+                'defaultSellingPrice' => $defaultSellingPrice,
+                'diameterMm' => $diameterMm,
+                'lengthMetre' => $lengthMetre,
+                'weightPerPieceKg' => $weightPerPieceKg,
+                'barcode' => $barcode,
+                'isActive' => $isActive,
+                'status' => $isActive ? 'ACTIVE' : 'INACTIVE',
+                'updatedAt' => $nowIso,
+            ];
+
+            $payloadJson = json_encode([
+                '_documentId' => $optId,
+                '_documentPath' => "product_purchase_options/{$optId}",
+                'fields' => $optFields,
+            ]);
+
+            $rowData = [
+                'business_id' => $businessId,
+                'outlet_id' => $outletId,
+                'tenant_id' => $tenantId,
+                'product_id' => $productId,
+                'variant_id' => $variantId,
+                'option_name' => $optionName,
+                'option_type' => $optionType,
+                'conversion_factor' => $conversionFactor,
+                'conversion_unit_id' => $conversionUnitId,
+                'purchase_price' => $purchasePrice,
+                'default_selling_price' => $defaultSellingPrice,
+                'diameter_mm' => $diameterMm,
+                'length_metre' => $lengthMetre,
+                'weight_per_piece_kg' => $weightPerPieceKg,
+                'barcode' => $barcode,
+                'is_active' => $isActive ? 1 : 0,
+                'status' => $isActive ? 'ACTIVE' : 'INACTIVE',
+                'is_deleted' => 0,
+                'payload' => $payloadJson,
+                'updated_at' => $now,
+            ];
+
+            if (isset($existingRows[$optId])) {
+                DB::table('product_purchase_options')->where('id', $optId)->update($rowData);
+            } else {
+                $rowData['id'] = $optId;
+                $rowData['document_path'] = "product_purchase_options/{$optId}";
+                $rowData['created_at'] = $now;
+                DB::table('product_purchase_options')->insert($rowData);
+            }
+            $processedIds[] = $optId;
+        }
+
+        foreach ($existingRows as $oldId => $oldRow) {
+            if (! in_array($oldId, $processedIds, true)) {
+                DB::table('product_purchase_options')->where('id', $oldId)->update([
+                    'is_deleted' => 1,
+                    'is_active' => 0,
+                    'status' => 'INACTIVE',
+                    'updated_at' => $now,
+                ]);
+            }
+        }
+
+        $grouped = $stockSvc->getPurchaseOptionsByProductIds($businessId, [$productId]);
+
+        return $grouped[$productId] ?? [];
     }
 }

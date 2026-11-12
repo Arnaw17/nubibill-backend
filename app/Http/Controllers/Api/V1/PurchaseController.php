@@ -4,15 +4,20 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Services\InventoryStockService;
+use App\Services\UnitConversionService;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class PurchaseController extends Controller
 {
+    public function __construct(private readonly UnitConversionService $unitService = new UnitConversionService) {}
+
     /**
      * List purchase bills for business and outlet.
      */
@@ -84,13 +89,13 @@ class PurchaseController extends Controller
             $payload = json_decode($row->payload, true) ?: [];
             $fields = $payload['fields'] ?? [];
             foreach ($fields['items'] ?? [] as $it) {
-                if (!empty($it['productId'])) {
+                if (! empty($it['productId'])) {
                     $allProductIds[] = $it['productId'];
                 }
             }
         }
         $hsnMap = [];
-        if (!empty($allProductIds)) {
+        if (! empty($allProductIds)) {
             $prods = DB::table('products')->whereIn('id', array_unique($allProductIds))->get();
             foreach ($prods as $p) {
                 $pPayload = json_decode($p->payload, true) ?: [];
@@ -121,9 +126,9 @@ class PurchaseController extends Controller
             }
 
             $items = $fields['items'] ?? [];
-            if (!empty($items) && is_array($items)) {
+            if (! empty($items) && is_array($items)) {
                 foreach ($items as &$it) {
-                    if (empty($it['hsnCode']) && !empty($it['productId']) && isset($hsnMap[$it['productId']])) {
+                    if (empty($it['hsnCode']) && ! empty($it['productId']) && isset($hsnMap[$it['productId']])) {
                         $it['hsnCode'] = $hsnMap[$it['productId']];
                     }
                 }
@@ -160,6 +165,19 @@ class PurchaseController extends Controller
                 'entrySource' => (string) ($fields['entrySource'] ?? $row->entry_source ?? 'normal'),
                 'itemsCount' => count($items),
                 'items' => $items,
+                'hasBusinessLogoSnapshot' => (bool) ($fields['hasBusinessLogoSnapshot'] ?? false),
+                'businessLogoUrl' => $fields['businessLogoUrl'] ?? null,
+                'businessLogoPath' => $fields['businessLogoPath'] ?? null,
+                'businessLogoVersion' => $fields['businessLogoVersion'] ?? null,
+                'businessLogoHash' => $fields['businessLogoHash'] ?? null,
+                'hasBusinessSignatureSnapshot' => (bool) ($fields['hasBusinessSignatureSnapshot'] ?? false),
+                'businessSignatureEnabled' => (bool) ($fields['businessSignatureEnabled'] ?? false),
+                'businessSignatureUrl' => $fields['businessSignatureUrl'] ?? null,
+                'businessSignaturePath' => $fields['businessSignaturePath'] ?? null,
+                'businessSignatureVersion' => $fields['businessSignatureVersion'] ?? null,
+                'businessSignatureHash' => $fields['businessSignatureHash'] ?? null,
+                'businessSignatoryName' => $fields['businessSignatoryName'] ?? null,
+                'businessSignatoryDesignation' => $fields['businessSignatoryDesignation'] ?? null,
                 'createdAt' => $row->created_at,
             ];
         }
@@ -206,9 +224,9 @@ class PurchaseController extends Controller
             }
         }
 
-        if (!empty($items) && is_array($items)) {
+        if (! empty($items) && is_array($items)) {
             $pIds = array_filter(array_column($items, 'productId'));
-            if (!empty($pIds)) {
+            if (! empty($pIds)) {
                 $prods = DB::table('products')->whereIn('id', array_unique($pIds))->get();
                 $hsnMap = [];
                 foreach ($prods as $p) {
@@ -219,7 +237,7 @@ class PurchaseController extends Controller
                     }
                 }
                 foreach ($items as &$it) {
-                    if (empty($it['hsnCode']) && !empty($it['productId']) && isset($hsnMap[$it['productId']])) {
+                    if (empty($it['hsnCode']) && ! empty($it['productId']) && isset($hsnMap[$it['productId']])) {
                         $it['hsnCode'] = $hsnMap[$it['productId']];
                     }
                 }
@@ -253,6 +271,19 @@ class PurchaseController extends Controller
             'taxType' => $fields['taxType'] ?? 'INTRA_STATE',
             'status' => $fields['status'] ?? $row->status ?? 'APPROVED',
             'items' => $items,
+            'hasBusinessLogoSnapshot' => (bool) ($fields['hasBusinessLogoSnapshot'] ?? false),
+            'businessLogoUrl' => $fields['businessLogoUrl'] ?? null,
+            'businessLogoPath' => $fields['businessLogoPath'] ?? null,
+            'businessLogoVersion' => $fields['businessLogoVersion'] ?? null,
+            'businessLogoHash' => $fields['businessLogoHash'] ?? null,
+            'hasBusinessSignatureSnapshot' => (bool) ($fields['hasBusinessSignatureSnapshot'] ?? false),
+            'businessSignatureEnabled' => (bool) ($fields['businessSignatureEnabled'] ?? false),
+            'businessSignatureUrl' => $fields['businessSignatureUrl'] ?? null,
+            'businessSignaturePath' => $fields['businessSignaturePath'] ?? null,
+            'businessSignatureVersion' => $fields['businessSignatureVersion'] ?? null,
+            'businessSignatureHash' => $fields['businessSignatureHash'] ?? null,
+            'businessSignatoryName' => $fields['businessSignatoryName'] ?? null,
+            'businessSignatoryDesignation' => $fields['businessSignatoryDesignation'] ?? null,
             'createdAt' => $row->created_at,
             'updatedAt' => $row->updated_at,
         ];
@@ -271,17 +302,26 @@ class PurchaseController extends Controller
             $normalizedItems[] = [
                 'product_id' => $ri['product_id'] ?? $ri['productId'] ?? null,
                 'variant_id' => $ri['variant_id'] ?? $ri['variantId'] ?? '',
+                'purchase_option_id' => $ri['purchase_option_id'] ?? $ri['purchaseOptionId'] ?? null,
+                'purchase_option_name' => $ri['purchase_option_name'] ?? $ri['purchaseOptionName'] ?? null,
+                'effective_base_unit_cost' => $ri['effective_base_unit_cost'] ?? $ri['effectiveBaseUnitCost'] ?? null,
                 'product_name' => $ri['product_name'] ?? $ri['productName'] ?? '',
                 'variant_name' => $ri['variant_name'] ?? $ri['variantName'] ?? '',
                 'quantity' => $ri['quantity'] ?? $ri['qty'] ?? 1,
-                'conversion_factor' => (int) ($ri['conversion_factor'] ?? $ri['conversionFactor'] ?? 1000),
+                'quantity_scale' => $ri['quantity_scale'] ?? $ri['quantityScale'] ?? null,
+                'conversion_factor' => $ri['conversion_factor'] ?? $ri['conversionFactor'] ?? null,
+                'purchase_conversion_factor' => $ri['purchase_conversion_factor'] ?? $ri['purchaseConversionFactor'] ?? null,
                 'base_quantity' => $ri['base_quantity'] ?? $ri['baseQuantity'] ?? null,
-                'unit_id' => $ri['unit_id'] ?? $ri['unitId'] ?? 'SYS_UNIT_PCS',
+                'unit_id' => $ri['unit_id'] ?? $ri['unitId'] ?? ($ri['purchase_unit_id'] ?? $ri['purchaseUnitId'] ?? null),
+                'unit_symbol' => $ri['unit_symbol'] ?? $ri['unitSymbol'] ?? null,
                 'rate' => $ri['rate'] ?? 0,
                 'gst_rate_bps' => $ri['gst_rate_bps'] ?? $ri['gstRateBps'] ?? 0,
                 'selling_price' => $ri['selling_price'] ?? $ri['sellingPrice'] ?? 0,
                 'mrp' => $ri['mrp'] ?? 0,
                 'barcode' => $ri['barcode'] ?? $ri['barcodeSnapshot'] ?? null,
+                'batch_number' => $ri['batch_number'] ?? $ri['batchNumber'] ?? null,
+                'manufacturing_date' => $ri['manufacturing_date'] ?? $ri['manufacturingDate'] ?? null,
+                'expiry_date' => $ri['expiry_date'] ?? $ri['expiryDate'] ?? null,
             ];
         }
 
@@ -318,16 +358,33 @@ class PurchaseController extends Controller
             'status' => 'nullable|string|in:APPROVED,DRAFT',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'nullable|string',
-            'items.*.variant_id' => 'required|string',
+            'items.*.variant_id' => 'nullable|string',
+            'items.*.purchase_option_id' => 'nullable|string',
+            'items.*.purchaseOptionId' => 'nullable|string',
+            'items.*.purchase_option_name' => 'nullable|string',
+            'items.*.purchaseOptionName' => 'nullable|string',
+            'items.*.effective_base_unit_cost' => 'nullable|numeric|min:0',
             'items.*.product_name' => 'nullable|string',
             'items.*.variant_name' => 'nullable|string',
             'items.*.quantity' => 'required|numeric|min:0.001',
+            'items.*.quantity_scale' => 'nullable|string|in:UNIT,MILLI',
+            'items.*.conversion_factor' => 'nullable|numeric|min:0.0001',
+            'items.*.purchase_conversion_factor' => 'nullable|numeric|min:0.0001',
+            'items.*.base_quantity' => 'nullable|numeric|min:0.001',
             'items.*.unit_id' => 'nullable|string',
+            'items.*.unit_symbol' => 'nullable|string',
             'items.*.rate' => 'required|numeric|min:0',
             'items.*.gst_rate_bps' => 'nullable|integer|min:0',
             'items.*.selling_price' => 'nullable|integer|min:0',
             'items.*.mrp' => 'nullable|integer|min:0',
             'items.*.barcode' => 'nullable|string',
+            'items.*.batch_number' => 'nullable|string',
+            'items.*.manufacturing_date' => 'nullable|string',
+            'items.*.expiry_date' => 'nullable|string',
+            'items.*.aggregate_size' => 'nullable|string',
+            'items.*.grade_quality' => 'nullable|string',
+            'items.*.custom_attributes' => 'nullable|array',
+            'items.*.attribute_values' => 'nullable|array',
         ]);
 
         $businessId = $validated['business_id'];
@@ -357,50 +414,168 @@ class PurchaseController extends Controller
         $supplierName = $sPayload['fields']['name'] ?? 'Supplier';
 
         // Calculate totals from line items
+        $stockSvcOuter = new InventoryStockService($this->unitService);
         $lineItems = [];
         $subtotal = 0;
         $totalTax = 0;
 
         foreach ($validated['items'] as $index => $item) {
-            $qty = (float) $item['quantity'];
+            $rawQty = (float) $item['quantity'];
             $rate = (int) $item['rate'];
             $gstRateBps = (int) ($item['gst_rate_bps'] ?? 1800);
-            $conversionFactor = (int) ($item['conversion_factor'] ?? 1000);
-            $baseQty = isset($item['base_quantity']) && $item['base_quantity'] !== null
-                ? (float) $item['base_quantity']
-                : (float) round(($qty * $conversionFactor) / 1000);
-            if ($baseQty <= 0) {
-                $baseQty = $qty;
+
+            $pId = $item['product_id'] ?? null;
+            $vIdInput = $item['variant_id'] ?? '';
+            $purchaseOptionId = $item['purchase_option_id'] ?? $item['purchaseOptionId'] ?? null;
+            $purchaseOptionName = $item['purchase_option_name'] ?? $item['purchaseOptionName'] ?? null;
+            $vFields = [];
+            $pFields = [];
+            if (! empty($vIdInput)) {
+                $vRow = DB::table('product_variants')->where('id', $vIdInput)->first();
+                if ($vRow) {
+                    $vp = json_decode($vRow->payload, true) ?: [];
+                    $vFields = $vp['fields'] ?? [];
+                    $pId = $pId ?: ($vFields['productId'] ?? '');
+                }
+            }
+            if (! empty($pId)) {
+                $pRow = DB::table('products')->where('id', $pId)->first();
+                if ($pRow) {
+                    $pp = json_decode($pRow->payload, true) ?: [];
+                    $pFields = $pp['fields'] ?? [];
+                }
+            }
+            $invBehaviour = $stockSvcOuter->normalizeBehaviour($pFields['inventoryBehaviour'] ?? null, $pFields);
+            $matchedOption = ($purchaseOptionId && $pId)
+                ? $stockSvcOuter->findPurchaseOption($businessId, (string) $pId, (string) $purchaseOptionId)
+                : null;
+            if ($matchedOption) {
+                $purchaseOptionName ??= $matchedOption['optionName'];
+            }
+            $effectiveVariantId = $vIdInput !== ''
+                ? $vIdInput
+                : ($matchedOption && ! empty($matchedOption['variantId'])
+                    ? (string) $matchedOption['variantId']
+                    : ($pId ? $stockSvcOuter->canonicalUnifiedVariantId((string) $pId) : ''));
+
+            $unitConfig = (! empty($vFields) || ! empty($pFields))
+                ? $this->unitService->resolveVariantUnitConfig($vFields, $pFields, $businessId)
+                : null;
+
+            $reqUnitRef = $item['unit_id']
+                ?? ($matchedOption['conversionUnitId'] ?? null)
+                ?? ($unitConfig['purchaseUnitId'] ?? 'SYS_UNIT_PIECE');
+            $purchaseUnit = $this->unitService->resolveUnit($reqUnitRef, $businessId);
+            $unitSymbol = $item['unit_symbol'] ?? ($purchaseOptionName ?: $purchaseUnit['symbol']);
+
+            $scale = strtoupper((string) ($item['quantity_scale'] ?? ''));
+            $isMilliCaller = $scale === 'MILLI';
+            if ($scale === '' && isset($item['base_quantity'], $item['conversion_factor'])) {
+                $cf = (float) $item['conversion_factor'];
+                if ($cf >= 1000 && abs((float) $item['base_quantity'] - (($rawQty * $cf) / 1000.0)) < 2) {
+                    $isMilliCaller = true;
+                }
             }
 
-            $taxableAmount = (int) round(($qty * $rate) / 1000); // 1000 conversion if millieunits, or direct paise
-            if ($taxableAmount == 0 && $qty > 0 && $rate > 0) {
-                $taxableAmount = (int) round($qty * $rate);
+            if ($isMilliCaller) {
+                $qtyUnits = round($rawQty / 1000.0, 6);
+                $convFactorDecimal = round(((float) ($item['conversion_factor'] ?? 1000)) / 1000.0, 6);
+                $baseQtyMilli = isset($item['base_quantity']) && $item['base_quantity'] !== null
+                    ? (int) round((float) $item['base_quantity'])
+                    : $this->unitService->toMilliUnits($this->unitService->toBaseQuantity($qtyUnits, $convFactorDecimal));
+                $baseQtyUnits = $this->unitService->fromMilliUnits($baseQtyMilli);
+                $taxableAmount = (int) round(($rawQty * $rate) / 1000);
+            } else {
+                $qtyUnits = round($rawQty, 6);
+                $explicitFactor = $item['purchase_conversion_factor'] ?? $item['conversion_factor'] ?? null;
+                if ($explicitFactor !== null && (float) $explicitFactor > 0) {
+                    $convFactorDecimal = (float) $explicitFactor;
+                } elseif ($matchedOption !== null && (float) ($matchedOption['conversionFactor'] ?? 0) > 0) {
+                    $convFactorDecimal = (float) $matchedOption['conversionFactor'];
+                } elseif ($unitConfig !== null) {
+                    $convFactorDecimal = $purchaseUnit['id'] === $unitConfig['purchaseUnitId']
+                        ? (float) $unitConfig['purchaseConversionFactor']
+                        : $this->unitService->defaultPairFactor($purchaseUnit['id'], $unitConfig['baseUnitId']);
+                } else {
+                    $convFactorDecimal = 1.0;
+                }
+                $baseQtyUnits = $this->unitService->toBaseQuantity($qtyUnits, $convFactorDecimal);
+                $baseQtyMilli = $this->unitService->toMilliUnits($baseQtyUnits);
+                $taxableAmount = $this->unitService->calculateLineGrossPaise($qtyUnits, $rate);
+            }
+
+            if ($unitConfig !== null && $matchedOption === null) {
+                $baseUnitMeta = $this->unitService->resolveUnit($unitConfig['baseUnitId'], $businessId);
+                $rawExplicit = $item['purchase_conversion_factor'] ?? $item['conversion_factor'] ?? null;
+                $compatFactor = $rawExplicit !== null ? (float) $rawExplicit : ($convFactorDecimal ?? null);
+                if (! $this->unitService->areUnitsCompatible($purchaseUnit, $baseUnitMeta, $compatFactor)) {
+                    throw ValidationException::withMessages([
+                        "items.{$index}.unit_id" => "Purchase unit '{$purchaseUnit['symbol']}' is incompatible with inventory unit '{$baseUnitMeta['symbol']}'.",
+                    ]);
+                }
+                if (! $isMilliCaller) {
+                    $allowFracPurchase = $purchaseUnit['id'] === $unitConfig['baseUnitId']
+                        ? (bool) $unitConfig['allowFractionalQuantity']
+                        : (bool) $purchaseUnit['allowFractional'];
+                    $this->unitService->validateQuantity($qtyUnits, $allowFracPurchase, $unitSymbol);
+                }
+            }
+
+            if ($taxableAmount == 0 && $qtyUnits > 0 && $rate > 0) {
+                $taxableAmount = $this->unitService->calculateLineGrossPaise($qtyUnits, $rate);
             }
 
             $taxAmount = (int) round(($taxableAmount * $gstRateBps) / 10000);
             $subtotal += $taxableAmount;
             $totalTax += $taxAmount;
+            $effectiveBaseCostPaise = isset($item['effective_base_unit_cost']) && (int) $item['effective_base_unit_cost'] > 0
+                ? (int) $item['effective_base_unit_cost']
+                : $stockSvcOuter->calculateEffectiveBaseUnitCostPaise($taxableAmount + $taxAmount, $baseQtyUnits);
 
-            $pId = $item['product_id'] ?? null;
-            if (! $pId && ! empty($item['variant_id'])) {
-                $vRow = DB::table('product_variants')->where('id', $item['variant_id'])->first();
-                if ($vRow) {
-                    $vp = json_decode($vRow->payload, true) ?: [];
-                    $pId = $vp['fields']['productId'] ?? '';
-                }
+            $mergedAttrSnapshot = array_merge(
+                is_array($pFields['attributeValues'] ?? null) ? $pFields['attributeValues'] : [],
+                is_array($vFields['attributeValues'] ?? null) ? $vFields['attributeValues'] : [],
+                is_array($item['attribute_values'] ?? $item['attributeValues'] ?? null) ? ($item['attribute_values'] ?? $item['attributeValues']) : []
+            );
+            $snapSize = $item['aggregate_size'] ?? $item['size'] ?? ($mergedAttrSnapshot['aggregateSize'] ?? $mergedAttrSnapshot['size'] ?? null);
+            $snapQuality = $item['grade_quality'] ?? $item['quality'] ?? ($mergedAttrSnapshot['gradeQuality'] ?? $mergedAttrSnapshot['quality'] ?? null);
+            if ($snapSize !== null && $snapSize !== '') {
+                $mergedAttrSnapshot['aggregateSize'] = $snapSize;
+            }
+            if ($snapQuality !== null && $snapQuality !== '') {
+                $mergedAttrSnapshot['gradeQuality'] = $snapQuality;
             }
 
             $lineItems[] = [
                 'purchaseItemId' => 'LINE_'.Str::random(16)."_{$index}",
                 'productId' => $pId,
-                'variantId' => $item['variant_id'],
-                'productName' => $item['product_name'] ?? 'Product',
-                'variantName' => $item['variant_name'] ?? 'Default',
-                'quantity' => $qty,
-                'baseQuantity' => $baseQty,
-                'conversionFactor' => $conversionFactor,
-                'unitId' => $item['unit_id'] ?? 'SYS_UNIT_PCS',
+                'variantId' => $effectiveVariantId,
+                'categoryId' => $pFields['categoryId'] ?? $pFields['category_id'] ?? null,
+                'categoryName' => $pFields['category'] ?? $pFields['categoryName'] ?? null,
+                'inventoryBehaviour' => $invBehaviour,
+                'purchaseOptionId' => $purchaseOptionId,
+                'purchaseOptionName' => $purchaseOptionName,
+                'effectiveBaseUnitCost' => $effectiveBaseCostPaise,
+                'productName' => $item['product_name'] ?? ($pFields['productName'] ?? $pFields['name'] ?? 'Product'),
+                'variantName' => $item['variant_name'] ?? ($purchaseOptionName ?: ($vFields['variantName'] ?? 'Default')),
+                'aggregateSize' => $snapSize,
+                'gradeQuality' => $snapQuality,
+                'attributeValues' => ! empty($mergedAttrSnapshot) ? $mergedAttrSnapshot : null,
+                'customAttributes' => is_array($item['custom_attributes'] ?? null)
+                    ? $item['custom_attributes']
+                    : (is_array($mergedAttrSnapshot['customAttributes'] ?? null) ? $mergedAttrSnapshot['customAttributes'] : (! empty($mergedAttrSnapshot) ? $mergedAttrSnapshot : null)),
+                'quantity' => $qtyUnits,
+                'quantityScale' => 'UNIT',
+                'quantityMilli' => $this->unitService->toMilliUnits($qtyUnits),
+                'baseQuantity' => $baseQtyMilli,
+                'baseQuantityUnits' => $baseQtyUnits,
+                'conversionFactor' => $convFactorDecimal,
+                'conversionFactorMilli' => (int) round($convFactorDecimal * 1000),
+                'unitId' => $purchaseUnit['id'],
+                'unitSymbol' => $unitSymbol,
+                'unitDisplayName' => $purchaseOptionName ?: $purchaseUnit['displayName'],
+                'baseUnitId' => $unitConfig['baseUnitId'] ?? $purchaseUnit['id'],
+                'baseUnitSymbol' => $unitConfig['baseUnitSymbol'] ?? $unitSymbol,
                 'rate' => $rate,
                 'gstRateBps' => $gstRateBps,
                 'taxableAmount' => $taxableAmount,
@@ -409,6 +584,9 @@ class PurchaseController extends Controller
                 'mrp' => (int) ($item['mrp'] ?? 0),
                 'barcode' => $item['barcode'] ?? null,
                 'barcodeSnapshot' => $item['barcode'] ?? null,
+                'batch_number' => $item['batch_number'] ?? null,
+                'manufacturing_date' => $item['manufacturing_date'] ?? null,
+                'expiry_date' => $item['expiry_date'] ?? null,
                 'storageType' => 'OUTLET',
                 'storageLocationId' => $outletId,
             ];
@@ -435,7 +613,10 @@ class PurchaseController extends Controller
         $purchaseBillId = 'PB-'.strtoupper(Str::random(32));
         $supplierBusinessId = "{$supplierId}_{$businessId}";
 
-        $billFields = [
+        $logoSnapshot = BusinessController::resolveActiveLogoSnapshot($businessId);
+        $signatureSnapshot = BusinessController::resolveActiveSignatureSnapshot($businessId);
+
+        $billFields = array_merge([
             'purchaseBillId' => $purchaseBillId,
             'purchaseNumber' => $purchaseNumber,
             'businessId' => $businessId,
@@ -468,7 +649,7 @@ class PurchaseController extends Controller
             'createdBy' => $userId,
             'updatedAt' => $now,
             'updatedBy' => $userId,
-        ];
+        ], $logoSnapshot, $signatureSnapshot);
 
         DB::transaction(function () use (
             $purchaseBillId,
@@ -504,9 +685,44 @@ class PurchaseController extends Controller
             ]);
 
             // 2. Insert line items
-            foreach ($lineItems as $item) {
+            $stockSvc = new InventoryStockService($this->unitService);
+            $hasPbUnitCols = Schema::hasColumn('purchase_bill_items', 'unit_symbol');
+            $hasPbOptionCols = Schema::hasColumn('purchase_bill_items', 'purchase_option_id');
+            foreach ($lineItems as &$item) {
+                $pId = (string) ($item['productId'] ?? $item['product_id'] ?? '');
+                $purchaseOptionId = $item['purchaseOptionId'] ?? $item['purchase_option_id'] ?? null;
+                $purchaseOptionName = $item['purchaseOptionName'] ?? $item['purchase_option_name'] ?? null;
+                if ($purchaseOptionId && $pId !== '') {
+                    $opt = $stockSvc->findPurchaseOption($businessId, $pId, (string) $purchaseOptionId);
+                    if ($opt) {
+                        $purchaseOptionName ??= $opt['optionName'];
+                        $item['purchaseOptionName'] = $purchaseOptionName;
+                        if (empty($item['conversionFactor']) || (float) $item['conversionFactor'] <= 0) {
+                            $item['conversionFactor'] = max(0.0001, (float) ($opt['conversionFactor'] ?? 1.0));
+                            $qtyUnitsOpt = (float) ($item['quantity'] ?? 0);
+                            $baseUnitsOpt = $this->unitService->toBaseQuantity($qtyUnitsOpt, (float) $item['conversionFactor']);
+                            $item['baseQuantityUnits'] = $baseUnitsOpt;
+                            $item['baseQuantity'] = $this->unitService->toMilliUnits($baseUnitsOpt);
+                        }
+                    }
+                }
+                $qtyUnits = (float) ($item['quantity'] ?? 0);
+                $baseUnitsForCost = (float) ($item['baseQuantityUnits'] ?? $this->unitService->fromMilliUnits((int) ($item['baseQuantity'] ?? 0)));
+                $rate = (int) ($item['rate'] ?? 0);
+                $lineCost = (int) ($item['taxableAmount'] ?? 0) + (int) ($item['taxAmount'] ?? 0);
+                if ($lineCost <= 0 && $qtyUnits > 0 && $rate > 0) {
+                    $lineCost = $this->unitService->calculateLineGrossPaise($qtyUnits, $rate);
+                }
+                $effectiveBaseCostPaise = (int) ($item['effectiveBaseUnitCost'] ?? $item['effective_base_unit_cost'] ?? 0);
+                if ($effectiveBaseCostPaise <= 0 && $baseUnitsForCost > 0 && $lineCost > 0) {
+                    $effectiveBaseCostPaise = $stockSvc->calculateEffectiveBaseUnitCostPaise($lineCost, $baseUnitsForCost);
+                }
+                $item['purchaseOptionId'] = $purchaseOptionId;
+                $item['purchaseOptionName'] = $purchaseOptionName;
+                $item['effectiveBaseUnitCost'] = $effectiveBaseCostPaise;
+
                 $itemId = $item['purchaseItemId'];
-                DB::table('purchase_bill_items')->insert([
+                $pbItemRow = [
                     'id' => $itemId,
                     'document_path' => "purchase_bill_items/{$itemId}",
                     'business_id' => $businessId,
@@ -522,8 +738,25 @@ class PurchaseController extends Controller
                         'outletId' => $outletId,
                         'tenantId' => $userId,
                     ])]),
-                ]);
+                ];
+                if (Schema::hasColumn('purchase_bill_items', 'quantity')) {
+                    $pbItemRow['quantity'] = $item['quantity'] ?? 0;
+                }
+                if ($hasPbUnitCols) {
+                    $pbItemRow['unit_id'] = $item['unitId'] ?? null;
+                    $pbItemRow['unit_symbol'] = $item['unitSymbol'] ?? null;
+                    $pbItemRow['unit_display_name'] = $item['unitDisplayName'] ?? null;
+                    $pbItemRow['conversion_factor'] = $item['conversionFactor'] ?? 1.0;
+                    $pbItemRow['base_quantity'] = $item['baseQuantityUnits'] ?? ($item['quantity'] ?? 0);
+                }
+                if ($hasPbOptionCols) {
+                    $pbItemRow['purchase_option_id'] = $purchaseOptionId;
+                    $pbItemRow['purchase_option_name'] = $purchaseOptionName;
+                    $pbItemRow['effective_base_unit_cost'] = $effectiveBaseCostPaise;
+                }
+                DB::table('purchase_bill_items')->insert($pbItemRow);
             }
+            unset($item);
 
             // 3. If APPROVED, post to supplier balances & ledger
             if ($status === 'APPROVED') {
@@ -664,128 +897,60 @@ class PurchaseController extends Controller
                 foreach ($lineItems as $item) {
                     $vId = $item['variantId'] ?? $item['variant_id'] ?? '';
                     $pId = $item['productId'] ?? $item['product_id'] ?? '';
-                    $qty = (int) ($item['quantity'] ?? 0);
-                    if ($qty > 0 && $qty < 500) {
-                        $qty = $qty * 1000;
-                    }
-                    $baseQuantity = (int) ($item['baseQuantity'] ?? $item['base_quantity'] ?? $qty);
-                    if ($baseQuantity > 0 && $baseQuantity < 500) {
-                        $baseQuantity = $baseQuantity * 1000;
-                    }
+                    $baseQuantity = (int) ($item['baseQuantity'] ?? $item['base_quantity'] ?? 0);
+                    $qtyUnits = (float) ($item['quantity'] ?? 0);
+                    $baseQtyUnits = (float) ($item['baseQuantityUnits'] ?? $this->unitService->fromMilliUnits($baseQuantity));
+                    $unitSymbol = (string) ($item['unitSymbol'] ?? 'PCS');
+                    $baseUnitSymbol = (string) ($item['baseUnitSymbol'] ?? $unitSymbol);
                     $rate = (int) ($item['rate'] ?? 0);
                     $lineCost = (int) ($item['taxableAmount'] ?? 0) + (int) ($item['taxAmount'] ?? 0);
                     if ($lineCost <= 0 && $baseQuantity > 0 && $rate > 0) {
-                        $lineCost = (int) round(($baseQuantity * $rate) / 1000);
+                        $lineCost = $this->unitService->calculateLineGrossPaise($qtyUnits > 0 ? $qtyUnits : $baseQtyUnits, $rate);
                     }
-                    if (! $vId || $baseQuantity <= 0) {
+                    if ((! $vId && ! $pId) || $baseQuantity <= 0) {
                         continue;
                     }
 
-                    // Resolve base variant if this is a load variant
-                    $targetVariantId = $vId;
-                    if ($pId) {
-                        $vRows = DB::table('product_variants')
-                            ->where('product_id', $pId)
-                            ->orWhere('payload->fields->productId', $pId)
-                            ->get();
-                        foreach ($vRows as $vRow) {
-                            $vp = json_decode($vRow->payload, true) ?: [];
-                            $vf = $vp['fields'] ?? [];
-                            $c = (float) ($vf['baseQuantityPerCommercialUnit'] ?? 1);
-                            $vn = strtolower((string) ($vf['name'] ?? $vf['variantName'] ?? ''));
-                            if ($c <= 1 || str_contains($vn, 'piece') || str_contains($vn, 'cft') || str_contains($vn, 'bag')) {
-                                $targetVariantId = (string) ($vf['variantId'] ?? $vRow->id);
-                                break;
-                            }
-                        }
+                    $purchaseOptionId = $item['purchaseOptionId'] ?? $item['purchase_option_id'] ?? null;
+                    $purchaseOptionName = $item['purchaseOptionName'] ?? $item['purchase_option_name'] ?? null;
+                    $effectiveBaseCostPaise = (int) ($item['effectiveBaseUnitCost'] ?? 0);
+                    if ($effectiveBaseCostPaise <= 0 && $baseQtyUnits > 0 && $lineCost > 0) {
+                        $effectiveBaseCostPaise = $stockSvc->calculateEffectiveBaseUnitCostPaise($lineCost, $baseQtyUnits);
                     }
+                    $effectiveRateForBalance = $effectiveBaseCostPaise > 0 ? $effectiveBaseCostPaise : $rate;
 
-                    $stockBalId = "{$userId}_{$outletId}_{$targetVariantId}";
-                    $stockRow = DB::table('stock_balances')
-                        ->where('business_id', $businessId)
-                        ->where('outlet_id', $outletId)
-                        ->where(function ($q) use ($stockBalId, $targetVariantId) {
-                            $q->where('id', $stockBalId)
-                                ->orWhere('payload->fields->variantId', $targetVariantId);
-                        })
-                        ->lockForUpdate()
-                        ->first();
-
-                    if ($stockRow) {
-                        $sbPayload = json_decode($stockRow->payload, true) ?: [];
-                        $sbFields = $sbPayload['fields'] ?? [];
-                        $currStock = (int) ($sbFields['quantityOnHand'] ?? $sbFields['currentStock'] ?? 0);
-                        if ($currStock > 0 && $currStock < 500) {
-                            $currStock = $currStock * 1000;
-                        } elseif ($currStock >= 1000) {
-                            $remainder = $currStock % 1000;
-                            if ($remainder > 0 && $remainder < 50) {
-                                $currStock = ((int) ($currStock / 1000) + $remainder) * 1000;
-                            }
-                        }
-                        $newStock = $currStock + $baseQuantity;
-                        $oldVal = (int) ($sbFields['totalValue'] ?? 0);
-                        $newVal = $oldVal + $lineCost;
-                        $sbFields['quantityOnHand'] = $newStock;
-                        $sbFields['currentStock'] = $newStock;
-                        $sbFields['totalValue'] = $newVal;
-                        $sbFields['averageCost'] = $newStock > 0 ? (int) round(($newVal * 1000) / $newStock) : 0;
-                        $sbFields['avgCostPaise'] = $newStock > 0 ? (int) round($newVal / max(1, $newStock / 1000)) : 0;
-                        $sbFields['lastPurchasePricePaise'] = $rate;
-                        $sbFields['updatedAt'] = $now;
-                        $sbPayload['fields'] = $sbFields;
-
-                        DB::table('stock_balances')->where('id', $stockRow->id)->update([
-                            'updated_at' => $dbNow,
-                            'payload' => json_encode($sbPayload),
-                        ]);
-                    } else {
-                        $sbFields = [
-                            'stockBalanceId' => $stockBalId,
-                            'tenantId' => $userId,
-                            'businessId' => $businessId,
-                            'outletId' => $outletId,
-                            'variantId' => $targetVariantId,
-                            'productId' => $pId,
-                            'quantityOnHand' => $baseQuantity,
-                            'currentStock' => $baseQuantity,
-                            'totalValue' => $lineCost,
-                            'averageCost' => $baseQuantity > 0 ? (int) round(($lineCost * 1000) / $baseQuantity) : 0,
-                            'avgCostPaise' => $baseQuantity > 0 ? (int) round($lineCost / max(1, $baseQuantity / 1000)) : 0,
-                            'lastPurchasePricePaise' => $rate,
-                            'createdAt' => $now,
-                            'updatedAt' => $now,
-                        ];
-                        DB::table('stock_balances')->insert([
-                            'id' => $stockBalId,
-                            'document_path' => "stock_balances/{$stockBalId}",
-                            'business_id' => $businessId,
-                            'outlet_id' => $outletId,
-                            'status' => 'ACTIVE',
-                            'created_at' => $dbNow,
-                            'updated_at' => $dbNow,
-                            'is_deleted' => 0,
-                            'payload' => json_encode(['fields' => $sbFields]),
-                        ]);
-                    }
-
-                    $qtyUnits = $qty >= 1000 ? ($qty / 1000.0) : (float) $qty;
-                    $balUnits = (isset($newStock) ? $newStock : $qty) >= 1000 ? ((isset($newStock) ? $newStock : $qty) / 1000.0) : (float) (isset($newStock) ? $newStock : $qty);
-                    $movementId = 'STM-'.strtoupper(\Illuminate\Support\Str::random(24));
-                    DB::table('stock_movements')->insert([
+                    $stockResult = $this->upsertStockBalanceOnPurchase(
+                        $businessId,
+                        $outletId,
+                        $userId,
+                        $pId,
+                        $vId,
+                        $baseQuantity,
+                        $lineCost,
+                        $effectiveRateForBalance,
+                        $item['baseUnitId'] ?? null,
+                        $now,
+                        $dbNow
+                    );
+                    $newStock = $stockResult['newStockMilli'];
+                    $invBehaviour = $stockResult['behaviour'] ?? 'SEPARATE_VARIANT';
+                    $balUnits = $this->unitService->fromMilliUnits($newStock);
+                    $movementId = 'STM-'.strtoupper(Str::random(24));
+                    $optNote = $purchaseOptionName ? " via {$purchaseOptionName}" : '';
+                    $movementInsert = [
                         'id' => $movementId,
                         'document_path' => "stock_movements/{$movementId}",
                         'business_id' => $businessId,
                         'outlet_id' => $outletId,
                         'product_id' => $pId ?: $vId,
-                        'variant_id' => $vId ?: $pId,
+                        'variant_id' => $stockResult['targetVariantId'],
                         'type' => 'purchase',
-                        'qty_change' => $qtyUnits,
+                        'qty_change' => $baseQtyUnits,
                         'balance_after' => $balUnits,
                         'reference_type' => 'purchase_bill',
                         'reference_id' => $purchaseBillId,
                         'condition' => 'good',
-                        'note' => "Purchase {$purchaseNumber} inwarded ({$qtyUnits} received)",
+                        'note' => "Purchase {$purchaseNumber}{$optNote} inwarded ({$qtyUnits} {$unitSymbol} -> {$baseQtyUnits} {$baseUnitSymbol})",
                         'created_by' => $userId,
                         'created_at' => $dbNow,
                         'updated_at' => $dbNow,
@@ -795,26 +960,47 @@ class PurchaseController extends Controller
                                 'businessId' => $businessId,
                                 'outletId' => $outletId,
                                 'productId' => $pId ?: $vId,
-                                'variantId' => $vId ?: $pId,
+                                'variantId' => $stockResult['targetVariantId'],
+                                'originalVariantId' => $vId ?: null,
+                                'inventoryBehaviour' => $invBehaviour,
+                                'purchaseOptionId' => $purchaseOptionId,
+                                'purchaseOptionName' => $purchaseOptionName,
+                                'effectiveBaseUnitCost' => $effectiveBaseCostPaise,
                                 'type' => 'PURCHASE',
-                                'qtyBase' => (int) round($qtyUnits),
-                                'quantity' => $qtyUnits,
-                                'balanceAfter' => (int) round($balUnits),
-                                'reason' => "Purchase {$purchaseNumber}",
+                                'qtyBase' => $baseQuantity,
+                                'quantity' => $baseQtyUnits,
+                                'purchaseQuantity' => $qtyUnits,
+                                'unit' => $baseUnitSymbol,
+                                'purchaseUnit' => $unitSymbol,
+                                'conversionFactor' => $item['conversionFactor'] ?? 1.0,
+                                'balanceAfter' => $newStock,
+                                'balanceAfterUnits' => $balUnits,
+                                'reason' => "Purchase {$purchaseNumber}{$optNote}",
                                 'referenceId' => $purchaseBillId,
                                 'userId' => $userId,
                                 'createdAt' => $now,
                                 'immutable' => true,
                             ],
                         ]),
-                    ]);
+                    ];
+                    if (Schema::hasColumn('stock_movements', 'purchase_option_id')) {
+                        $movementInsert['purchase_option_id'] = $purchaseOptionId;
+                        $movementInsert['purchase_option_name'] = $purchaseOptionName;
+                        $movementInsert['effective_base_unit_cost'] = $effectiveBaseCostPaise;
+                        $movementInsert['inventory_behaviour'] = $invBehaviour;
+                    }
+                    DB::table('stock_movements')->insert($movementInsert);
 
-                    // Create Inventory Batch for new purchase line
-                    $batchNumber = !empty($item['batch_number']) ? trim((string) $item['batch_number']) : ('BATCH-'.strtoupper(Str::random(8)));
+                    // Create Inventory Batch for new purchase line in base inventory units with effective base cost
+                    $batchNumber = ! empty($item['batch_number']) ? trim((string) $item['batch_number']) : ('BATCH-'.strtoupper(Str::random(8)));
                     $autoBatchId = 'BATCH-'.strtoupper(Str::random(24));
-                    $batchMfgDate = !empty($item['manufacturing_date']) ? Carbon::parse($item['manufacturing_date'])->toDateString() : null;
-                    $batchExpiryDate = !empty($item['expiry_date']) ? Carbon::parse($item['expiry_date'])->toDateString() : null;
+                    $batchMfgDate = ! empty($item['manufacturing_date']) ? Carbon::parse($item['manufacturing_date'])->toDateString() : null;
+                    $batchExpiryDate = ! empty($item['expiry_date']) ? Carbon::parse($item['expiry_date'])->toDateString() : null;
                     $purDateStr = Carbon::parse($purchaseDate ?: $now)->toDateString();
+
+                    $batchCostRupees = $effectiveRateForBalance >= 100 || $effectiveBaseCostPaise > 0
+                        ? round($effectiveRateForBalance / 100.0, 4)
+                        : $effectiveRateForBalance;
 
                     $pcBatchData = [
                         'id' => $autoBatchId,
@@ -830,30 +1016,56 @@ class PurchaseController extends Controller
                             'batchId' => $autoBatchId,
                             'batchNumber' => $batchNumber,
                             'productId' => $pId ?: $vId,
-                            'variantId' => $vId ?: $pId,
+                            'variantId' => $stockResult['targetVariantId'],
+                            'inventoryBehaviour' => $invBehaviour,
                             'purchaseBillId' => $purchaseBillId,
+                            'purchaseOptionId' => $purchaseOptionId,
+                            'purchaseOptionName' => $purchaseOptionName,
                             'originalInvoiceNumber' => $purchaseNumber,
-                            'originalQuantity' => $qtyUnits,
-                            'availableQuantity' => $qtyUnits,
+                            'originalQuantity' => $baseQtyUnits,
+                            'availableQuantity' => $baseQtyUnits,
                             'soldQuantity' => 0,
+                            'unitId' => $item['baseUnitId'] ?? null,
+                            'unitSymbol' => $baseUnitSymbol,
                             'purchaseDate' => $purDateStr,
-                            'purchaseRate' => $rate,
+                            'purchaseRate' => $effectiveRateForBalance,
+                            'effectiveBaseUnitCost' => $effectiveBaseCostPaise,
                             'mfgDate' => $batchMfgDate,
                             'expiryDate' => $batchExpiryDate,
                             'isHistorical' => false,
                             'status' => 'ACTIVE',
                         ]]),
                     ];
-                    if (Schema::hasColumn('inventory_batches', 'variant_id')) $pcBatchData['variant_id'] = $vId ?: $pId;
-                    if (Schema::hasColumn('inventory_batches', 'batch_number')) $pcBatchData['batch_number'] = $batchNumber;
-                    if (Schema::hasColumn('inventory_batches', 'mfg_date')) $pcBatchData['mfg_date'] = $batchMfgDate;
-                    if (Schema::hasColumn('inventory_batches', 'expiry_date')) $pcBatchData['expiry_date'] = $batchExpiryDate;
-                    if (Schema::hasColumn('inventory_batches', 'purchase_rate')) $pcBatchData['purchase_rate'] = $rate >= 1000 ? ($rate / 100.0) : $rate;
-                    if (Schema::hasColumn('inventory_batches', 'quantity_initial')) $pcBatchData['quantity_initial'] = $qtyUnits;
-                    if (Schema::hasColumn('inventory_batches', 'quantity_available')) $pcBatchData['quantity_available'] = $qtyUnits;
-                    if (Schema::hasColumn('inventory_batches', 'is_historical')) $pcBatchData['is_historical'] = 0;
-                    if (Schema::hasColumn('inventory_batches', 'purchase_bill_id')) $pcBatchData['purchase_bill_id'] = $purchaseBillId;
-                    if (Schema::hasColumn('inventory_batches', 'purchase_date')) $pcBatchData['purchase_date'] = $purDateStr;
+                    if (Schema::hasColumn('inventory_batches', 'variant_id')) {
+                        $pcBatchData['variant_id'] = $stockResult['targetVariantId'];
+                    }
+                    if (Schema::hasColumn('inventory_batches', 'batch_number')) {
+                        $pcBatchData['batch_number'] = $batchNumber;
+                    }
+                    if (Schema::hasColumn('inventory_batches', 'mfg_date')) {
+                        $pcBatchData['mfg_date'] = $batchMfgDate;
+                    }
+                    if (Schema::hasColumn('inventory_batches', 'expiry_date')) {
+                        $pcBatchData['expiry_date'] = $batchExpiryDate;
+                    }
+                    if (Schema::hasColumn('inventory_batches', 'purchase_rate')) {
+                        $pcBatchData['purchase_rate'] = $batchCostRupees;
+                    }
+                    if (Schema::hasColumn('inventory_batches', 'quantity_initial')) {
+                        $pcBatchData['quantity_initial'] = $baseQtyUnits;
+                    }
+                    if (Schema::hasColumn('inventory_batches', 'quantity_available')) {
+                        $pcBatchData['quantity_available'] = $baseQtyUnits;
+                    }
+                    if (Schema::hasColumn('inventory_batches', 'is_historical')) {
+                        $pcBatchData['is_historical'] = 0;
+                    }
+                    if (Schema::hasColumn('inventory_batches', 'purchase_bill_id')) {
+                        $pcBatchData['purchase_bill_id'] = $purchaseBillId;
+                    }
+                    if (Schema::hasColumn('inventory_batches', 'purchase_date')) {
+                        $pcBatchData['purchase_date'] = $purDateStr;
+                    }
 
                     DB::table('inventory_batches')->insert($pcBatchData);
 
@@ -874,20 +1086,38 @@ class PurchaseController extends Controller
                             'referenceType' => 'purchase_bill',
                             'referenceId' => $purchaseBillId,
                             'movementType' => 'PURCHASE_INWARD',
-                            'quantityChanged' => $qtyUnits,
-                            'quantityAfter' => $qtyUnits,
+                            'quantityChanged' => $baseQtyUnits,
+                            'quantityAfter' => $baseQtyUnits,
                         ]]),
                     ];
-                    if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) $pcIbmData['batch_id'] = $autoBatchId;
-                    if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) $pcIbmData['reference_type'] = 'purchase_bill';
-                    if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) $pcIbmData['reference_id'] = $purchaseBillId;
-                    if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) $pcIbmData['movement_type'] = 'PURCHASE_INWARD';
-                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) $pcIbmData['quantity_changed'] = $qtyUnits;
-                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) $pcIbmData['quantity_after'] = $qtyUnits;
+                    if (Schema::hasColumn('inventory_batch_movements', 'batch_id')) {
+                        $pcIbmData['batch_id'] = $autoBatchId;
+                    }
+                    if (Schema::hasColumn('inventory_batch_movements', 'reference_type')) {
+                        $pcIbmData['reference_type'] = 'purchase_bill';
+                    }
+                    if (Schema::hasColumn('inventory_batch_movements', 'reference_id')) {
+                        $pcIbmData['reference_id'] = $purchaseBillId;
+                    }
+                    if (Schema::hasColumn('inventory_batch_movements', 'movement_type')) {
+                        $pcIbmData['movement_type'] = 'PURCHASE_INWARD';
+                    }
+                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_changed')) {
+                        $pcIbmData['quantity_changed'] = $baseQtyUnits;
+                    }
+                    if (Schema::hasColumn('inventory_batch_movements', 'quantity_after')) {
+                        $pcIbmData['quantity_after'] = $baseQtyUnits;
+                    }
 
                     DB::table('inventory_batch_movements')->insert($pcIbmData);
 
-                    // Auto-reflect purchase selling price, MRP, and rate to variant and product
+                    // Auto-reflect purchase selling price, MRP, and effective base rate without overwriting base rates with load/tonne prices
+                    $isUnified = $stockSvc->isUnifiedBehaviour($invBehaviour);
+                    $convFactor = (float) ($item['conversionFactor'] ?? 1.0);
+                    $rateToReflect = ($isUnified || $convFactor !== 1.0) && $effectiveBaseCostPaise > 0
+                        ? $effectiveBaseCostPaise
+                        : $rate;
+
                     if (! empty($vId)) {
                         $vRow = DB::table('product_variants')
                             ->where('id', $vId)
@@ -896,16 +1126,17 @@ class PurchaseController extends Controller
                         if ($vRow) {
                             $vPayload = json_decode($vRow->payload, true) ?: [];
                             $vFields = $vPayload['fields'] ?? [];
-                            if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
+                            if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0 && ! $isUnified && $convFactor == 1.0) {
                                 $vFields['sellingPrice'] = (int) $item['sellingPrice'];
                             }
-                            if (! empty($item['mrp']) && (int) $item['mrp'] > 0) {
+                            if (! empty($item['mrp']) && (int) $item['mrp'] > 0 && ! $isUnified && $convFactor == 1.0) {
                                 $vFields['mrp'] = (int) $item['mrp'];
                             }
-                            if ($rate > 0) {
-                                $vFields['purchaseRate'] = $rate;
+                            if ($rateToReflect > 0) {
+                                $vFields['purchaseRate'] = $rateToReflect;
+                                $vFields['purchasePricePerUnit'] = $rateToReflect;
                             }
-                            if (! empty($item['barcode'])) {
+                            if (! empty($item['barcode']) && ! $isUnified) {
                                 $vFields['barcode'] = $item['barcode'];
                             }
                             $vFields['updatedAt'] = $now;
@@ -925,14 +1156,15 @@ class PurchaseController extends Controller
                         if ($pRow) {
                             $pPayload = json_decode($pRow->payload, true) ?: [];
                             $pFields = $pPayload['fields'] ?? [];
-                            if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
+                            if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0 && ! $isUnified && $convFactor == 1.0) {
                                 $pFields['sellingPrice'] = (int) $item['sellingPrice'];
                             }
-                            if (! empty($item['mrp']) && (int) $item['mrp'] > 0) {
+                            if (! empty($item['mrp']) && (int) $item['mrp'] > 0 && ! $isUnified && $convFactor == 1.0) {
                                 $pFields['mrp'] = (int) $item['mrp'];
                             }
-                            if ($rate > 0) {
-                                $pFields['purchaseRate'] = $rate;
+                            if ($rateToReflect > 0) {
+                                $pFields['purchaseRate'] = $rateToReflect;
+                                $pFields['purchasePricePerUnit'] = $rateToReflect;
                             }
                             $pFields['updatedAt'] = $now;
                             $pPayload['fields'] = $pFields;
@@ -1228,115 +1460,81 @@ class PurchaseController extends Controller
             }
 
             // Stock balances
+            $stockSvc = new InventoryStockService($this->unitService);
             foreach ($lineItems as $item) {
                 $vId = $item['variantId'] ?? $item['variant_id'] ?? '';
                 $pId = $item['productId'] ?? $item['product_id'] ?? '';
-                $qty = (int) ($item['quantity'] ?? 0);
-                if ($qty > 0 && $qty < 500) {
-                    $qty = $qty * 1000;
+                $purchaseOptionId = $item['purchaseOptionId'] ?? $item['purchase_option_id'] ?? null;
+                $purchaseOptionName = $item['purchaseOptionName'] ?? $item['purchase_option_name'] ?? null;
+                $convFactor = (float) ($item['conversionFactor'] ?? $item['conversion_factor'] ?? 1.0);
+                $optMatchedFactor = null;
+                if ($purchaseOptionId && $pId !== '') {
+                    $opt = $stockSvc->findPurchaseOption($businessId, $pId, (string) $purchaseOptionId);
+                    if ($opt) {
+                        $purchaseOptionName ??= $opt['optionName'];
+                        $optMatchedFactor = max(0.0001, (float) ($opt['conversionFactor'] ?? 1.0));
+                        if (! isset($item['conversionFactor']) && ! isset($item['conversion_factor'])) {
+                            $convFactor = $optMatchedFactor;
+                        }
+                    }
                 }
-                $baseQuantity = (int) ($item['baseQuantity'] ?? $item['base_quantity'] ?? $qty);
-                if ($baseQuantity > 0 && $baseQuantity < 500) {
-                    $baseQuantity = $baseQuantity * 1000;
+                if ($convFactor <= 0) {
+                    $convFactor = 1.0;
+                }
+
+                $baseQuantity = (int) ($item['baseQuantity'] ?? $item['base_quantity'] ?? 0);
+                if ($baseQuantity <= 0 && isset($item['baseQuantityUnits'])) {
+                    $baseQuantity = $this->unitService->toMilliUnits((float) $item['baseQuantityUnits']);
+                }
+                if ($baseQuantity <= 0 && isset($item['quantity'])) {
+                    $itemScale = strtoupper((string) ($item['quantityScale'] ?? $item['quantity_scale'] ?? ''));
+                    if ($itemScale === 'MILLI') {
+                        $qtyUnits = ((float) $item['quantity']) / 1000.0;
+                        $factorDecimal = $convFactor >= 1000 ? ($convFactor / 1000.0) : $convFactor;
+                        $baseQuantity = $this->unitService->toMilliUnits($this->unitService->toBaseQuantity($qtyUnits, $factorDecimal));
+                    } elseif ($optMatchedFactor !== null && $convFactor >= 1000 && abs(($convFactor / 1000.0) - $optMatchedFactor) < 0.01) {
+                        $qtyUnits = (float) $item['quantity'] >= 1000 ? ((float) $item['quantity'] / 1000.0) : (float) $item['quantity'];
+                        $baseQuantity = $this->unitService->toMilliUnits($this->unitService->toBaseQuantity($qtyUnits, $optMatchedFactor));
+                    } else {
+                        $baseQuantity = $this->unitService->toMilliUnits($this->unitService->toBaseQuantity((float) $item['quantity'], $convFactor));
+                    }
                 }
                 $rate = (int) ($item['rate'] ?? 0);
                 $lineCost = (int) ($item['taxableAmount'] ?? 0) + (int) ($item['taxAmount'] ?? 0);
                 if ($lineCost <= 0 && $baseQuantity > 0 && $rate > 0) {
-                    $lineCost = (int) round(($baseQuantity * $rate) / 1000);
+                    $qtyUnitsForCost = (float) ($item['quantity'] ?? $this->unitService->fromMilliUnits($baseQuantity));
+                    $lineCost = $this->unitService->calculateLineGrossPaise($qtyUnitsForCost, $rate);
                 }
-                if (! $vId || $baseQuantity <= 0) {
+                $baseQtyUnits = $this->unitService->fromMilliUnits($baseQuantity);
+                $effectiveBaseCostPaise = (int) ($item['effectiveBaseUnitCost'] ?? $item['effective_base_unit_cost'] ?? 0);
+                if ($effectiveBaseCostPaise <= 0 && $baseQtyUnits > 0 && $lineCost > 0) {
+                    $effectiveBaseCostPaise = $stockSvc->calculateEffectiveBaseUnitCostPaise($lineCost, $baseQtyUnits);
+                }
+
+                if ((! $vId && ! $pId) || $baseQuantity <= 0) {
                     continue;
                 }
 
-                // Resolve base variant if this is a load variant
-                $targetVariantId = $vId;
-                if ($pId) {
-                    $vRows = DB::table('product_variants')
-                        ->where('product_id', $pId)
-                        ->orWhere('payload->fields->productId', $pId)
-                        ->get();
-                    foreach ($vRows as $vRow) {
-                        $vp = json_decode($vRow->payload, true) ?: [];
-                        $vf = $vp['fields'] ?? [];
-                        $c = (float) ($vf['baseQuantityPerCommercialUnit'] ?? 1);
-                        $vn = strtolower((string) ($vf['name'] ?? $vf['variantName'] ?? ''));
-                        if ($c <= 1 || str_contains($vn, 'piece') || str_contains($vn, 'cft') || str_contains($vn, 'bag')) {
-                            $targetVariantId = (string) ($vf['variantId'] ?? $vRow->id);
-                            break;
-                        }
-                    }
-                }
+                $stockResult = $this->upsertStockBalanceOnPurchase(
+                    $businessId,
+                    $outletId,
+                    $userId,
+                    $pId,
+                    $vId,
+                    $baseQuantity,
+                    $lineCost,
+                    $effectiveBaseCostPaise > 0 ? $effectiveBaseCostPaise : $rate,
+                    $item['baseUnitId'] ?? null,
+                    $now,
+                    $dbNow
+                );
+                $meta = $pId !== '' ? $stockSvc->resolveProductMeta($businessId, $pId) : ['behaviour' => 'SEPARATE_VARIANT'];
+                $isUnified = $stockSvc->isUnifiedBehaviour($meta['behaviour']);
+                $rateToReflect = ($isUnified || $convFactor !== 1.0) && $effectiveBaseCostPaise > 0
+                    ? $effectiveBaseCostPaise
+                    : $rate;
 
-                $stockBalId = "{$userId}_{$outletId}_{$targetVariantId}";
-                $stockRow = DB::table('stock_balances')
-                    ->where('business_id', $businessId)
-                    ->where('outlet_id', $outletId)
-                    ->where(function ($q) use ($stockBalId, $targetVariantId) {
-                        $q->where('id', $stockBalId)
-                            ->orWhere('payload->fields->variantId', $targetVariantId);
-                    })
-                    ->lockForUpdate()
-                    ->first();
-
-                if ($stockRow) {
-                    $sbPayload = json_decode($stockRow->payload, true) ?: [];
-                    $sbFields = $sbPayload['fields'] ?? [];
-                    $currStock = (int) ($sbFields['quantityOnHand'] ?? $sbFields['currentStock'] ?? 0);
-                    if ($currStock > 0 && $currStock < 500) {
-                        $currStock = $currStock * 1000;
-                    } elseif ($currStock >= 1000) {
-                        $remainder = $currStock % 1000;
-                        if ($remainder > 0 && $remainder < 50) {
-                            $currStock = ((int) ($currStock / 1000) + $remainder) * 1000;
-                        }
-                    }
-                    $newStock = $currStock + $baseQuantity;
-                    $oldVal = (int) ($sbFields['totalValue'] ?? 0);
-                    $newVal = $oldVal + $lineCost;
-                    $sbFields['quantityOnHand'] = $newStock;
-                    $sbFields['currentStock'] = $newStock;
-                    $sbFields['totalValue'] = $newVal;
-                    $sbFields['averageCost'] = $newStock > 0 ? (int) round(($newVal * 1000) / $newStock) : 0;
-                    $sbFields['avgCostPaise'] = $newStock > 0 ? (int) round($newVal / max(1, $newStock / 1000)) : 0;
-                    $sbFields['lastPurchasePricePaise'] = $rate;
-                    $sbFields['updatedAt'] = $now;
-                    $sbPayload['fields'] = $sbFields;
-
-                    DB::table('stock_balances')->where('id', $stockRow->id)->update([
-                        'updated_at' => $dbNow,
-                        'payload' => json_encode($sbPayload),
-                    ]);
-                } else {
-                    $sbFields = [
-                        'stockBalanceId' => $stockBalId,
-                        'tenantId' => $userId,
-                        'businessId' => $businessId,
-                        'outletId' => $outletId,
-                        'variantId' => $targetVariantId,
-                        'productId' => $pId,
-                        'quantityOnHand' => $baseQuantity,
-                        'currentStock' => $baseQuantity,
-                        'totalValue' => $lineCost,
-                        'averageCost' => $baseQuantity > 0 ? (int) round(($lineCost * 1000) / $baseQuantity) : 0,
-                        'avgCostPaise' => $baseQuantity > 0 ? (int) round($lineCost / max(1, $baseQuantity / 1000)) : 0,
-                        'lastPurchasePricePaise' => $rate,
-                        'createdAt' => $now,
-                        'updatedAt' => $now,
-                    ];
-                    DB::table('stock_balances')->insert([
-                        'id' => $stockBalId,
-                        'document_path' => "stock_balances/{$stockBalId}",
-                        'business_id' => $businessId,
-                        'outlet_id' => $outletId,
-                        'status' => 'ACTIVE',
-                        'created_at' => $dbNow,
-                        'updated_at' => $dbNow,
-                        'is_deleted' => 0,
-                        'payload' => json_encode(['fields' => $sbFields]),
-                    ]);
-                }
-
-                // Auto-reflect purchase selling price, MRP, and rate to variant and product
+                // Auto-reflect purchase selling price, MRP, and effective base rate without overwriting with load prices
                 if (! empty($vId)) {
                     $vRow = DB::table('product_variants')
                         ->where('id', $vId)
@@ -1345,16 +1543,17 @@ class PurchaseController extends Controller
                     if ($vRow) {
                         $vPayload = json_decode($vRow->payload, true) ?: [];
                         $vFields = $vPayload['fields'] ?? [];
-                        if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
+                        if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0 && ! $isUnified && $convFactor == 1.0) {
                             $vFields['sellingPrice'] = (int) $item['sellingPrice'];
                         }
-                        if (! empty($item['mrp']) && (int) $item['mrp'] > 0) {
+                        if (! empty($item['mrp']) && (int) $item['mrp'] > 0 && ! $isUnified && $convFactor == 1.0) {
                             $vFields['mrp'] = (int) $item['mrp'];
                         }
-                        if ($rate > 0) {
-                            $vFields['purchaseRate'] = $rate;
+                        if ($rateToReflect > 0) {
+                            $vFields['purchaseRate'] = $rateToReflect;
+                            $vFields['purchasePricePerUnit'] = $rateToReflect;
                         }
-                        if (! empty($item['barcode'])) {
+                        if (! empty($item['barcode']) && ! $isUnified) {
                             $vFields['barcode'] = $item['barcode'];
                         }
                         $vFields['updatedAt'] = $now;
@@ -1374,14 +1573,15 @@ class PurchaseController extends Controller
                     if ($pRow) {
                         $pPayload = json_decode($pRow->payload, true) ?: [];
                         $pFields = $pPayload['fields'] ?? [];
-                        if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0) {
+                        if (! empty($item['sellingPrice']) && (int) $item['sellingPrice'] > 0 && ! $isUnified && $convFactor == 1.0) {
                             $pFields['sellingPrice'] = (int) $item['sellingPrice'];
                         }
-                        if (! empty($item['mrp']) && (int) $item['mrp'] > 0) {
+                        if (! empty($item['mrp']) && (int) $item['mrp'] > 0 && ! $isUnified && $convFactor == 1.0) {
                             $pFields['mrp'] = (int) $item['mrp'];
                         }
-                        if ($rate > 0) {
-                            $pFields['purchaseRate'] = $rate;
+                        if ($rateToReflect > 0) {
+                            $pFields['purchaseRate'] = $rateToReflect;
+                            $pFields['purchasePricePerUnit'] = $rateToReflect;
                         }
                         $pFields['updatedAt'] = $now;
                         $pPayload['fields'] = $pFields;
@@ -1397,5 +1597,166 @@ class PurchaseController extends Controller
         return ApiResponse::success([
             'purchaseBill' => $fields,
         ], 'Purchase bill approved successfully.');
+    }
+
+    /**
+     * Upsert stock balance in base milli-units without ambiguous <500 heuristics.
+     *
+    /**
+     * @return array{targetVariantId: string, newStockMilli: int, behaviour: string}
+     */
+    private function upsertStockBalanceOnPurchase(
+        string $businessId,
+        string $outletId,
+        string $userId,
+        ?string $productId,
+        string $variantId,
+        int $baseQuantityMilli,
+        int $lineCost,
+        int $rate,
+        ?string $baseUnitId,
+        string $now,
+        $dbNow
+    ): array {
+        $stockSvc = new InventoryStockService($this->unitService);
+        $meta = ! empty($productId)
+            ? $stockSvc->resolveProductMeta($businessId, $productId)
+            : [
+                'behaviour' => InventoryStockService::BEHAVIOUR_SEPARATE_VARIANT,
+                'baseUnitId' => $baseUnitId ?? 'UNIT',
+            ];
+        $behaviour = $meta['behaviour'];
+        $target = $stockSvc->inspectStockTarget($businessId, $outletId, (string) $productId, $variantId, $behaviour);
+        $targetVariantId = $target['canonicalVariantId'] ?: $variantId;
+        $stockRow = $target['canonicalRow'];
+        $resolvedBaseUnitId = $baseUnitId ?: $meta['baseUnitId'];
+        $stockBalId = $stockRow ? (string) $stockRow->id : "{$userId}_{$outletId}_{$targetVariantId}";
+
+        if ($stockRow) {
+            $currStock = $target['totalMilli'];
+            $newStock = $currStock + $baseQuantityMilli;
+            $oldUnits = $this->unitService->fromMilliUnits($currStock);
+            $addedUnits = $this->unitService->fromMilliUnits($baseQuantityMilli);
+            $oldAvgPaise = $target['weightedAvgCostPaise'] > 0 ? $target['weightedAvgCostPaise'] : $rate;
+            $avgPaise = $stockSvc->calculateWeightedAverageCostPaise($oldUnits, $oldAvgPaise, $addedUnits, $lineCost);
+
+            $sbPayload = json_decode($stockRow->payload ?? '{}', true) ?: [];
+            $sbFields = $sbPayload['fields'] ?? [];
+            $oldVal = (int) ($sbFields['totalValue'] ?? round($oldUnits * $oldAvgPaise));
+            $newVal = $oldVal + $lineCost;
+
+            $sbFields['productId'] = $productId ?: ($sbFields['productId'] ?? null);
+            $sbFields['variantId'] = $targetVariantId;
+            $sbFields['inventoryBehaviour'] = $behaviour;
+            $sbFields['quantityOnHand'] = $newStock;
+            $sbFields['currentStock'] = $newStock;
+            $sbFields['stockScale'] = 'MILLI';
+            if ($resolvedBaseUnitId) {
+                $sbFields['baseUnitId'] = $resolvedBaseUnitId;
+            }
+            $sbFields['totalValue'] = $newVal;
+            $sbFields['averageCost'] = $avgPaise;
+            $sbFields['avgCostPaise'] = $avgPaise;
+            $sbFields['costPrice'] = $avgPaise;
+            $sbFields['weightedAvgCost'] = $avgPaise;
+            $sbFields['lastPurchasePricePaise'] = $rate;
+            $sbFields['updatedAt'] = $now;
+            $sbPayload['fields'] = $sbFields;
+
+            $upd = [
+                'updated_at' => $dbNow,
+                'payload' => json_encode($sbPayload),
+            ];
+            if (Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
+                $upd['quantity_on_hand'] = $this->unitService->fromMilliUnits($newStock);
+            }
+            if (Schema::hasColumn('stock_balances', 'product_id') && $productId) {
+                $upd['product_id'] = $productId;
+            }
+            if (Schema::hasColumn('stock_balances', 'variant_id')) {
+                $upd['variant_id'] = $targetVariantId;
+            }
+            if (Schema::hasColumn('stock_balances', 'inventory_behaviour')) {
+                $upd['inventory_behaviour'] = $behaviour;
+            }
+            DB::table('stock_balances')->where('id', $stockRow->id)->update($upd);
+
+            if ($stockSvc->isUnifiedBehaviour($behaviour)) {
+                foreach ($target['allRows'] as $extraRow) {
+                    if ((string) $extraRow->id === (string) $stockRow->id) {
+                        continue;
+                    }
+                    $ep = json_decode($extraRow->payload ?? '{}', true) ?: [];
+                    $ef = $ep['fields'] ?? [];
+                    $ef['quantityOnHand'] = 0;
+                    $ef['currentStock'] = 0;
+                    $ef['consolidatedInto'] = $stockRow->id;
+                    $ef['updatedAt'] = $now;
+                    $ep['fields'] = $ef;
+                    $extraUpd = [
+                        'is_deleted' => 1,
+                        'status' => 'CONSOLIDATED',
+                        'updated_at' => $dbNow,
+                        'payload' => json_encode($ep),
+                    ];
+                    if (Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
+                        $extraUpd['quantity_on_hand'] = 0;
+                    }
+                    DB::table('stock_balances')->where('id', $extraRow->id)->update($extraUpd);
+                }
+            }
+
+            return ['targetVariantId' => $targetVariantId, 'newStockMilli' => $newStock, 'behaviour' => $behaviour];
+        }
+
+        $baseQtyUnits = $this->unitService->fromMilliUnits($baseQuantityMilli);
+        $avgPaise = $baseQtyUnits > 0 ? $stockSvc->calculateEffectiveBaseUnitCostPaise($lineCost, $baseQtyUnits) : $rate;
+        $sbFields = [
+            'stockBalanceId' => $stockBalId,
+            'tenantId' => $userId,
+            'businessId' => $businessId,
+            'outletId' => $outletId,
+            'variantId' => $targetVariantId,
+            'productId' => $productId,
+            'inventoryBehaviour' => $behaviour,
+            'quantityOnHand' => $baseQuantityMilli,
+            'currentStock' => $baseQuantityMilli,
+            'stockScale' => 'MILLI',
+            'baseUnitId' => $resolvedBaseUnitId,
+            'totalValue' => $lineCost,
+            'averageCost' => $avgPaise,
+            'avgCostPaise' => $avgPaise,
+            'costPrice' => $avgPaise,
+            'weightedAvgCost' => $avgPaise,
+            'lastPurchasePricePaise' => $rate,
+            'createdAt' => $now,
+            'updatedAt' => $now,
+        ];
+        $ins = [
+            'id' => $stockBalId,
+            'document_path' => "stock_balances/{$stockBalId}",
+            'business_id' => $businessId,
+            'outlet_id' => $outletId,
+            'status' => 'ACTIVE',
+            'created_at' => $dbNow,
+            'updated_at' => $dbNow,
+            'is_deleted' => 0,
+            'payload' => json_encode(['fields' => $sbFields]),
+        ];
+        if (Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
+            $ins['quantity_on_hand'] = $this->unitService->fromMilliUnits($baseQuantityMilli);
+        }
+        if (Schema::hasColumn('stock_balances', 'product_id')) {
+            $ins['product_id'] = $productId;
+        }
+        if (Schema::hasColumn('stock_balances', 'variant_id')) {
+            $ins['variant_id'] = $targetVariantId;
+        }
+        if (Schema::hasColumn('stock_balances', 'inventory_behaviour')) {
+            $ins['inventory_behaviour'] = $behaviour;
+        }
+        DB::table('stock_balances')->insert($ins);
+
+        return ['targetVariantId' => $targetVariantId, 'newStockMilli' => $baseQuantityMilli, 'behaviour' => $behaviour];
     }
 }

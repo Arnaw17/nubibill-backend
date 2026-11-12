@@ -131,14 +131,40 @@ class ReturnService
                     $resolvedProductName = 'Item';
                 }
 
-                $calculatedItems[] = [
+                $origUnit = ! empty($item['unit']) ? (string) $item['unit'] : null;
+                $convFactor = (float) ($item['conversion_factor'] ?? 1.0);
+                if (! empty($item['original_bill_item_id'])) {
+                    $origTable = ($type === 'sale_return') ? 'invoice_items' : 'purchase_bill_items';
+                    if (DB::getSchemaBuilder()->hasTable($origTable)) {
+                        $origRow = DB::table($origTable)->where('id', $item['original_bill_item_id'])->first();
+                        if ($origRow) {
+                            $origP = json_decode((string) ($origRow->payload ?? '{}'), true) ?: [];
+                            $origF = $origP['fields'] ?? [];
+                            if ($origUnit === null || $origUnit === '') {
+                                $origUnit = (string) ($origF['unitSymbol'] ?? $origF['unit'] ?? ($origRow->unit_symbol ?? ''));
+                            }
+                            if (! isset($item['conversion_factor']) && isset($origF['conversionFactor']) && (float) $origF['conversionFactor'] > 0) {
+                                $convFactor = (float) $origF['conversionFactor'];
+                                if ($convFactor >= 1000 && $type === 'purchase_return' && (($origF['quantityScale'] ?? '') === 'MILLI' || ((($origF['quantityScale'] ?? '') === '') && (float) ($origF['quantity'] ?? 0) >= 1000))) {
+                                    $convFactor = $convFactor / 1000.0;
+                                }
+                            }
+                        }
+                    }
+                }
+                if ($convFactor <= 0) {
+                    $convFactor = 1.0;
+                }
+                $baseQty = round($qty * $convFactor, 3);
+
+                $rowData = [
                     'id' => (string) Str::uuid(),
                     'original_bill_item_id' => $item['original_bill_item_id'] ?? null,
                     'product_id' => ! empty($item['product_id']) ? (string) $item['product_id'] : ($item['original_bill_item_id'] ?? 'item'),
                     'variant_id' => ! empty($item['variant_id']) ? (string) $item['variant_id'] : null,
                     'product_name' => $resolvedProductName,
                     'hsn_code' => ! empty($item['hsn_code']) ? (string) $item['hsn_code'] : null,
-                    'unit' => ! empty($item['unit']) ? (string) $item['unit'] : null,
+                    'unit' => $origUnit !== '' ? $origUnit : null,
                     'qty_returned' => $qty,
                     'unit_price' => $unitPrice,
                     'discount_amount' => $discount,
@@ -154,13 +180,19 @@ class ReturnService
                     'batch_number' => ! empty($item['batch_number']) ? (string) $item['batch_number'] : null,
                     'expiry_date' => ! empty($item['expiry_date']) ? Carbon::parse($item['expiry_date'])->toDateString() : null,
                 ];
+                if (\Illuminate\Support\Facades\Schema::hasColumn('return_items', 'conversion_factor')) {
+                    $rowData['unit_symbol'] = $origUnit;
+                    $rowData['conversion_factor'] = $convFactor;
+                    $rowData['base_quantity'] = $baseQty;
+                }
+                $calculatedItems[] = $rowData;
             }
 
             // 5. Create Return Header Record
             $returnId = (string) Str::uuid();
             $refundMode = $data['refund_mode'] ?? 'adjust_to_ledger';
 
-            $returnRecord = ReturnModel::create([
+            $returnAttributes = [
                 'id' => $returnId,
                 'user_id' => $user->id,
                 'business_id' => $businessId,
@@ -190,7 +222,30 @@ class ReturnService
                 'grand_total' => $grandTotal,
                 'status' => 'completed',
                 'created_by' => $user->id,
-            ]);
+            ];
+
+            if (\Illuminate\Support\Facades\Schema::hasColumn('returns', 'business_logo_path')) {
+                $logoSnapshot = \App\Http\Controllers\Api\V1\BusinessController::resolveActiveLogoSnapshot($businessId);
+                $returnAttributes['business_logo_url'] = $logoSnapshot['businessLogoUrl'];
+                $returnAttributes['business_logo_path'] = $logoSnapshot['businessLogoPath'];
+                $returnAttributes['business_logo_version'] = $logoSnapshot['businessLogoVersion'];
+                $returnAttributes['business_logo_hash'] = $logoSnapshot['businessLogoHash'];
+                $returnAttributes['has_business_logo_snapshot'] = (bool) $logoSnapshot['hasBusinessLogoSnapshot'];
+            }
+
+            if (\Illuminate\Support\Facades\Schema::hasColumn('returns', 'business_signature_path')) {
+                $signatureSnapshot = \App\Http\Controllers\Api\V1\BusinessController::resolveActiveSignatureSnapshot($businessId);
+                $returnAttributes['business_signature_url'] = $signatureSnapshot['businessSignatureUrl'];
+                $returnAttributes['business_signature_path'] = $signatureSnapshot['businessSignaturePath'];
+                $returnAttributes['business_signature_version'] = $signatureSnapshot['businessSignatureVersion'];
+                $returnAttributes['business_signature_hash'] = $signatureSnapshot['businessSignatureHash'];
+                $returnAttributes['business_signatory_name'] = $signatureSnapshot['businessSignatoryName'];
+                $returnAttributes['business_signatory_designation'] = $signatureSnapshot['businessSignatoryDesignation'];
+                $returnAttributes['business_signature_enabled'] = (bool) $signatureSnapshot['businessSignatureEnabled'];
+                $returnAttributes['has_business_signature_snapshot'] = (bool) $signatureSnapshot['hasBusinessSignatureSnapshot'];
+            }
+
+            $returnRecord = ReturnModel::create($returnAttributes);
 
             // 6. Create Return Items
             foreach ($calculatedItems as $cItem) {
@@ -379,7 +434,7 @@ class ReturnService
         foreach ($items as $item) {
             $productId = $item['product_id'];
             $variantId = $item['variant_id'] ?? null;
-            $qty = (float) $item['qty_returned'];
+            $qty = (float) ($item['base_quantity'] ?? ((float) $item['qty_returned'] * (float) ($item['conversion_factor'] ?? 1.0)));
             $condition = $item['condition'] ?? 'resalable';
             $restock = (bool) ($item['restock'] ?? false);
 
@@ -749,7 +804,7 @@ class ReturnService
         foreach ($return->items as $item) {
             $productId = $item->product_id;
             $variantId = $item->variant_id;
-            $qty = (float) $item->qty_returned;
+            $qty = (float) ($item->base_quantity ?? ((float) $item->qty_returned * (float) ($item['conversion_factor'] ?? $item->conversion_factor ?? 1.0)));
 
             if ($return->isSaleReturn()) {
                 $dest = strtoupper((string) ($return->inventory_destination ?? 'NEW_INVENTORY'));
@@ -1044,63 +1099,78 @@ class ReturnService
 
         // In NubiBilling, stock_balances stores thousandths of a unit (1 unit = 1000 milli-units).
         $milliDelta = (int) round($qtyChange * 1000.0);
-
-        $query = DB::table('stock_balances')
-            ->where('business_id', $businessId);
-
-        if ($outletId) {
-            $query->where('outlet_id', $outletId);
-        }
-
-        $row = $query->where(function ($q) use ($productId, $variantId) {
-            if (!empty($variantId)) {
-                $q->where('id', 'LIKE', "%_{$variantId}")
-                    ->orWhere('payload->fields->variantId', $variantId);
-            } elseif (!empty($productId)) {
-                $q->where('payload->fields->productId', $productId);
-            }
-        })->lockForUpdate()->first();
+        $stockSvc = new InventoryStockService;
+        $meta = $productId !== '' ? $stockSvc->resolveProductMeta($businessId, $productId) : ['behaviour' => InventoryStockService::BEHAVIOUR_SEPARATE_VARIANT];
+        $behaviour = $meta['behaviour'];
+        $target = $stockSvc->inspectStockTarget($businessId, (string) ($outletId ?? ''), $productId, $variantId, $behaviour);
+        $row = $target['canonicalRow'];
+        $canonicalVariantId = $target['canonicalVariantId'] ?: ($variantId ?? $productId);
 
         if ($row) {
             $payload = json_decode($row->payload, true) ?: [];
             $fields = $payload['fields'] ?? [];
-            $curStock = (float) ($fields['quantityOnHand'] ?? $fields['currentStock'] ?? 0.0);
-            if ($curStock > 0 && $curStock < 500) {
-                $curStock = $curStock * 1000.0;
-            } elseif ($curStock >= 1000) {
-                $rem = fmod($curStock, 1000.0);
-                if ($rem > 0 && $rem < 50) {
-                    $curStock = (floor($curStock / 1000.0) + $rem) * 1000.0;
-                }
-            }
+            $curStock = (float) $target['totalMilli'];
             $newStock = max(0.0, $curStock + $milliDelta);
 
             $fields['quantityOnHand'] = (int) round($newStock);
             $fields['currentStock'] = (int) round($newStock);
+            $fields['stockScale'] = 'MILLI';
+            $fields['inventoryBehaviour'] = $behaviour;
+            if ($productId !== '') {
+                $fields['productId'] = $productId;
+            }
+            $fields['variantId'] = $canonicalVariantId;
             $fields['updatedAt'] = Carbon::now()->toIso8601String();
             $payload['fields'] = $fields;
 
-                        $sbUp = [
+            $sbUp = [
                 'updated_at' => Carbon::now()->toDateTimeString(),
                 'payload' => json_encode($payload),
             ];
             if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
                 $sbUp['quantity_on_hand'] = $newStock / 1000.0;
             }
-            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'product_id') && empty($row->product_id)) {
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'product_id') && empty($row->product_id) && $productId !== '') {
                 $sbUp['product_id'] = $productId;
             }
-            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'variant_id') && empty($row->variant_id)) {
-                $sbUp['variant_id'] = $variantId ?? $productId;
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'variant_id')) {
+                $sbUp['variant_id'] = $canonicalVariantId;
+            }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'inventory_behaviour')) {
+                $sbUp['inventory_behaviour'] = $behaviour;
             }
             DB::table('stock_balances')->where('id', $row->id)->update($sbUp);
+
+            if ($stockSvc->isUnifiedBehaviour($behaviour)) {
+                foreach ($target['allRows'] as $extraRow) {
+                    if ((string) $extraRow->id === (string) $row->id) {
+                        continue;
+                    }
+                    $ep = json_decode($extraRow->payload ?? '{}', true) ?: [];
+                    $ef = $ep['fields'] ?? [];
+                    $ef['quantityOnHand'] = 0;
+                    $ef['currentStock'] = 0;
+                    $ef['consolidatedInto'] = $row->id;
+                    $ep['fields'] = $ef;
+                    $extraUpd = [
+                        'is_deleted' => 1,
+                        'status' => 'CONSOLIDATED',
+                        'updated_at' => Carbon::now()->toDateTimeString(),
+                        'payload' => json_encode($ep),
+                    ];
+                    if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
+                        $extraUpd['quantity_on_hand'] = 0;
+                    }
+                    DB::table('stock_balances')->where('id', $extraRow->id)->update($extraUpd);
+                }
+            }
 
             return $newStock;
         }
 
         // If no stock balance row exists yet, create one in milli-units
         $newStock = max(0.0, (float) $milliDelta);
-        $vId = $variantId ?? $productId;
+        $vId = $canonicalVariantId;
         $now = Carbon::now();
         $balanceId = "{$businessId}_OUTLET_{$outletId}_DIRECT_{$vId}";
 
@@ -1110,8 +1180,10 @@ class ReturnService
             'outletId' => $outletId,
             'productId' => $productId,
             'variantId' => $vId,
+            'inventoryBehaviour' => $behaviour,
             'quantityOnHand' => (int) round($newStock),
             'currentStock' => (int) round($newStock),
+            'stockScale' => 'MILLI',
             'avgCostPaise' => 0,
             'lastPurchasePricePaise' => 0,
             'updatedAt' => $now->toIso8601String(),
@@ -1140,6 +1212,9 @@ class ReturnService
         if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'variant_id')) {
             $insertData['variant_id'] = $vId;
         }
+        if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'inventory_behaviour')) {
+            $insertData['inventory_behaviour'] = $behaviour;
+        }
         if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
             $insertData['quantity_on_hand'] = $newStock / 1000.0;
         }
@@ -1158,30 +1233,10 @@ class ReturnService
             return 0.0;
         }
 
-        $query = DB::table('stock_balances')
-            ->where('business_id', $businessId);
+        $stockSvc = new InventoryStockService;
+        $target = $stockSvc->inspectStockTarget($businessId, (string) ($outletId ?? ''), $productId, $variantId);
 
-        if ($outletId) {
-            $query->where('outlet_id', $outletId);
-        }
-
-        $row = $query->where(function ($q) use ($productId, $variantId) {
-            if (!empty($variantId)) {
-                $q->where('id', 'LIKE', "%_{$variantId}")
-                    ->orWhere('payload->fields->variantId', $variantId);
-            } elseif (!empty($productId)) {
-                $q->where('payload->fields->productId', $productId);
-            }
-        })->first();
-
-        if ($row) {
-            $payload = json_decode($row->payload, true) ?: [];
-            $fields = $payload['fields'] ?? [];
-
-            return (float) ($fields['quantityOnHand'] ?? $fields['currentStock'] ?? 0.0);
-        }
-
-        return 0.0;
+        return (float) $target['totalMilli'];
     }
 
     /**

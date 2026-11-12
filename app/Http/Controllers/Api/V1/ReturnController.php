@@ -232,17 +232,63 @@ class ReturnController extends Controller
         }
 
         $businessName = 'NubiBilling Store';
+        $businessAddress = null;
+        $businessPhone = null;
+        $businessGstin = null;
+        $busFields = [];
         if ($return->business_id && DB::getSchemaBuilder()->hasTable('businesses')) {
             $busRow = DB::table('businesses')->where('id', $return->business_id)->first();
             if ($busRow) {
-                if (isset($busRow->name)) {
-                    $businessName = $busRow->name;
-                } elseif (! empty($busRow->payload)) {
+                if (! empty($busRow->payload)) {
                     $payload = json_decode($busRow->payload, true) ?: [];
-                    $businessName = $payload['fields']['businessName'] ?? $payload['fields']['name'] ?? $businessName;
+                    $rawFields = $payload['fields'] ?? [];
+                    $busFields = is_array($rawFields) ? SyncController::decodeFields($rawFields) : [];
+                    $businessName = $busFields['businessName'] ?? $busFields['name'] ?? $businessName;
+                    $businessAddress = $busFields['address'] ?? null;
+                    $businessPhone = $busFields['phone'] ?? null;
+                    $businessGstin = $busFields['gstin'] ?? null;
+                }
+                if (isset($busRow->name) && $busRow->name) {
+                    $businessName = $busRow->name;
                 }
             }
         }
+
+        // Resolve logo & signature strictly from the return's captured snapshots (preserving historical returns)
+        $resolveDataUri = static function (?string $path, ?string $version, string $historyKey) use ($busFields): ?string {
+            $resolved = $path;
+            if (! $resolved && ! empty($version) && is_array($busFields[$historyKey] ?? null)) {
+                $resolved = $busFields[$historyKey][$version]['path'] ?? null;
+            }
+            if ($resolved && \Illuminate\Support\Facades\Storage::disk('public')->exists($resolved)) {
+                $raw = \Illuminate\Support\Facades\Storage::disk('public')->get($resolved);
+                if ($raw !== '') {
+                    $imgInfo = @getimagesizefromstring($raw);
+                    $mime = is_array($imgInfo) && ! empty($imgInfo['mime']) ? $imgInfo['mime'] : 'image/png';
+                    return 'data:'.$mime.';base64,'.base64_encode($raw);
+                }
+            }
+            return null;
+        };
+
+        $businessLogoDataUri = $resolveDataUri(
+            $return->business_logo_path ?? null,
+            $return->business_logo_version ?? null,
+            'logoHistory'
+        );
+        $businessSignatureDataUri = ! empty($return->business_signature_enabled)
+            ? $resolveDataUri(
+                $return->business_signature_path ?? null,
+                $return->business_signature_version ?? null,
+                'signatureHistory'
+            )
+            : null;
+        $businessSignatoryName = ! empty($return->business_signature_enabled)
+            ? ($return->business_signatory_name ?? null)
+            : null;
+        $businessSignatoryDesignation = ! empty($return->business_signature_enabled)
+            ? ($return->business_signatory_designation ?? null)
+            : null;
 
         // Dynamically resolve product names and clean characters for PDF
         foreach ($return->items as $item) {
@@ -303,6 +349,13 @@ class ReturnController extends Controller
         $pdf = Pdf::loadView('pdf.return_bill', [
             'return' => $return,
             'businessName' => $businessName,
+            'businessAddress' => $businessAddress,
+            'businessPhone' => $businessPhone,
+            'businessGstin' => $businessGstin,
+            'businessLogoDataUri' => $businessLogoDataUri,
+            'businessSignatureDataUri' => $businessSignatureDataUri,
+            'businessSignatoryName' => $businessSignatoryName,
+            'businessSignatoryDesignation' => $businessSignatoryDesignation,
         ])->setPaper('a4', 'portrait');
 
         return $pdf->stream("{$return->return_no}.pdf");

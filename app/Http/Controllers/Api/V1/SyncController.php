@@ -3,12 +3,14 @@
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
+use App\Services\InvoiceCreationService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class SyncController extends Controller
 {
@@ -17,7 +19,7 @@ class SyncController extends Controller
      */
     public static function decodeValue($value)
     {
-        if (!is_array($value)) {
+        if (! is_array($value)) {
             return $value;
         }
         if (array_key_exists('stringValue', $value)) {
@@ -44,6 +46,7 @@ class SyncController extends Controller
         if (isset($value['mapValue']['fields']) && is_array($value['mapValue']['fields'])) {
             return self::decodeFields($value['mapValue']['fields']);
         }
+
         return $value;
     }
 
@@ -53,6 +56,7 @@ class SyncController extends Controller
         foreach ($fields as $k => $v) {
             $decoded[$k] = self::decodeValue($v);
         }
+
         return $decoded;
     }
 
@@ -81,12 +85,14 @@ class SyncController extends Controller
             if (array_keys($value) !== range(0, count($value) - 1)) {
                 return ['mapValue' => ['fields' => self::encodeFields($value)]];
             }
+
             return [
                 'arrayValue' => [
                     'values' => array_map([self::class, 'encodeValue'], $value),
                 ],
             ];
         }
+
         return ['stringValue' => (string) $value];
     }
 
@@ -96,6 +102,7 @@ class SyncController extends Controller
         foreach ($fields as $k => $v) {
             $encoded[$k] = self::encodeValue($v);
         }
+
         return $encoded;
     }
 
@@ -123,6 +130,7 @@ class SyncController extends Controller
                 $formatted[$k] = self::encodeValue($v);
             }
         }
+
         return $formatted;
     }
 
@@ -172,7 +180,7 @@ class SyncController extends Controller
                         $outletId = $decoded['outletId'] ?? null;
                         $tenantId = $decoded['tenantId'] ?? null;
                         $status = strtoupper((string) ($decoded['status'] ?? 'ACTIVE'));
-                        $isDeleted = (!empty($decoded['isDeleted']) || $status === 'DELETED') ? 1 : 0;
+                        $isDeleted = (! empty($decoded['isDeleted']) || $status === 'DELETED') ? 1 : 0;
                         $docPath = "$collection/$id";
 
                         $existing = DB::table($collection)->where('id', $id)->first();
@@ -185,6 +193,19 @@ class SyncController extends Controller
                             '_documentPath' => $docPath,
                             'fields' => $mergedFields,
                         ];
+
+                        if (
+                            $collection === 'invoices'
+                            && $isDeleted === 0
+                            && $status !== 'CANCELLED'
+                            && ! empty($mergedFields['items'])
+                            && is_array($mergedFields['items'])
+                        ) {
+                            $this->enforceSyncedInvoicePurchaseFloor(
+                                (string) ($businessId ?? $existingDecoded['businessId'] ?? ''),
+                                $mergedFields['items']
+                            );
+                        }
 
                         $row = $this->mapRowColumns($collection, $id, $docPath, $decoded, $payload, $existing, $now);
 
@@ -205,15 +226,65 @@ class SyncController extends Controller
                 'commitTime' => $isoNow,
                 'writeResults' => $writeResults,
             ]);
+        } catch (ValidationException $e) {
+            DB::rollBack();
+
+            return response()->json([
+                'error' => [
+                    'code' => 422,
+                    'message' => collect($e->errors())->flatten()->first() ?: 'Validation failed.',
+                    'status' => 'INVALID_ARGUMENT',
+                    'details' => $e->errors(),
+                ],
+            ], 422);
         } catch (\Exception $e) {
             DB::rollBack();
+
             return response()->json([
                 'error' => [
                     'code' => 500,
-                    'message' => 'Sync commit to MySQL failed: ' . $e->getMessage(),
+                    'message' => 'Sync commit to MySQL failed: '.$e->getMessage(),
                     'status' => 'INTERNAL',
                 ],
             ], 500);
+        }
+    }
+
+    private function enforceSyncedInvoicePurchaseFloor(string $businessId, array $items): void
+    {
+        if ($businessId === '') {
+            return;
+        }
+        $normalized = [];
+        foreach ($items as $it) {
+            if (! is_array($it)) {
+                continue;
+            }
+            $qty = (float) ($it['quantity'] ?? 0);
+            if ($qty <= 0) {
+                continue;
+            }
+            $normalized[] = [
+                'product_id' => $it['productId'] ?? $it['product_id'] ?? null,
+                'variant_id' => $it['variantId'] ?? $it['variant_id'] ?? '',
+                'product_name' => $it['name'] ?? $it['productName'] ?? $it['product_name'] ?? 'Product',
+                'variant_name' => $it['variantName'] ?? $it['variant_name'] ?? null,
+                'quantity' => $qty,
+                'unit_price_paise' => (int) ($it['unitPricePaise'] ?? $it['unit_price_paise'] ?? 0),
+                'discount_paise' => (int) ($it['discountPaise'] ?? $it['discount_paise'] ?? 0),
+                'gst_rate_bps' => (int) ($it['gstRateBps'] ?? $it['gst_rate_bps'] ?? 0),
+                'price_includes_tax' => (bool) ($it['priceIncludesTax'] ?? $it['price_includes_tax'] ?? false),
+                'unit_id' => $it['unit'] ?? $it['unitId'] ?? $it['unit_id'] ?? null,
+                'unit_symbol' => $it['unitSymbol'] ?? $it['unit_symbol'] ?? null,
+                'sales_unit_conversion_factor' => $it['conversionFactor'] ?? $it['salesConversionFactor'] ?? null,
+            ];
+        }
+        if (! empty($normalized)) {
+            app(InvoiceCreationService::class)->calculateLinesAndTotals(
+                $businessId,
+                'SYNC_VALIDATE',
+                $normalized
+            );
         }
     }
 
@@ -223,7 +294,7 @@ class SyncController extends Controller
     private function mapRowColumns(string $table, string $id, string $docPath, array $decoded, array $payload, ?object $existing, Carbon $now): array
     {
         $status = strtoupper((string) ($decoded['status'] ?? 'ACTIVE'));
-        $isDeleted = (!empty($decoded['isDeleted']) || $status === 'DELETED') ? 1 : 0;
+        $isDeleted = (! empty($decoded['isDeleted']) || $status === 'DELETED') ? 1 : 0;
 
         $row = [
             'id' => $id,
@@ -238,22 +309,33 @@ class SyncController extends Controller
             $row['variant_id'] = $decoded['variantId'] ?? $decoded['variant_id'] ?? ($existing->variant_id ?? null);
             $row['type'] = strtolower((string) ($decoded['type'] ?? $decoded['transactionType'] ?? ($existing->type ?? 'adjustment')));
 
-            $qtyChange = $decoded['changedQuantity'] ?? $decoded['qtyChange'] ?? $decoded['qtyBase'] ?? null;
-            if ($qtyChange !== null && is_numeric($qtyChange)) {
-                $row['qty_change'] = abs($qtyChange) >= 1000 ? ($qtyChange / 1000.0) : (float) $qtyChange;
-            } elseif ($existing && isset($existing->qty_change)) {
-                $row['qty_change'] = $existing->qty_change;
+            if (isset($decoded['qtyChangeUnits']) && is_numeric($decoded['qtyChangeUnits'])) {
+                $row['qty_change'] = (float) $decoded['qtyChangeUnits'];
             } else {
-                $row['qty_change'] = 0.0;
+                $qtyChange = $decoded['changedQuantity'] ?? $decoded['qtyChange'] ?? $decoded['qtyBase'] ?? null;
+                if ($qtyChange !== null && is_numeric($qtyChange)) {
+                    $isMilli = (($decoded['stockScale'] ?? null) === 'MILLI') || abs((float) $qtyChange) >= 1000;
+                    $row['qty_change'] = $isMilli ? ((float) $qtyChange / 1000.0) : (float) $qtyChange;
+                } elseif ($existing && isset($existing->qty_change)) {
+                    $row['qty_change'] = $existing->qty_change;
+                } else {
+                    $row['qty_change'] = 0.0;
+                }
             }
 
-            $balAfter = $decoded['balanceAfter'] ?? $decoded['newQuantity'] ?? null;
-            if ($balAfter !== null && is_numeric($balAfter)) {
-                $row['balance_after'] = abs($balAfter) >= 1000 ? ($balAfter / 1000.0) : (float) $balAfter;
-            } elseif ($existing && isset($existing->balance_after)) {
-                $row['balance_after'] = $existing->balance_after;
+            if (isset($decoded['balanceAfterUnits']) && is_numeric($decoded['balanceAfterUnits'])) {
+                $row['balance_after'] = (float) $decoded['balanceAfterUnits'];
             } else {
-                $row['balance_after'] = null;
+                $balAfter = $decoded['balanceAfter'] ?? $decoded['newQuantity'] ?? null;
+                if ($balAfter !== null && is_numeric($balAfter)) {
+                    $balScale = strtoupper((string) ($decoded['stockScale'] ?? ''));
+                    $isMilliBal = $balScale === 'MILLI' || ($balScale !== 'UNIT' && abs((float) $balAfter) >= 1000);
+                    $row['balance_after'] = $isMilliBal ? ((float) $balAfter / 1000.0) : (float) $balAfter;
+                } elseif ($existing && isset($existing->balance_after)) {
+                    $row['balance_after'] = $existing->balance_after;
+                } else {
+                    $row['balance_after'] = null;
+                }
             }
 
             $row['reference_type'] = strtolower((string) ($decoded['referenceType'] ?? $decoded['transactionType'] ?? ($existing->reference_type ?? 'adjustment')));
@@ -262,7 +344,68 @@ class SyncController extends Controller
             $row['note'] = $decoded['note'] ?? $decoded['reason'] ?? ($existing->note ?? null);
             $row['created_by'] = $decoded['performedBy'] ?? $decoded['userId'] ?? $decoded['approvedBy'] ?? ($existing->created_by ?? null);
             $row['entry_source'] = $decoded['entrySource'] ?? ($existing->entry_source ?? 'new');
-            $row['is_historical'] = !empty($decoded['isHistorical']) ? 1 : ($existing->is_historical ?? 0);
+            $row['is_historical'] = ! empty($decoded['isHistorical']) ? 1 : ($existing->is_historical ?? 0);
+        } elseif ($table === 'stock_balances' && Schema::hasColumn($table, 'quantity_on_hand')) {
+            if (isset($decoded['quantityOnHandUnits']) && is_numeric($decoded['quantityOnHandUnits'])) {
+                $row['quantity_on_hand'] = round((float) $decoded['quantityOnHandUnits'], 3);
+            } else {
+                $rawQoh = $decoded['quantityOnHand'] ?? $decoded['currentStock'] ?? null;
+                if ($rawQoh !== null && is_numeric($rawQoh)) {
+                    $scale = strtoupper((string) ($decoded['stockScale'] ?? ''));
+                    $isMilli = $scale === 'MILLI' || ($scale !== 'UNIT' && abs((float) $rawQoh) >= 1000);
+                    $row['quantity_on_hand'] = $isMilli ? round(((float) $rawQoh) / 1000.0, 3) : round((float) $rawQoh, 3);
+                }
+            }
+        } elseif ($table === 'invoice_items') {
+            if (Schema::hasColumn($table, 'invoice_id')) {
+                $row['invoice_id'] = $decoded['invoiceId'] ?? ($existing->invoice_id ?? null);
+            }
+            if (Schema::hasColumn($table, 'quantity') && isset($decoded['quantity'])) {
+                $row['quantity'] = (float) $decoded['quantity'];
+            }
+            if (Schema::hasColumn($table, 'unit_id') && isset($decoded['unitId'])) {
+                $row['unit_id'] = $decoded['unitId'];
+            }
+            if (Schema::hasColumn($table, 'unit_symbol') && isset($decoded['unit'])) {
+                $row['unit_symbol'] = $decoded['unitSymbol'] ?? $decoded['unit'];
+            }
+            if (Schema::hasColumn($table, 'conversion_factor') && isset($decoded['conversionFactor'])) {
+                $row['conversion_factor'] = (float) $decoded['conversionFactor'];
+            }
+            if (Schema::hasColumn($table, 'base_quantity') && isset($decoded['quantityBase'])) {
+                $row['base_quantity'] = (float) $decoded['quantityBase'];
+            }
+        } elseif ($table === 'product_purchase_options') {
+            $row['option_name'] = $decoded['optionName'] ?? ($existing->option_name ?? '');
+            $row['option_type'] = strtoupper((string) ($decoded['optionType'] ?? ($existing->option_type ?? 'PURCHASE')));
+            $row['conversion_factor'] = isset($decoded['conversionFactor']) ? (float) $decoded['conversionFactor'] : ($existing->conversion_factor ?? 1.0);
+            $row['conversion_unit_id'] = $decoded['conversionUnitId'] ?? ($existing->conversion_unit_id ?? null);
+            $row['purchase_price'] = isset($decoded['purchasePrice']) ? (int) $decoded['purchasePrice'] : ($existing->purchase_price ?? 0);
+            $row['default_selling_price'] = array_key_exists('defaultSellingPrice', $decoded) ? ($decoded['defaultSellingPrice'] !== null ? (int) $decoded['defaultSellingPrice'] : null) : ($existing->default_selling_price ?? null);
+            $row['diameter_mm'] = array_key_exists('diameterMm', $decoded) && is_numeric($decoded['diameterMm']) ? (float) $decoded['diameterMm'] : ($existing->diameter_mm ?? null);
+            $row['length_metre'] = array_key_exists('lengthMetre', $decoded) && is_numeric($decoded['lengthMetre']) ? (float) $decoded['lengthMetre'] : ($existing->length_metre ?? null);
+            $row['weight_per_piece_kg'] = array_key_exists('weightPerPieceKg', $decoded) && is_numeric($decoded['weightPerPieceKg']) ? (float) $decoded['weightPerPieceKg'] : ($existing->weight_per_piece_kg ?? null);
+            $row['barcode'] = $decoded['barcode'] ?? ($existing->barcode ?? null);
+            $row['is_active'] = array_key_exists('isActive', $decoded) ? (! empty($decoded['isActive']) ? 1 : 0) : ($existing->is_active ?? 1);
+        } elseif ($table === 'products' && Schema::hasColumn($table, 'inventory_behaviour')) {
+            if (isset($decoded['inventoryBehaviour'])) {
+                $row['inventory_behaviour'] = strtoupper((string) $decoded['inventoryBehaviour']);
+            }
+            if (array_key_exists('defaultPurchaseOptionId', $decoded)) {
+                $row['default_purchase_option_id'] = $decoded['defaultPurchaseOptionId'];
+            }
+            if (array_key_exists('allowMultiplePurchaseOptions', $decoded)) {
+                $row['allow_multiple_purchase_options'] = ! empty($decoded['allowMultiplePurchaseOptions']) ? 1 : 0;
+            }
+            if (array_key_exists('allowMultipleSalesOptions', $decoded)) {
+                $row['allow_multiple_sales_options'] = ! empty($decoded['allowMultipleSalesOptions']) ? 1 : 0;
+            }
+            if (array_key_exists('trackStock', $decoded)) {
+                $row['track_stock'] = ! empty($decoded['trackStock']) ? 1 : 0;
+            }
+        }
+        if (in_array($table, ['stock_balances', 'stock_movements'], true) && Schema::hasColumn($table, 'inventory_behaviour') && isset($decoded['inventoryBehaviour'])) {
+            $row['inventory_behaviour'] = strtoupper((string) $decoded['inventoryBehaviour']);
         }
 
         // Standard column checks across any table
@@ -281,10 +424,10 @@ class SyncController extends Controller
         if (Schema::hasColumn($table, 'is_deleted')) {
             $row['is_deleted'] = $isDeleted;
         }
-        if (Schema::hasColumn($table, 'product_id') && !isset($row['product_id'])) {
+        if (Schema::hasColumn($table, 'product_id') && ! isset($row['product_id'])) {
             $row['product_id'] = $decoded['productId'] ?? ($existing->product_id ?? null);
         }
-        if (Schema::hasColumn($table, 'variant_id') && !isset($row['variant_id'])) {
+        if (Schema::hasColumn($table, 'variant_id') && ! isset($row['variant_id'])) {
             $row['variant_id'] = $decoded['variantId'] ?? ($existing->variant_id ?? null);
         }
 
@@ -302,6 +445,7 @@ class SyncController extends Controller
         if ($collection === 'user' && Schema::hasTable('users')) {
             return 'users';
         }
+
         return null;
     }
 
@@ -335,7 +479,7 @@ class SyncController extends Controller
         $id = urldecode($id);
         $table = $this->resolveTable($collection);
 
-        if (!$table) {
+        if (! $table) {
             return response()->json([
                 'error' => [
                     'code' => 404,
@@ -346,11 +490,11 @@ class SyncController extends Controller
         }
 
         $row = DB::table($table)->where('id', $id)->first();
-        if (!$row && Schema::hasColumn($table, 'email')) {
+        if (! $row && Schema::hasColumn($table, 'email')) {
             $row = DB::table($table)->where('email', $id)->first();
         }
 
-        if (!$row) {
+        if (! $row) {
             return response()->json([
                 'error' => [
                     'code' => 404,
@@ -394,9 +538,9 @@ class SyncController extends Controller
         $decoded = self::decodeFields($rawFields);
         $table = $this->resolveTable($collection);
 
-        if (!$table && $collection === 'system_error_analytics') {
+        if (! $table && $collection === 'system_error_analytics') {
             try {
-                if (!Schema::hasTable('system_error_analytics')) {
+                if (! Schema::hasTable('system_error_analytics')) {
                     Schema::create('system_error_analytics', function ($tableBlueprint) {
                         $tableBlueprint->string('id', 255)->primary();
                         $tableBlueprint->string('document_path', 500)->nullable();
@@ -414,6 +558,7 @@ class SyncController extends Controller
                 // Return success representation so error analytics never disrupts client flow
                 $id = $id ?: ($decoded['id'] ?? (string) Str::uuid());
                 $isoNow = now()->toIso8601String();
+
                 return response()->json([
                     'name' => "projects/nubibilling-local/databases/(default)/documents/{$collection}/{$id}",
                     'fields' => self::formatFirestoreFields($rawFields),
@@ -423,7 +568,7 @@ class SyncController extends Controller
             }
         }
 
-        if (!$table) {
+        if (! $table) {
             return response()->json([
                 'error' => [
                     'code' => 404,
@@ -477,7 +622,7 @@ class SyncController extends Controller
             : now()->toIso8601String();
 
         $table = $from ? $this->resolveTable($from) : null;
-        if (!$table) {
+        if (! $table) {
             return response()->json([
                 ['readTime' => $now],
             ]);
@@ -591,7 +736,7 @@ class SyncController extends Controller
         // updatedAt + document name for incremental reads, or document name
         // alone for initial snapshots. Ignoring this cursor repeats page one.
         $cursorValues = $structured['startAt']['values'] ?? null;
-        if (is_array($cursorValues) && !empty($cursorValues) && is_array($orderBy)) {
+        if (is_array($cursorValues) && ! empty($cursorValues) && is_array($orderBy)) {
             $cursorId = null;
             $cursorUpdatedAt = null;
 
@@ -639,7 +784,7 @@ class SyncController extends Controller
         }
 
         // Apply orderBy
-        if (!empty($orderBy)) {
+        if (! empty($orderBy)) {
             foreach ($orderBy as $order) {
                 $fieldPath = $order['field']['fieldPath'] ?? '';
                 $dir = strtoupper($order['direction'] ?? 'ASCENDING') === 'DESCENDING' ? 'desc' : 'asc';

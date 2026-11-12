@@ -30,82 +30,50 @@ class InventoryController extends Controller
             return ApiResponse::success([], 'No active business selected or unauthorized.');
         }
 
-        $query = DB::table('stock_balances')
-            ->where('business_id', $businessId)
-            ->where('is_deleted', 0);
-
-        if ($outletId) {
-            $query->where('outlet_id', $outletId);
-        }
-
-        $rows = $query->get();
-
-        $stockMap = [];
-        $valuationMap = [];
-        $balances = [];
-
-        foreach ($rows as $row) {
-            $payload = json_decode($row->payload, true) ?: [];
-            $fields = $payload['fields'] ?? $payload;
-
-            $vId = (string) ($fields['variantId'] ?? $fields['productId'] ?? '');
-            if (! $vId) {
-                continue;
-            }
-
-            if ($variantId && $vId !== $variantId) {
-                continue;
-            }
-
-            $qty = (int) ($fields['quantityOnHand'] ?? $fields['currentStock'] ?? $fields['quantity'] ?? 0);
-            if ($qty > 0 && $qty < 500) {
-                $qty = $qty * 1000;
-            } elseif ($qty >= 1000) {
-                $remainder = $qty % 1000;
-                if ($remainder > 0 && $remainder < 50) {
-                    $qty = ((int) ($qty / 1000) + $remainder) * 1000;
-                }
-            }
-            $totVal = (int) ($fields['totalValue'] ?? 0);
-            $avgCost = (int) ($fields['avgCostPaise'] ?? $fields['averageCost'] ?? 0);
-
-            if ($totVal === 0 && $qty > 0) {
-                $pbiSum = DB::table('purchase_bill_items')
-                    ->where('business_id', $businessId)
-                    ->where(function ($q) use ($vId) {
-                        $q->where('id', 'like', "%{$vId}%")
-                            ->orWhere('payload->fields->variantId', $vId);
-                    })
-                    ->get();
-                foreach ($pbiSum as $pRow) {
-                    $pp = json_decode($pRow->payload, true) ?: [];
-                    $pf = $pp['fields'] ?? [];
-                    $totVal += (int) ($pf['taxableAmount'] ?? 0) + (int) ($pf['taxAmount'] ?? 0);
-                }
-            }
-
-            $stockMap[$vId] = ($stockMap[$vId] ?? 0) + $qty;
-            $valuationMap[$vId] = ($valuationMap[$vId] ?? 0) + $totVal;
-
-            $balances[] = [
-                'id' => (string) $row->id,
-                'businessId' => (string) $row->business_id,
-                'outletId' => (string) $row->outlet_id,
-                'variantId' => $vId,
-                'productId' => (string) ($fields['productId'] ?? $vId),
-                'quantityOnHand' => $qty,
-                'totalValue' => $totVal,
-                'avgCostPaise' => $avgCost,
-                'lastPurchasePricePaise' => (int) ($fields['lastPurchasePricePaise'] ?? 0),
-                'updatedAt' => $row->updated_at,
-            ];
-        }
+        $stockSvc = new \App\Services\InventoryStockService;
+        $snapshot = $stockSvc->getConsolidatedStockSnapshot(
+            (string) $businessId,
+            $outletId ? (string) $outletId : null,
+            $variantId ? (string) $variantId : null
+        );
 
         return ApiResponse::success([
-            'stockMap' => $stockMap,
-            'valuationMap' => $valuationMap,
-            'balances' => $balances,
+            'stockMap' => $snapshot['stockMap'],
+            'parentStockMap' => $snapshot['parentStockMap'],
+            'parentStockUnitsMap' => $snapshot['parentStockUnitsMap'],
+            'valuationMap' => $snapshot['valuationMap'],
+            'reconciliationMap' => $snapshot['reconciliationMap'],
+            'balances' => $snapshot['balances'],
         ], 'Stock balances retrieved successfully.');
+    }
+
+    /**
+     * Recalculate & reconcile CFT Sand/Gravel inventory balances from verified transactions.
+     */
+    public function reconcileCft(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        $businessId = $request->input('business_id') ?? $request->input('businessId') ?? $request->header('X-Business-Id');
+        $outletId = $request->input('outlet_id') ?? $request->input('outletId') ?? $request->header('X-Outlet-Id');
+        $productId = $request->input('product_id') ?? $request->input('productId');
+        $apply = $request->has('apply') ? filter_var($request->input('apply'), FILTER_VALIDATE_BOOLEAN) : true;
+
+        if (! $businessId) {
+            $businessId = $user ? $user->defaultBusinessId() : null;
+        }
+        if (! $businessId || ($user && ! $user->canAccessBusiness($businessId))) {
+            return ApiResponse::error('Unauthorized business context.', 403, null, 'FORBIDDEN');
+        }
+
+        $stockSvc = new \App\Services\InventoryStockService;
+        $result = $stockSvc->reconcileCftInventory(
+            (string) $businessId,
+            $outletId ? (string) $outletId : null,
+            $apply,
+            $productId ? (string) $productId : null
+        );
+
+        return ApiResponse::success($result, 'CFT inventory reconciliation completed.');
     }
 
     /**
@@ -188,36 +156,39 @@ class InventoryController extends Controller
         return DB::transaction(function () use ($businessId, $outletId, $variantId, $productId, $type, $qtyBase, $reason, $unitCostPaise, $referenceId, $userId) {
             $now = now()->toIso8601String();
             $nowDateTime = now();
+            $stockSvc = new \App\Services\InventoryStockService;
+            $meta = $productId !== '' ? $stockSvc->resolveProductMeta($businessId, $productId) : [
+                'behaviour' => \App\Services\InventoryStockService::BEHAVIOUR_SEPARATE_VARIANT,
+                'baseUnitId' => 'UNIT',
+            ];
+            $invBehaviour = $meta['behaviour'];
+            $target = $stockSvc->inspectStockTarget($businessId, $outletId, $productId, $variantId, $invBehaviour);
+            $targetVariantId = $target['canonicalVariantId'] ?: $variantId;
+            $balanceRow = $target['canonicalRow'];
 
             // Unique balance ID format
-            $balanceId = "{$userId}_{$businessId}_OUTLET_{$outletId}_DIRECT_{$variantId}";
+            $balanceId = $balanceRow
+                ? (string) $balanceRow->id
+                : "{$userId}_{$businessId}_OUTLET_{$outletId}_DIRECT_{$targetVariantId}";
 
-            // Find or lock existing stock balance
-            $balanceRow = DB::table('stock_balances')
-                ->where('business_id', $businessId)
-                ->where('outlet_id', $outletId)
-                ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.variantId')) = ?", [$variantId])
-                ->where('is_deleted', 0)
-                ->lockForUpdate()
-                ->first();
-
-            $currentQty = 0;
-            $currentAvgCost = 0;
+            $currentQty = $target['totalMilli'];
+            $currentAvgCost = $target['weightedAvgCostPaise'];
             $currentLastPurchasePrice = 0;
 
             if ($balanceRow) {
                 $payload = json_decode($balanceRow->payload, true) ?: [];
                 $fields = $payload['fields'] ?? $payload;
-                $currentQty = (int) ($fields['quantityOnHand'] ?? $fields['currentStock'] ?? 0);
-                $currentAvgCost = (int) ($fields['avgCostPaise'] ?? 0);
+                $currentAvgCost = $currentAvgCost > 0 ? $currentAvgCost : (int) ($fields['avgCostPaise'] ?? $fields['costPrice'] ?? 0);
                 $currentLastPurchasePrice = (int) ($fields['lastPurchasePricePaise'] ?? 0);
-                $balanceId = (string) $balanceRow->id;
             }
 
             $existingMovement = DB::table('stock_movements')
                 ->where('business_id', $businessId)
                 ->where('outlet_id', $outletId)
-                ->where('payload->fields->variantId', $variantId)
+                ->where(function ($q) use ($targetVariantId, $variantId) {
+                    $q->where('payload->fields->variantId', $targetVariantId)
+                        ->orWhere('payload->fields->variantId', $variantId);
+                })
                 ->where('payload->fields->referenceId', $referenceId)
                 ->where('is_deleted', 0)
                 ->first();
@@ -231,7 +202,7 @@ class InventoryController extends Controller
                     'previousQuantity' => (int) ($existingFields['previousQuantity'] ?? 0),
                     'changedQuantity' => (int) ($existingFields['qtyBase'] ?? 0),
                     'type' => $existingFields['type'] ?? $type,
-                    'variantId' => $variantId,
+                    'variantId' => $targetVariantId,
                     'outletId' => $outletId,
                     'avgCostPaise' => (int) ($existingFields['avgCostPaise'] ?? $currentAvgCost),
                 ], 'Stock movement was already recorded.');
@@ -243,12 +214,23 @@ class InventoryController extends Controller
                     ->where('outlet_id', $outletId)
                     ->where('is_deleted', 0)
                     ->where('status', 'APPROVED')
-                    ->where('payload->fields->variantId', $variantId)
+                    ->where(function ($q) use ($variantId, $productId, $stockSvc, $invBehaviour) {
+                        $q->where('payload->fields->variantId', $variantId);
+                        if ($stockSvc->isUnifiedBehaviour($invBehaviour) && $productId !== '') {
+                            $q->orWhere('payload->fields->productId', $productId);
+                        }
+                    })
                     ->exists();
                 $priorInitializationExists = DB::table('stock_movements')
                     ->where('business_id', $businessId)
                     ->where('outlet_id', $outletId)
-                    ->where('payload->fields->variantId', $variantId)
+                    ->where(function ($q) use ($variantId, $targetVariantId, $productId, $stockSvc, $invBehaviour) {
+                        $q->where('payload->fields->variantId', $variantId)
+                            ->orWhere('payload->fields->variantId', $targetVariantId);
+                        if ($stockSvc->isUnifiedBehaviour($invBehaviour) && $productId !== '') {
+                            $q->orWhere('product_id', $productId);
+                        }
+                    })
                     ->where('is_deleted', 0)
                     ->whereIn(DB::raw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.type'))"), [
                         'OPENING_STOCK', 'RECEIVE', 'ADJUST_IN', 'RETURN', 'COUNT_CORRECTION',
@@ -302,12 +284,25 @@ class InventoryController extends Controller
                 'avgCostPaise' => $avgCost,
             ];
 
-            DB::table('stock_movements')->insert([
+            $signedQtyUnits = round(($balanceAfter - $currentQty) / 1000.0, 3);
+            $balAfterUnits = round($balanceAfter / 1000.0, 3);
+            $movementFields['variantId'] = $targetVariantId;
+            $movementFields['inventoryBehaviour'] = $invBehaviour;
+            $movInsert = [
                 'id' => $movementId,
                 'document_path' => "stock_movements/{$movementId}",
                 'business_id' => $businessId,
                 'outlet_id' => $outletId,
-                'status' => 'POSTED',
+                'product_id' => $productId,
+                'variant_id' => $targetVariantId,
+                'type' => strtolower($type),
+                'qty_change' => $signedQtyUnits,
+                'balance_after' => $balAfterUnits,
+                'reference_type' => strtolower($type),
+                'reference_id' => $referenceId ?: $movementId,
+                'condition' => $type === 'DAMAGE_LOSS' ? 'damaged' : 'good',
+                'note' => $reason,
+                'created_by' => $userId,
                 'created_at' => $nowDateTime,
                 'updated_at' => $nowDateTime,
                 'is_deleted' => 0,
@@ -316,7 +311,13 @@ class InventoryController extends Controller
                     '_documentPath' => "stock_movements/{$movementId}",
                     'fields' => $movementFields,
                 ]),
-            ]);
+            ];
+            if (\Illuminate\Support\Facades\Schema::hasColumn('stock_movements', 'inventory_behaviour')) {
+                $movInsert['inventory_behaviour'] = $invBehaviour;
+            }
+            DB::table('stock_movements')->insert($movInsert);
+
+            $totalValueAfter = $avgCost > 0 ? (int) round(($balanceAfter / 1000.0) * $avgCost) : 0;
 
             // Update or create stock balance
             $balanceFields = [
@@ -324,25 +325,44 @@ class InventoryController extends Controller
                 'businessId' => $businessId,
                 'outletId' => $outletId,
                 'productId' => $productId,
-                'variantId' => $variantId,
+                'variantId' => $targetVariantId,
+                'inventoryBehaviour' => $invBehaviour,
+                'baseUnitId' => $meta['baseUnitId'] ?? null,
                 'quantityOnHand' => $balanceAfter,
                 'currentStock' => $balanceAfter,
+                'stockScale' => 'MILLI',
+                'totalValue' => $totalValueAfter,
+                'costPrice' => $avgCost,
+                'weightedAvgCost' => $avgCost,
                 'avgCostPaise' => $avgCost,
                 'lastPurchasePricePaise' => $lastPurchasePrice,
                 'updatedAt' => $now,
             ];
 
             if ($balanceRow) {
-                DB::table('stock_balances')->where('id', $balanceId)->update([
+                $sbUpd = [
                     'updated_at' => $nowDateTime,
                     'payload' => json_encode([
                         '_documentId' => $balanceId,
                         '_documentPath' => "stock_balances/{$balanceId}",
                         'fields' => $balanceFields,
                     ]),
-                ]);
+                ];
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
+                    $sbUpd['quantity_on_hand'] = $balAfterUnits;
+                }
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'product_id')) {
+                    $sbUpd['product_id'] = $productId;
+                }
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'variant_id')) {
+                    $sbUpd['variant_id'] = $targetVariantId;
+                }
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'inventory_behaviour')) {
+                    $sbUpd['inventory_behaviour'] = $invBehaviour;
+                }
+                DB::table('stock_balances')->where('id', $balanceId)->update($sbUpd);
             } else {
-                DB::table('stock_balances')->insert([
+                $sbIns = [
                     'id' => $balanceId,
                     'document_path' => "stock_balances/{$balanceId}",
                     'business_id' => $businessId,
@@ -356,16 +376,32 @@ class InventoryController extends Controller
                         '_documentPath' => "stock_balances/{$balanceId}",
                         'fields' => $balanceFields,
                     ]),
-                ]);
+                ];
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
+                    $sbIns['quantity_on_hand'] = $balAfterUnits;
+                }
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'product_id')) {
+                    $sbIns['product_id'] = $productId;
+                }
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'variant_id')) {
+                    $sbIns['variant_id'] = $targetVariantId;
+                }
+                if (\Illuminate\Support\Facades\Schema::hasColumn('stock_balances', 'inventory_behaviour')) {
+                    $sbIns['inventory_behaviour'] = $invBehaviour;
+                }
+                DB::table('stock_balances')->insert($sbIns);
             }
 
             return ApiResponse::success([
                 'movementId' => $movementId,
                 'balanceAfter' => $balanceAfter,
+                'balanceAfterUnits' => $balAfterUnits,
                 'previousQuantity' => $currentQty,
                 'changedQuantity' => $qtyBase,
                 'type' => $type,
-                'variantId' => $variantId,
+                'productId' => $productId,
+                'variantId' => $targetVariantId,
+                'inventoryBehaviour' => $invBehaviour,
                 'outletId' => $outletId,
                 'avgCostPaise' => $avgCost,
             ], "Stock movement '{$type}' recorded successfully.", 201);
@@ -402,6 +438,19 @@ class InventoryController extends Controller
         if ($outletId && $outletId !== 'ALL') {
             $query->where('outlet_id', $outletId);
         }
+        $productFilterId = $request->query('product_id') ?? $request->query('productId');
+        if ($productFilterId) {
+            $query->where(function ($q) use ($productFilterId) {
+                $q->where('product_id', $productFilterId)
+                    ->orWhere('payload->fields->productId', $productFilterId);
+            });
+        } elseif ($variantId) {
+            $query->where(function ($q) use ($variantId) {
+                $q->where('variant_id', $variantId)
+                    ->orWhere('payload->fields->variantId', $variantId)
+                    ->orWhere('product_id', $variantId);
+            });
+        }
 
         $rows = $query->orderBy('created_at', 'desc')->limit($limit)->get();
 
@@ -433,7 +482,11 @@ class InventoryController extends Controller
             $fields = $payload['fields'] ?? $payload;
 
             $vId = $fields['variantId'] ?? $row->variant_id ?? $fields['productId'] ?? $row->product_id ?? null;
-            if ($variantId && $vId !== $variantId) {
+            $rowProductId = $fields['productId'] ?? $row->product_id ?? $vId;
+            if ($productFilterId && $rowProductId !== $productFilterId) {
+                continue;
+            }
+            if (! $productFilterId && $variantId && $vId !== $variantId) {
                 continue;
             }
 
@@ -465,8 +518,15 @@ class InventoryController extends Controller
                 'outletId' => (string) $row->outlet_id,
                 'variantId' => $vId,
                 'productId' => $fields['productId'] ?? $row->product_id ?? $vId,
-                'productName' => $variantsMap[$vId] ?? ($fields['productName'] ?? 'Ace Suprema 20L'),
+                'productName' => $variantsMap[$vId] ?? $variantsMap[$rowProductId] ?? ($fields['productName'] ?? 'Product'),
                 'type' => $mType,
+                'inventoryBehaviour' => $fields['inventoryBehaviour'] ?? ($row->inventory_behaviour ?? null),
+                'purchaseOptionId' => $fields['purchaseOptionId'] ?? ($row->purchase_option_id ?? null),
+                'purchaseOptionName' => $fields['purchaseOptionName'] ?? ($row->purchase_option_name ?? null),
+                'conversionFactor' => isset($fields['conversionFactor']) ? (float) $fields['conversionFactor'] : null,
+                'effectiveBaseUnitCost' => isset($fields['effectiveBaseUnitCost'])
+                    ? (int) $fields['effectiveBaseUnitCost']
+                    : (isset($row->effective_base_unit_cost) ? (int) $row->effective_base_unit_cost : null),
                 'qtyBase' => (int) round($qty),
                 'quantity' => $qty,
                 'balanceAfter' => (int) round($bal),

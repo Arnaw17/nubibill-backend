@@ -4,13 +4,24 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Jobs\SendFcmNotificationJob;
+use App\Services\EmployeePermissionService;
+use App\Services\InventoryStockService;
+use App\Services\InvoiceCreationService;
+use App\Services\UnitConversionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
 class InvoiceController extends Controller
 {
+    public function __construct(
+        private readonly UnitConversionService $unitService = new UnitConversionService,
+        private readonly InvoiceCreationService $invoiceCreator = new InvoiceCreationService
+    ) {}
+
     /**
      * Helper to compute Indian Financial Year label (e.g. 2026-04 starts FY 26).
      */
@@ -51,7 +62,7 @@ class InvoiceController extends Controller
             ->where('business_id', $businessId)
             ->where('is_deleted', 0);
 
-        if ($user && app(\App\Services\EmployeePermissionService::class)->isBillingStaff($user)) {
+        if ($user && app(EmployeePermissionService::class)->isBillingStaff($user)) {
             $query->where(function ($q) use ($user) {
                 $q->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.createdByUid')) = ?", [$user->id])
                     ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(payload, '$.fields.creatorUid')) = ?", [$user->id])
@@ -218,7 +229,7 @@ class InvoiceController extends Controller
         $payload = json_decode($row->payload, true) ?: [];
         $fields = $payload['fields'] ?? [];
 
-        if ($user && app(\App\Services\EmployeePermissionService::class)->isBillingStaff($user)) {
+        if ($user && app(EmployeePermissionService::class)->isBillingStaff($user)) {
             $createdByUid = (string) ($fields['createdByUid'] ?? $fields['creatorUid'] ?? $fields['created_by'] ?? '');
             if ($createdByUid !== '' && $createdByUid !== (string) $user->id) {
                 return ApiResponse::error('You are not authorized to view sales from other counters/staff.', 403, null, 'PERMISSION_DENIED');
@@ -285,6 +296,19 @@ class InvoiceController extends Controller
             'paymentStatus' => $fields['paymentStatus'] ?? ($dueAmount == 0 ? 'PAID' : 'PARTIALLY_PAID'),
             'status' => $fields['status'] ?? $row->status ?? 'PAID',
             'items' => $items,
+            'hasBusinessLogoSnapshot' => (bool) ($fields['hasBusinessLogoSnapshot'] ?? false),
+            'businessLogoUrl' => $fields['businessLogoUrl'] ?? null,
+            'businessLogoPath' => $fields['businessLogoPath'] ?? null,
+            'businessLogoVersion' => $fields['businessLogoVersion'] ?? null,
+            'businessLogoHash' => $fields['businessLogoHash'] ?? null,
+            'hasBusinessSignatureSnapshot' => (bool) ($fields['hasBusinessSignatureSnapshot'] ?? false),
+            'businessSignatureEnabled' => (bool) ($fields['businessSignatureEnabled'] ?? false),
+            'businessSignatureUrl' => $fields['businessSignatureUrl'] ?? null,
+            'businessSignaturePath' => $fields['businessSignaturePath'] ?? null,
+            'businessSignatureVersion' => $fields['businessSignatureVersion'] ?? null,
+            'businessSignatureHash' => $fields['businessSignatureHash'] ?? null,
+            'businessSignatoryName' => $fields['businessSignatoryName'] ?? null,
+            'businessSignatoryDesignation' => $fields['businessSignatoryDesignation'] ?? null,
             'createdAt' => $fields['createdAt'] ?? $row->created_at,
             'updatedAt' => $fields['updatedAt'] ?? $row->updated_at,
         ];
@@ -315,6 +339,8 @@ class InvoiceController extends Controller
             'due_paise' => 'nullable|integer|min:0',
             'due_date' => 'nullable|string',
             'payment_mode' => 'nullable|string',
+            'bill_discount_paise' => 'nullable|integer|min:0',
+            'bill_discount_percent' => 'nullable|numeric|min:0|max:100',
             'lines' => 'required|array|min:1',
             'lines.*.product_id' => 'nullable|string',
             'lines.*.variant_id' => 'nullable|string',
@@ -322,482 +348,58 @@ class InvoiceController extends Controller
             'lines.*.variant_name' => 'nullable|string',
             'lines.*.quantity' => 'required|numeric|min:0.001',
             'lines.*.unit_price_paise' => 'required|integer|min:0',
-            'lines.*.discount_paise' => 'nullable|integer',
+            'lines.*.discount_paise' => 'nullable|integer|min:0',
+            'lines.*.discount_percent' => 'nullable|numeric|min:0|max:100',
             'lines.*.gst_rate_bps' => 'nullable|integer',
             'lines.*.price_includes_tax' => 'nullable|boolean',
             'lines.*.hsn_code' => 'nullable|string',
             'lines.*.unit_id' => 'nullable|string',
+            'lines.*.unit' => 'nullable|string',
+            'lines.*.unit_symbol' => 'nullable|string',
+            'lines.*.unit_display_name' => 'nullable|string',
+            'lines.*.conversion_factor' => 'nullable|numeric|min:0.0001',
+            'lines.*.sales_unit_conversion_factor' => 'nullable|numeric|min:0.0001',
+            'lines.*.track_stock' => 'nullable|boolean',
             'lines.*.mrp' => 'nullable|integer',
             'lines.*.selling_price' => 'nullable|integer',
+            'lines.*.batch_id' => 'nullable|string',
+            'lines.*.rack_id' => 'nullable|string',
+            'lines.*.aggregate_size' => 'nullable|string',
+            'lines.*.grade_quality' => 'nullable|string',
+            'lines.*.custom_attributes' => 'nullable|array',
+            'lines.*.attribute_values' => 'nullable|array',
         ]);
 
-        $requestId = $validated['request_id'] ?? null;
-        $invoiceId = $requestId ? "REQ_{$requestId}" : ('INV-'.strtoupper(Str::random(24)));
-        $businessId = $validated['business_id'];
-        $outletId = $validated['outlet_id'];
-        $shortCode = strtoupper($validated['business_short_code'] ?? 'INV');
-        if (! preg_match('/^[A-Z0-9]+$/', $shortCode)) {
-            $shortCode = 'INV';
-        }
+        $result = $this->invoiceCreator->finalizeInvoice(array_merge($validated, [
+            'user_id' => $request->user()?->id ?? 'SYSTEM',
+        ]));
 
-        $userId = $request->user()?->id ?? 'SYSTEM';
-        $nowDt = new \DateTimeImmutable;
-        $nowStr = $nowDt->format(\DateTimeInterface::ATOM);
-        $dbNow = now();
-        $fy = $this->financialYearLabel($nowDt);
-
-        // 1. Idempotency check
-        if ($requestId) {
-            $existing = DB::table('invoices')->where('id', $invoiceId)->first();
-            if ($existing) {
-                $payload = json_decode($existing->payload, true) ?: [];
-                $fields = $payload['fields'] ?? [];
-
-                return ApiResponse::success([
-                    'invoiceId' => $invoiceId,
-                    'invoiceNumber' => $fields['invoiceNumber'] ?? $existing->id,
-                    'existing' => true,
-                ], 'Invoice retrieved (already processed).');
-            }
-        }
-
-        $customerId = $validated['customer_id'] ?? null;
-        $customerName = $validated['customer_name'] ?? null;
-        $customerPhone = ! empty($validated['customer_phone']) ? preg_replace('/\D/', '', $validated['customer_phone']) : null;
-        $customerGstin = ! empty($validated['customer_gstin']) ? strtoupper(trim($validated['customer_gstin'])) : null;
-        $customerStateCode = $validated['customer_state_code'] ?? null;
-
-        $cashPaise = (int) ($validated['cash_paise'] ?? 0);
-        $upiPaise = (int) ($validated['upi_paise'] ?? 0);
-        $advancePaise = (int) ($validated['advance_paise'] ?? 0);
-        $duePaise = (int) ($validated['due_paise'] ?? 0);
-        $dueDate = $validated['due_date'] ?? null;
-
-        // Calculate line items
-        $calculatedLines = [];
-        $grossTotal = 0;
-        $discountTotal = 0;
-        $taxableTotal = 0;
-        $taxTotal = 0;
-
-        foreach ($validated['lines'] as $index => $item) {
-            $qty = (int) $item['quantity'];
-            $unitPrice = (int) $item['unit_price_paise'];
-            $discount = (int) ($item['discount_paise'] ?? 0);
-            $gross = $qty * $unitPrice;
-            $discount = min($discount, $gross);
-            $net = $gross - $discount;
-
-            $gstRateBps = (int) ($item['gst_rate_bps'] ?? 1800);
-            $priceIncludesTax = (bool) ($item['price_includes_tax'] ?? true);
-
-            if ($priceIncludesTax) {
-                $taxable = (int) round(($net * 10000) / (10000 + $gstRateBps));
-                $tax = $net - $taxable;
-            } else {
-                $taxable = $net;
-                $tax = (int) round(($taxable * $gstRateBps) / 10000);
-            }
-
-            $grossTotal += $gross;
-            $discountTotal += $discount;
-            $taxableTotal += $taxable;
-            $taxTotal += $tax;
-
-            $calculatedLines[] = [
-                'itemId' => "REQ_{$invoiceId}_{$index}",
-                'productId' => $item['product_id'] ?? null,
-                'variantId' => $item['variant_id'] ?? null,
-                'name' => $item['product_name'] ?? 'Product',
-                'variantName' => $item['variant_name'] ?? 'Variant',
-                'quantity' => $qty,
-                'quantityBase' => $qty,
-                'unit' => $item['unit_id'] ?? 'SYS_UNIT_PCS',
-                'unitPricePaise' => $unitPrice,
-                'discountPaise' => $discount,
-                'taxablePaise' => $taxable,
-                'taxPaise' => $tax,
-                'lineTotalPaise' => $taxable + $tax,
-                'gstRateBps' => $gstRateBps,
-                'hsn' => $item['hsn_code'] ?? '',
-                'sellingPrice' => $item['selling_price'] ?? $unitPrice,
-                'mrp' => $item['mrp'] ?? $unitPrice,
-                'conversionFactor' => 1,
-            ];
-        }
-
-        $grandTotal = $taxableTotal + $taxTotal;
-        $totalPaidOnBill = $cashPaise + $upiPaise + $advancePaise;
-        $status = $duePaise == 0 ? 'PAID' : ($totalPaidOnBill > 0 ? 'PARTIALLY_PAID' : 'PENDING');
-
-        // Document Sequence Generation inside transaction
-        return DB::transaction(function () use (
-            $invoiceId,
-            $businessId,
-            $outletId,
-            $shortCode,
-            $fy,
-            $customerId,
-            $customerName,
-            $customerPhone,
-            $customerGstin,
-            $customerStateCode,
-            $cashPaise,
-            $upiPaise,
-            $advancePaise,
-            $duePaise,
-            $dueDate,
-            $grossTotal,
-            $discountTotal,
-            $taxableTotal,
-            $taxTotal,
-            $grandTotal,
-            $status,
-            $calculatedLines,
-            $nowStr,
-            $dbNow,
-            $userId
-
-        ) {
-            // Sequence update with lock
-            $sequenceId = "{$businessId}_{$fy}_SALES_INVOICE";
-            $seqRow = DB::table('document_sequences')
-                ->where('id', $sequenceId)
-                ->lockForUpdate()
-                ->first();
-
-            $nextSequence = 1;
-            if ($seqRow) {
-                $payload = json_decode($seqRow->payload, true) ?: [];
-                $fields = $payload['fields'] ?? [];
-                $nextSequence = ((int) ($fields['sequence'] ?? 0)) + 1;
-                $fields['sequence'] = $nextSequence;
-                $fields['updatedAt'] = $nowStr;
-                $payload['fields'] = $fields;
-
-                DB::table('document_sequences')->where('id', $sequenceId)->update([
-                    'updated_at' => $dbNow,
-                    'payload' => json_encode($payload),
-                ]);
-            } else {
-                DB::table('document_sequences')->insert([
-                    'id' => $sequenceId,
-                    'document_path' => "document_sequences/{$sequenceId}",
-                    'business_id' => $businessId,
-                    'outlet_id' => $outletId,
-                    'status' => 'ACTIVE',
-                    'created_at' => $dbNow,
-                    'updated_at' => $dbNow,
-                    'is_deleted' => 0,
-                    'payload' => json_encode([
-                        'fields' => [
-                            'sequence' => 1,
-                            'businessId' => $businessId,
-                            'sequenceType' => 'SALES_INVOICE',
-                            'financialYear' => $fy,
-                            'updatedAt' => $nowStr,
-                        ],
-                    ]),
-                ]);
-            }
-
-            $seqFormatted = str_pad((string) $nextSequence, 5, '0', STR_PAD_LEFT);
-            $invoiceNumber = "{$shortCode}-{$fy}-{$seqFormatted}";
-
-            $invoiceFields = [
-                'invoiceId' => $invoiceId,
-                'invoiceNumber' => $invoiceNumber,
-                'businessId' => $businessId,
-                'outletId' => $outletId,
-                'customerId' => $customerId,
-                'customerName' => $customerName,
-                'customerPhone' => $customerPhone,
-                'customerGstin' => $customerGstin,
-                'customerStateCode' => $customerStateCode,
-                'subtotal' => $grossTotal,
-                'discount' => $discountTotal,
-                'discountAmount' => $discountTotal,
-                'taxableAmount' => $taxableTotal,
-                'gstAmount' => $taxTotal,
-                'totalAmount' => $grandTotal,
-                'grandTotal' => $grandTotal,
-                'dueAmount' => $duePaise,
-                'duePaise' => $duePaise,
-                'paidPaise' => $cashPaise + $upiPaise,
-                'paidAmount' => $cashPaise + $upiPaise,
-                'dueDate' => $dueDate,
-                'paymentMode' => $cashPaise > 0 && $upiPaise > 0 ? 'MIXED' : ($cashPaise > 0 ? 'CASH' : ($upiPaise > 0 ? 'UPI' : 'CREDIT')),
-                'paymentStatus' => $status,
-                'status' => $status,
-                'items' => $calculatedLines,
-                'createdAt' => $nowStr,
-                'createdByUid' => $userId,
-                'updatedAt' => $nowStr,
-            ];
-
-            // 1. Insert into invoices
-            DB::table('invoices')->insert([
-                'id' => $invoiceId,
-                'document_path' => "invoices/{$invoiceId}",
-                'business_id' => $businessId,
-                'outlet_id' => $outletId,
-                'status' => $status,
-                'created_at' => $dbNow,
-                'updated_at' => $dbNow,
-                'is_deleted' => 0,
-                'payload' => json_encode(['fields' => $invoiceFields]),
-            ]);
-
-            // 2. Insert into invoice_items
-            foreach ($calculatedLines as $line) {
-                DB::table('invoice_items')->insert([
-                    'id' => $line['itemId'],
-                    'document_path' => "invoice_items/{$line['itemId']}",
-                    'business_id' => $businessId,
-                    'outlet_id' => $outletId,
-                    'invoice_id' => $invoiceId,
-                    'product_id' => $line['productId'] ?? null,
-                    'quantity' => $line['quantity'] ?? 0,
-                    'returned_qty' => 0,
-                    'status' => 'ACTIVE',
-                    'created_at' => $dbNow,
-                    'updated_at' => $dbNow,
-                    'is_deleted' => 0,
-                    'payload' => json_encode([
-                        'fields' => array_merge($line, [
-                            'invoiceId' => $invoiceId,
-                            'businessId' => $businessId,
-                            'outletId' => $outletId,
-                        ]),
-                    ]),
-                ]);
-            }
-
-            // 3. Customer Ledger and Balance updates
-            if ($customerId) {
-                $balRow = DB::table('customer_balances')
-                    ->where('business_id', $businessId)
-                    ->where(function ($q) use ($customerId) {
-                        $q->where('id', $customerId)
-                            ->orWhere('payload->fields->customerId', $customerId);
-                    })
-                    ->lockForUpdate()
-                    ->first();
-
-                if ($balRow) {
-                    $bPayload = json_decode($balRow->payload, true) ?: [];
-                    $bFields = $bPayload['fields'] ?? [];
-                    $curDue = (int) ($bFields['duePaise'] ?? 0);
-                    $curAdv = (int) ($bFields['advancePaise'] ?? 0);
-
-                    $bFields['duePaise'] = max(0, $curDue + $duePaise);
-                    $bFields['advancePaise'] = max(0, $curAdv - $advancePaise);
-                    $bFields['updatedAt'] = $nowStr;
-                    $bPayload['fields'] = $bFields;
-
-                    DB::table('customer_balances')->where('id', $balRow->id)->update([
-                        'updated_at' => $dbNow,
-                        'payload' => json_encode($bPayload),
-                    ]);
-                }
-
-                // If duePaise > 0, post CREDIT_SALE (+Dr)
-                if ($duePaise > 0) {
-                    $ledgerId = 'LED-'.strtoupper(Str::random(24));
-                    DB::table('customer_ledger_entries')->insert([
-                        'id' => $ledgerId,
-                        'document_path' => "customer_ledger_entries/{$ledgerId}",
-                        'business_id' => $businessId,
-                        'outlet_id' => $outletId,
-                        'status' => 'POSTED',
-                        'created_at' => $dbNow,
-                        'updated_at' => $dbNow,
-                        'is_deleted' => 0,
-                        'payload' => json_encode([
-                            'fields' => [
-                                'transactionId' => $ledgerId,
-                                'businessId' => $businessId,
-                                'outletId' => $outletId,
-                                'customerId' => $customerId,
-                                'invoiceId' => $invoiceId,
-                                'transactionType' => 'CREDIT_SALE',
-                                'amountPaise' => $duePaise,
-                                'debitPaise' => $duePaise,
-                                'creditPaise' => 0,
-                                'advanceCreditPaise' => 0,
-                                'createdAt' => $nowStr,
-                                'createdBy' => $userId,
-                                'status' => 'POSTED',
-                                'immutable' => true,
-                            ],
-                        ]),
-                    ]);
-                }
-
-                // If cash or upi paid, post PAYMENT (-Cr)
-                $paidNow = $cashPaise + $upiPaise;
-                if ($paidNow > 0) {
-                    $ledgerPayId = 'LED-'.strtoupper(Str::random(24));
-                    DB::table('customer_ledger_entries')->insert([
-                        'id' => $ledgerPayId,
-                        'document_path' => "customer_ledger_entries/{$ledgerPayId}",
-                        'business_id' => $businessId,
-                        'outlet_id' => $outletId,
-                        'status' => 'POSTED',
-                        'created_at' => $dbNow,
-                        'updated_at' => $dbNow,
-                        'is_deleted' => 0,
-                        'payload' => json_encode([
-                            'fields' => [
-                                'transactionId' => $ledgerPayId,
-                                'businessId' => $businessId,
-                                'outletId' => $outletId,
-                                'customerId' => $customerId,
-                                'invoiceId' => $invoiceId,
-                                'transactionType' => 'PAYMENT',
-                                'amountPaise' => $paidNow,
-                                'debitPaise' => 0,
-                                'creditPaise' => $paidNow,
-                                'advanceCreditPaise' => 0,
-                                'createdAt' => $nowStr,
-                                'createdBy' => $userId,
-                                'status' => 'POSTED',
-                                'immutable' => true,
-                            ],
-                        ]),
-                    ]);
-                }
-            }
-
-            // 4. Record payment voucher
-            $paidTotal = $cashPaise + $upiPaise;
-            if ($paidTotal > 0) {
-                $payId = 'PAY-'.strtoupper(Str::random(24));
-                DB::table('payments')->insert([
-                    'id' => $payId,
-                    'document_path' => "payments/{$payId}",
-                    'business_id' => $businessId,
-                    'outlet_id' => $outletId,
-                    'status' => 'COMPLETED',
-                    'created_at' => $dbNow,
-                    'updated_at' => $dbNow,
-                    'is_deleted' => 0,
-                    'payload' => json_encode([
-                        'fields' => [
-                            'paymentId' => $payId,
-                            'businessId' => $businessId,
-                            'outletId' => $outletId,
-                            'customerId' => $customerId,
-                            'invoiceId' => $invoiceId,
-                            'amount' => $paidTotal,
-                            'cashAmount' => $cashPaise,
-                            'upiAmount' => $upiPaise,
-                            'paymentMethod' => $cashPaise > 0 && $upiPaise > 0 ? 'MIXED' : ($cashPaise > 0 ? 'CASH' : 'UPI'),
-                            'createdAt' => $nowStr,
-                            'createdBy' => $userId,
-                        ],
-                    ]),
-                ]);
-            }
-
-            // 5. Update stock balances: deduct sold quantity
-            foreach ($calculatedLines as $line) {
-                $vId = $line['variantId'] ?? '';
-                $pId = $line['productId'] ?? '';
-                $qty = (int) ($line['quantity'] ?? 0);
-                if ($qty <= 0) {
-                    continue;
-                }
-
-                $stockRow = DB::table('stock_balances')
-                    ->where('business_id', $businessId)
-                    ->where('outlet_id', $outletId)
-                    ->where(function ($q) use ($vId, $pId) {
-                        if (!empty($vId)) {
-                            $q->where('id', 'LIKE', "%_{$vId}")
-                                ->orWhere('payload->fields->variantId', $vId);
-                        } elseif (!empty($pId)) {
-                            $q->where('payload->fields->productId', $pId);
-                        }
-                    })
-                    ->lockForUpdate()
-                    ->first();
-
-                if ($stockRow) {
-                    $sbPayload = json_decode($stockRow->payload, true) ?: [];
-                    $sbFields = $sbPayload['fields'] ?? [];
-                    $currStock = (int) ($sbFields['quantityOnHand'] ?? $sbFields['currentStock'] ?? 0);
-                    $milliQty = $qty * 1000;
-
-                    // Support both thousandths (30000 = 30 units) and raw units
-                    if ($currStock >= $milliQty || $currStock > 500) {
-                        $newStock = max(0, $currStock - $milliQty);
-                    } else {
-                        $newStock = max(0, $currStock - $qty);
-                    }
-
-                    $oldVal = (int) ($sbFields['totalValue'] ?? 0);
-                    $newVal = $currStock > 0 ? max(0, (int) round($oldVal * ($newStock / $currStock))) : 0;
-
-                    $sbFields['quantityOnHand'] = $newStock;
-                    $sbFields['currentStock'] = $newStock;
-                    $sbFields['totalValue'] = $newVal;
-                    $sbFields['updatedAt'] = $nowStr;
-                    $sbPayload['fields'] = $sbFields;
-
-                    DB::table('stock_balances')->where('id', $stockRow->id)->update([
-                        'updated_at' => $dbNow,
-                        'payload' => json_encode($sbPayload),
-                    ]);
-
-                    $balanceAfterUnits = $newStock >= 1000 ? ($newStock / 1000.0) : (float) $newStock;
-                    $movementId = 'STM-'.strtoupper(\Illuminate\Support\Str::random(24));
-                    DB::table('stock_movements')->insert([
-                        'id' => $movementId,
-                        'document_path' => "stock_movements/{$movementId}",
-                        'business_id' => $businessId,
-                        'outlet_id' => $outletId,
-                        'product_id' => $pId ?: $vId,
-                        'variant_id' => $vId ?: $pId,
-                        'type' => 'sale',
-                        'qty_change' => -$qty,
-                        'balance_after' => $balanceAfterUnits,
-                        'reference_type' => 'invoice',
-                        'reference_id' => $invoiceId,
-                        'condition' => 'good',
-                        'note' => "Sale {$invoiceNumber} ({$qty} sold)",
-                        'created_by' => $userId,
-                        'created_at' => $dbNow,
-                        'updated_at' => $dbNow,
-                        'payload' => json_encode([
-                            'fields' => [
-                                'movementId' => $movementId,
-                                'businessId' => $businessId,
-                                'outletId' => $outletId,
-                                'productId' => $pId ?: $vId,
-                                'variantId' => $vId ?: $pId,
-                                'type' => 'SALE',
-                                'qtyBase' => -$qty,
-                                'quantity' => -$qty,
-                                'balanceAfter' => (int) round($balanceAfterUnits),
-                                'reason' => "Sale {$invoiceNumber}",
-                                'referenceId' => $invoiceId,
-                                'userId' => $userId,
-                                'createdAt' => $nowStr,
-                                'immutable' => true,
-                            ],
-                        ]),
-                    ]);
-                }
-            }
-
+        if (! empty($result['existing'])) {
             return ApiResponse::success([
-                'invoiceId' => $invoiceId,
-                'invoiceNumber' => $invoiceNumber,
-                'existing' => false,
-                'invoice' => $invoiceFields,
-            ], 'Sales invoice created successfully.', 201);
-        });
+                'invoiceId' => $result['invoiceId'],
+                'invoiceNumber' => $result['invoiceNumber'],
+                'existing' => true,
+            ], 'Invoice retrieved (already processed).');
+        }
+
+        $invoiceNo = (string) ($result['invoiceNumber'] ?? $result['invoiceId'] ?? 'New Bill');
+        $customerLabel = trim((string) ($validated['customer_name'] ?? 'Walk-in Customer'));
+        SendFcmNotificationJob::dispatch(
+            null,
+            null,
+            'New Sales Invoice Created',
+            "Invoice {$invoiceNo} created for {$customerLabel}.",
+            [
+                'target_screen' => 'invoice',
+                'type' => 'invoice_created',
+                'invoice_id' => (string) ($result['invoiceId'] ?? ''),
+                'invoice_number' => $invoiceNo,
+                'business_id' => (string) $validated['business_id'],
+            ],
+            (string) $validated['business_id']
+        );
+
+        return ApiResponse::success($result, 'Sales invoice created successfully.', 201);
     }
 
     /**
@@ -954,6 +556,24 @@ class InvoiceController extends Controller
                 ]),
             ]);
 
+            $invoiceNo = (string) ($fields['invoiceNumber'] ?? $id);
+            $paidRupees = number_format($applied / 100, 2);
+            SendFcmNotificationJob::dispatch(
+                null,
+                null,
+                'Invoice Payment Received',
+                "Payment of INR {$paidRupees} recorded for invoice {$invoiceNo} ({$newStatus}).",
+                [
+                    'target_screen' => 'invoice',
+                    'type' => 'invoice_settled',
+                    'invoice_id' => (string) $id,
+                    'invoice_number' => $invoiceNo,
+                    'business_id' => (string) $invoice->business_id,
+                    'status' => $newStatus,
+                ],
+                (string) $invoice->business_id
+            )->afterCommit();
+
             return ApiResponse::success([
                 'invoiceId' => $id,
                 'remainingDuePaise' => $remaining,
@@ -1016,6 +636,82 @@ class InvoiceController extends Controller
                 'updated_at' => $dbNow,
                 'payload' => json_encode($payload),
             ]);
+
+            // Reverse stock deducted during sale for this invoice
+            $saleMovements = DB::table('stock_movements')
+                ->where('business_id', $invoice->business_id)
+                ->where('reference_type', 'invoice')
+                ->where('reference_id', $id)
+                ->where('type', 'sale')
+                ->get();
+            $stockSvc = new InventoryStockService($this->unitService);
+            foreach ($saleMovements as $mov) {
+                $mp = json_decode($mov->payload ?? '{}', true) ?: [];
+                $mf = $mp['fields'] ?? [];
+                $milliRestore = abs((int) ($mf['qtyBase'] ?? round(((float) abs($mov->qty_change)) * 1000)));
+                if ($milliRestore <= 0) {
+                    continue;
+                }
+                $mProdId = (string) ($mf['productId'] ?? $mov->product_id ?? '');
+                $mVarId = (string) ($mf['variantId'] ?? $mov->variant_id ?? '');
+                $mOutletId = (string) ($mov->outlet_id ?? $invoice->outlet_id ?? '');
+                $mMeta = $mProdId !== '' ? $stockSvc->resolveProductMeta((string) $invoice->business_id, $mProdId) : ['behaviour' => 'SEPARATE_VARIANT'];
+                $target = $stockSvc->inspectStockTarget((string) $invoice->business_id, $mOutletId, $mProdId, $mVarId, $mMeta['behaviour']);
+                $row = $target['canonicalRow'];
+                if ($row) {
+                    $newMilli = $target['totalMilli'] + $milliRestore;
+                    $newUnits = $this->unitService->fromMilliUnits($newMilli);
+                    $sbPayload = json_decode($row->payload ?? '{}', true) ?: [];
+                    $sbFields = $sbPayload['fields'] ?? [];
+                    $sbFields['quantityOnHand'] = $newMilli;
+                    $sbFields['currentStock'] = $newMilli;
+                    $sbFields['stockScale'] = 'MILLI';
+                    $sbFields['updatedAt'] = $nowStr;
+                    $sbPayload['fields'] = $sbFields;
+                    $sbUp = ['updated_at' => $dbNow, 'payload' => json_encode($sbPayload)];
+                    if (Schema::hasColumn('stock_balances', 'quantity_on_hand')) {
+                        $sbUp['quantity_on_hand'] = $newUnits;
+                    }
+                    DB::table('stock_balances')->where('id', $row->id)->update($sbUp);
+
+                    $revId = 'STM-'.strtoupper(Str::random(24));
+                    DB::table('stock_movements')->insert([
+                        'id' => $revId,
+                        'document_path' => "stock_movements/{$revId}",
+                        'business_id' => $invoice->business_id,
+                        'outlet_id' => $mOutletId,
+                        'product_id' => $mProdId ?: $target['canonicalVariantId'],
+                        'variant_id' => $target['canonicalVariantId'],
+                        'type' => 'return',
+                        'qty_change' => $this->unitService->fromMilliUnits($milliRestore),
+                        'balance_after' => $newUnits,
+                        'reference_type' => 'invoice_cancellation',
+                        'reference_id' => $id,
+                        'condition' => 'good',
+                        'note' => "Invoice {$id} cancelled: {$reason}",
+                        'created_by' => $userId,
+                        'created_at' => $dbNow,
+                        'updated_at' => $dbNow,
+                        'payload' => json_encode(['fields' => [
+                            'movementId' => $revId,
+                            'businessId' => $invoice->business_id,
+                            'outletId' => $mOutletId,
+                            'productId' => $mProdId ?: $target['canonicalVariantId'],
+                            'variantId' => $target['canonicalVariantId'],
+                            'inventoryBehaviour' => $mMeta['behaviour'],
+                            'type' => 'RETURN',
+                            'qtyBase' => $milliRestore,
+                            'quantity' => $this->unitService->fromMilliUnits($milliRestore),
+                            'balanceAfter' => $newMilli,
+                            'balanceAfterUnits' => $newUnits,
+                            'reason' => "Invoice {$id} cancelled: {$reason}",
+                            'referenceId' => $id,
+                            'userId' => $userId,
+                            'createdAt' => $nowStr,
+                        ]]),
+                    ]);
+                }
+            }
 
             // Revert customer due balance if credit
             if ($customerId && $dueAmount > 0) {

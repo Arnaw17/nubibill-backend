@@ -22,6 +22,7 @@
 /public/js/filament
 /public/storage
 /storage/*.key
+/storage/app/firebase/*.json
 /storage/pail
 /vendor
 _ide_helper.php
