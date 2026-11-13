@@ -17,14 +17,16 @@ services:
       - key: DB_CONNECTION
         value: mysql
       - key: DB_HOST
-        value: gateway01.ap-northeast-1.prod.aws.tidbcloud.com
+        value: mysql-25266586-arnaw2017-455d.d.aivencloud.com
       - key: DB_PORT
-        value: "4000"
+        value: "10591"
       - key: DB_DATABASE
-        value: test
+        value: defaultdb
       - key: DB_USERNAME
-        value: pbaR4iA9npaJ5Bf.root
+        value: avnadmin
       - key: DB_PASSWORD
         sync: false
+      - key: DB_SSL_VERIFY
+        value: "false"
       - key: MYSQL_ATTR_SSL_CA
         value: /etc/ssl/certs/ca-certificates.crt
