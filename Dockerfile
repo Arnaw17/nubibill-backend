@@ -2,6 +2,7 @@ FROM php:8.3-apache
 
 # Install system dependencies & libraries required by Laravel and extensions
 RUN apt-get update && apt-get install -y \
+    ca-certificates \
     git \
     curl \
     libpng-dev \
@@ -11,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     libicu-dev \
     zip \
     unzip \
+    && update-ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install required PHP extensions
