@@ -864,6 +864,7 @@ class InvoiceCreationService
 
             // 5. Update stock balances: deduct exact sold base quantity
             $stockSvc = new InventoryStockService($this->unitService);
+            $lowStockAlerts = [];
             foreach ($calculatedLines as $line) {
                 $vId = $line['variantId'] ?? '';
                 $pId = $line['productId'] ?? '';
@@ -937,6 +938,19 @@ class InvoiceCreationService
                     $sbPayload['fields'] = $sbFields;
 
                     $balanceAfterUnits = $this->unitService->fromMilliUnits($newStockMilli);
+                    $mFields = is_array($meta['fields'] ?? null) ? $meta['fields'] : [];
+                    $reorderLevel = (float) ($mFields['reorderLevel'] ?? $mFields['reorder_level'] ?? 5);
+                    if ($balanceAfterUnits <= $reorderLevel) {
+                        $lowStockAlerts[] = [
+                            'productId' => $pId,
+                            'variantId' => $targetVariantId,
+                            'productName' => (string) ($line['name'] ?? $mFields['productName'] ?? 'Product'),
+                            'remainingStock' => $balanceAfterUnits,
+                            'reorderLevel' => $reorderLevel,
+                            'unit' => $baseUnitSymbol,
+                            'isOutOfStock' => $balanceAfterUnits <= 0,
+                        ];
+                    }
                     $sbUpdate = [
                         'updated_at' => $dbNow,
                         'payload' => json_encode($sbPayload),
@@ -1036,6 +1050,7 @@ class InvoiceCreationService
                 'invoiceNumber' => $invoiceNumber,
                 'existing' => false,
                 'invoice' => $invoiceFields,
+                'lowStockAlerts' => $lowStockAlerts,
             ];
         });
     }

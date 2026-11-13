@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Jobs\SendFcmNotificationJob;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -229,6 +230,31 @@ class ExpenseController extends Controller
             'created_at' => $now,
             'updated_at' => $now,
         ]);
+
+        try {
+            $expenseAmount = number_format($amountPaise / 100, 2);
+            $expenseTitle = $validated['title'];
+            $expenseCat = $validated['category'];
+            $staffName = $user ? ($user->name ?: $user->email) : 'Staff';
+
+            SendFcmNotificationJob::dispatch(
+                null,
+                null,
+                'Expense Recorded',
+                "Expense of INR {$expenseAmount} for '{$expenseTitle}' ({$expenseCat}) recorded by {$staffName}.",
+                [
+                    'target_screen' => 'expenses',
+                    'type' => 'expense_created',
+                    'expense_id' => (string) $id,
+                    'business_id' => (string) $businessId,
+                    'amount_paise' => (string) $amountPaise,
+                    'category' => (string) $expenseCat,
+                ],
+                (string) $businessId
+            );
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Failed to dispatch expense notification: '.$e->getMessage());
+        }
 
         return ApiResponse::success($payload, 'Expense recorded successfully.', 201);
     }

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\CreateReturnRequest;
 use App\Http\Resources\ReturnResource;
 use App\Http\Responses\ApiResponse;
+use App\Jobs\SendFcmNotificationJob;
 use App\Models\ReturnModel;
 use App\Services\ReturnService;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -41,6 +42,37 @@ class ReturnController extends Controller
         $validated['outlet_id'] = $outletId;
 
         $return = $this->returnService->createReturn($validated, $user);
+
+        try {
+            $returnType = strtoupper((string) ($return->type ?? 'sales'));
+            $retNo = (string) ($return->return_number ?? 'Return');
+            $amount = number_format((float) ($return->grand_total ?? 0), 2);
+            $billNo = (string) ($return->original_bill_number ?? '');
+            $staffName = $user ? ($user->name ?: $user->email) : 'Staff';
+
+            $title = $returnType === 'PURCHASE' ? 'Purchase Return Created' : 'Sales Return Processed';
+            $body = $returnType === 'PURCHASE'
+                ? "Purchase return {$retNo} for INR {$amount} recorded."
+                : "Sales return {$retNo}".($billNo !== '' ? " for bill {$billNo}" : '')." (INR {$amount}) processed by {$staffName}.";
+
+            SendFcmNotificationJob::dispatch(
+                null,
+                null,
+                $title,
+                $body,
+                [
+                    'target_screen' => 'returns',
+                    'type' => 'return_created',
+                    'return_id' => (string) $return->id,
+                    'return_number' => $retNo,
+                    'business_id' => (string) $return->business_id,
+                    'grand_total' => (string) $amount,
+                ],
+                (string) $return->business_id
+            );
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Failed to dispatch return notification: '.$e->getMessage());
+        }
 
         return ApiResponse::success(
             new ReturnResource($return),

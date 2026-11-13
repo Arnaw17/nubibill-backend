@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Jobs\SendFcmNotificationJob;
 use App\Models\User;
 use App\Services\FcmService;
 use Carbon\Carbon;
@@ -665,6 +666,53 @@ class SuperUserController extends Controller
 
         $complaint = DB::table('user_complaints')->where('id', $id)->first();
         $complaint->timeline = $existingTimeline;
+
+        try {
+            $code = $complaint->complaint_code ?? 'CMP';
+            $resNote = ! empty($validated['resolution_summary']) ? ": {$validated['resolution_summary']}" : '.';
+            $stageText = match ($targetStatus) {
+                'UNDER_REVIEW' => 'Under Review',
+                'IN_PROGRESS' => 'In Progress',
+                'RESOLVED' => 'Resolved',
+                'CLOSED' => 'Closed',
+                default => $targetStatus,
+            };
+            $targetTitle = "Support Ticket {$stageText} ({$code})";
+            $targetBody = "Your ticket {$code} is now {$stageText}{$resNote}";
+
+            if (! empty($complaint->user_id)) {
+                SendFcmNotificationJob::dispatch(
+                    [(string) $complaint->user_id],
+                    null,
+                    $targetTitle,
+                    $targetBody,
+                    [
+                        'target_screen' => 'complaint',
+                        'type' => 'complaint_status_updated',
+                        'complaint_id' => (string) $complaint->id,
+                        'complaint_code' => (string) $code,
+                        'status' => $targetStatus,
+                    ]
+                );
+            } elseif (! empty($complaint->business_id)) {
+                SendFcmNotificationJob::dispatch(
+                    null,
+                    null,
+                    $targetTitle,
+                    $targetBody,
+                    [
+                        'target_screen' => 'complaint',
+                        'type' => 'complaint_status_updated',
+                        'complaint_id' => (string) $complaint->id,
+                        'complaint_code' => (string) $code,
+                        'status' => $targetStatus,
+                    ],
+                    (string) $complaint->business_id
+                );
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Failed to dispatch complaint status update notification: '.$e->getMessage());
+        }
 
         return ApiResponse::success($complaint, 'Complaint status updated.');
     }

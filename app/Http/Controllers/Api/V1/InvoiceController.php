@@ -399,6 +399,50 @@ class InvoiceController extends Controller
             (string) $validated['business_id']
         );
 
+        $lowStockAlerts = $result['lowStockAlerts'] ?? [];
+        if (! empty($lowStockAlerts)) {
+            if (count($lowStockAlerts) === 1) {
+                $alert = $lowStockAlerts[0];
+                $alertTitle = $alert['isOutOfStock'] ? 'Out of Stock Alert' : 'Low Stock Alert';
+                $alertBody = $alert['isOutOfStock']
+                    ? "'{$alert['productName']}' is now completely out of stock!"
+                    : "'{$alert['productName']}' is running low: {$alert['remainingStock']} {$alert['unit']} remaining (Reorder level: {$alert['reorderLevel']}).";
+                SendFcmNotificationJob::dispatch(
+                    null,
+                    null,
+                    $alertTitle,
+                    $alertBody,
+                    [
+                        'target_screen' => 'inventory',
+                        'type' => $alert['isOutOfStock'] ? 'out_of_stock' : 'low_stock',
+                        'product_id' => (string) ($alert['productId'] ?? ''),
+                        'product_name' => (string) ($alert['productName'] ?? ''),
+                        'business_id' => (string) $validated['business_id'],
+                    ],
+                    (string) $validated['business_id']
+                );
+            } else {
+                $count = count($lowStockAlerts);
+                $names = implode(', ', array_slice(array_column($lowStockAlerts, 'productName'), 0, 3));
+                if ($count > 3) {
+                    $names .= ' and '.($count - 3).' more';
+                }
+                SendFcmNotificationJob::dispatch(
+                    null,
+                    null,
+                    'Low Stock Alert',
+                    "{$count} products ({$names}) reached low stock after billing {$invoiceNo}.",
+                    [
+                        'target_screen' => 'inventory',
+                        'type' => 'low_stock_summary',
+                        'business_id' => (string) $validated['business_id'],
+                        'count' => (string) $count,
+                    ],
+                    (string) $validated['business_id']
+                );
+            }
+        }
+
         return ApiResponse::success($result, 'Sales invoice created successfully.', 201);
     }
 
@@ -768,6 +812,33 @@ class InvoiceController extends Controller
                     ]),
                 ]);
             }
+
+            $invNumber = (string) ($fields['invoiceNumber'] ?? $id);
+            $totalPaise = (int) ($fields['totalAmount'] ?? $fields['totalPaise'] ?? 0);
+            $totalRupees = number_format($totalPaise / 100, 2);
+            $staffName = 'Staff';
+            if ($userId && $userId !== 'SYSTEM') {
+                $userRow = DB::table('users')->where('id', $userId)->first();
+                $staffName = $userRow ? ($userRow->name ?: $userRow->email) : 'Staff';
+            }
+
+            SendFcmNotificationJob::dispatch(
+                null,
+                null,
+                'Invoice Cancelled',
+                "Invoice {$invNumber} (INR {$totalRupees}) was cancelled by {$staffName}. Reason: {$reason}.",
+                [
+                    'target_screen' => 'invoice',
+                    'type' => 'invoice_cancelled',
+                    'invoice_id' => (string) $id,
+                    'invoice_number' => $invNumber,
+                    'business_id' => (string) $invoice->business_id,
+                    'amount_paise' => (string) $totalPaise,
+                    'cancel_reason' => (string) $reason,
+                    'cancelled_by' => $staffName,
+                ],
+                (string) $invoice->business_id
+            );
 
             return ApiResponse::success(null, 'Invoice cancelled successfully.');
         });

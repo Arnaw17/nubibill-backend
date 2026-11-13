@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Jobs\SendFcmNotificationJob;
 use App\Services\InventoryStockService;
 use App\Services\UnitConversionService;
 use Carbon\Carbon;
@@ -1227,6 +1228,31 @@ class PurchaseController extends Controller
             }
         });
 
+        try {
+            $billNo = (string) ($billFields['billNumber'] ?? $billId);
+            $supName = (string) ($billFields['supplierName'] ?? 'Supplier');
+            $totRupees = number_format(((int) ($billFields['totalAmount'] ?? $billFields['totalPaise'] ?? 0)) / 100, 2);
+            $staffName = $user ? ($user->name ?: $user->email) : 'Staff';
+
+            SendFcmNotificationJob::dispatch(
+                null,
+                null,
+                'Purchase Inward Recorded',
+                "Purchase bill {$billNo} from {$supName} (INR {$totRupees}) recorded by {$staffName}.",
+                [
+                    'target_screen' => 'purchase',
+                    'type' => 'purchase_created',
+                    'purchase_id' => (string) $billId,
+                    'bill_number' => $billNo,
+                    'business_id' => (string) $businessId,
+                    'total_amount' => $totRupees,
+                ],
+                (string) $businessId
+            );
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Failed to dispatch purchase notification: '.$e->getMessage());
+        }
+
         return ApiResponse::success([
             'purchaseBill' => $billFields,
         ], 'Purchase bill created successfully.', 201);
@@ -1593,6 +1619,32 @@ class PurchaseController extends Controller
                 }
             }
         });
+
+        try {
+            $billNo = (string) ($fields['billNumber'] ?? $id);
+            $supName = (string) ($fields['supplierName'] ?? 'Supplier');
+            $totRupees = number_format(((int) ($fields['totalAmount'] ?? $fields['totalPaise'] ?? 0)) / 100, 2);
+            $staffName = $user ? ($user->name ?: $user->email) : 'Staff';
+            $pBusinessId = (string) ($fields['businessId'] ?? $row->business_id);
+
+            SendFcmNotificationJob::dispatch(
+                null,
+                null,
+                'Purchase Bill Approved',
+                "Purchase bill {$billNo} from {$supName} (INR {$totRupees}) approved by {$staffName}.",
+                [
+                    'target_screen' => 'purchase',
+                    'type' => 'purchase_approved',
+                    'purchase_id' => (string) $id,
+                    'bill_number' => $billNo,
+                    'business_id' => $pBusinessId,
+                    'total_amount' => $totRupees,
+                ],
+                $pBusinessId
+            );
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Failed to dispatch purchase notification: '.$e->getMessage());
+        }
 
         return ApiResponse::success([
             'purchaseBill' => $fields,

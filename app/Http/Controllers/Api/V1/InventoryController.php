@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Jobs\SendFcmNotificationJob;
 use App\Services\EmployeePermissionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -390,6 +391,53 @@ class InventoryController extends Controller
                     $sbIns['inventory_behaviour'] = $invBehaviour;
                 }
                 DB::table('stock_balances')->insert($sbIns);
+            }
+
+            // Low stock or Damage alert to owner
+            try {
+                $pName = (string) ($meta['fields']['productName'] ?? $meta['fields']['name'] ?? 'Product');
+                $reorder = (float) ($meta['fields']['reorderLevel'] ?? $meta['fields']['reorder_level'] ?? 5);
+
+                if ($type === 'DAMAGE_LOSS') {
+                    $lossUnits = $unitService->fromMilliUnits($qtyBase);
+                    SendFcmNotificationJob::dispatch(
+                        null,
+                        null,
+                        'Stock Damage / Loss Recorded',
+                        "{$lossUnits} units of '{$pName}' written off as damaged. Reason: {$reason}.",
+                        [
+                            'target_screen' => 'inventory',
+                            'type' => 'stock_damage',
+                            'product_id' => (string) $productId,
+                            'business_id' => (string) $businessId,
+                        ],
+                        (string) $businessId
+                    );
+                }
+
+                if (in_array($type, ['ADJUST_OUT', 'DAMAGE_LOSS', 'SALE'], true) && $balAfterUnits <= $reorder) {
+                    $isZero = $balAfterUnits <= 0;
+                    $alertTitle = $isZero ? 'Out of Stock Alert' : 'Low Stock Alert';
+                    $alertBody = $isZero
+                        ? "'{$pName}' is now completely out of stock!"
+                        : "'{$pName}' is running low: {$balAfterUnits} remaining (Reorder level: {$reorder}).";
+
+                    SendFcmNotificationJob::dispatch(
+                        null,
+                        null,
+                        $alertTitle,
+                        $alertBody,
+                        [
+                            'target_screen' => 'inventory',
+                            'type' => $isZero ? 'out_of_stock' : 'low_stock',
+                            'product_id' => (string) $productId,
+                            'business_id' => (string) $businessId,
+                        ],
+                        (string) $businessId
+                    );
+                }
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('Failed to dispatch inventory notification: '.$e->getMessage());
             }
 
             return ApiResponse::success([
