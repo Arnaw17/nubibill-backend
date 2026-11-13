@@ -11,7 +11,7 @@ return new class extends Migration
         if (Schema::hasTable('returns')) {
             Schema::table('returns', function (Blueprint $table) {
                 if (! Schema::hasColumn('returns', 'business_logo_url')) {
-                    $table->string('business_logo_url', 512)->nullable()->after('notes');
+                    $table->string('business_logo_url', 512)->nullable();
                 }
                 if (! Schema::hasColumn('returns', 'business_logo_path')) {
                     $table->string('business_logo_path', 512)->nullable()->after('business_logo_url');

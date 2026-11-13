@@ -31,8 +31,19 @@ RUN sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf
 RUN sed -ri -e 's!Listen 80!Listen ${PORT}!g' /etc/apache2/ports.conf
 RUN sed -ri -e 's!<VirtualHost \*:80>!<VirtualHost \*:${PORT}>!g' /etc/apache2/sites-available/*.conf
 
-# Set default PORT environment variable for Render
-ENV PORT=10000
+# Set default environment variables for Render & TiDB Cloud
+ENV PORT=10000 \
+    APP_NAME="NubiBill" \
+    APP_ENV="production" \
+    APP_DEBUG="false" \
+    APP_KEY="base64:eJKW2pJTRrDbAvja7Z8CtmRp6jmuBbtzmiJ7+LuLaGg=" \
+    DB_CONNECTION="mysql" \
+    DB_HOST="gateway01.ap-northeast-1.prod.aws.tidbcloud.com" \
+    DB_PORT="4000" \
+    DB_DATABASE="test" \
+    DB_USERNAME="pbaR4iA9npaJ5Bf.root" \
+    DB_PASSWORD="UpY9bLiFlfc0Eu9l" \
+    MYSQL_ATTR_SSL_CA="/etc/ssl/certs/ca-certificates.crt"
 
 # Install Composer
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
