@@ -27,6 +27,7 @@ use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\ReturnController;
 use App\Http\Controllers\Api\V1\ReturnReasonController;
 use App\Http\Controllers\Api\V1\StorageController;
+use App\Http\Controllers\Api\V1\ComplaintController;
 use App\Http\Controllers\Api\V1\SuperUserController;
 use App\Http\Controllers\Api\V1\SuperUserReleaseController;
 use App\Http\Controllers\Api\V1\SupplierController;
@@ -85,6 +86,10 @@ Route::prefix('v1')->group(function () {
         Route::post('/sync/runQuery', [SyncController::class, 'runQuery']);
     });
     // Public Authentication & Registration Routes
+    Route::post('/telemetry/error', [TelemetryController::class, 'reportError']);
+    Route::post('/complaints', [ComplaintController::class, 'store']);
+    Route::get('/complaints', [ComplaintController::class, 'index']);
+    Route::get('/complaints/{id}', [ComplaintController::class, 'show']);
     Route::prefix('auth')->group(function () {
         Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:10,1');
         Route::post('/email-otp/resend', [AuthController::class, 'resendOtp'])->middleware('throttle:6,1');
@@ -433,6 +438,10 @@ Route::prefix('v1')->group(function () {
             Route::post('/sessions/{sessionId}/terminate', [SuperUserController::class, 'terminateSession']);
             Route::get('/owners', [SuperUserController::class, 'owners']);
             Route::post('/notifications/send', [SuperUserController::class, 'sendNotification']);
+            Route::get('/errors', [SuperUserController::class, 'systemErrors']);
+            Route::post('/errors/{id}/resolve', [SuperUserController::class, 'resolveError']);
+            Route::get('/complaints', [SuperUserController::class, 'complaints']);
+            Route::post('/complaints/{id}/status', [SuperUserController::class, 'updateComplaintStatus']);
 
             // OTA Release Management
             Route::get('/releases', [SuperUserReleaseController::class, 'index']);

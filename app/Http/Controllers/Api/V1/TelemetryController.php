@@ -306,4 +306,76 @@ class TelemetryController extends Controller
             'updated_at' => Carbon::now()->toIso8601String(),
         ], 'Feature flags retrieved.');
     }
+
+    /**
+     * Report an unhandled client error, sync exception, or crash for SuperUser monitoring.
+     */
+    public function reportError(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'business_id' => 'nullable|string|max:255',
+            'business_name' => 'nullable|string|max:255',
+            'outlet_id' => 'nullable|string|max:255',
+            'outlet_name' => 'nullable|string|max:255',
+            'user_id' => 'nullable|string|max:255',
+            'user_email' => 'nullable|string|max:255',
+            'user_name' => 'nullable|string|max:255',
+            'page_name' => 'nullable|string|max:255',
+            'location' => 'nullable|string|max:255',
+            'problem_summary' => 'required|string|max:1000',
+            'line_number' => 'nullable|max:255',
+            'stack_trace' => 'nullable|string',
+            'device_platform' => 'nullable|string|max:100',
+            'app_version' => 'nullable|string|max:100',
+            'metadata' => 'nullable|array',
+        ]);
+
+        $user = $request->user();
+        $id = (string) Str::uuid();
+        $now = Carbon::now();
+
+        $businessId = $validated['business_id'] ?? $user?->business_id;
+        $outletId = $validated['outlet_id'] ?? $user?->outlet_id;
+        $userEmail = $validated['user_email'] ?? $user?->email;
+        $userName = $validated['user_name'] ?? $user?->name;
+        $userId = $validated['user_id'] ?? ($user ? (string) $user->id : null);
+
+        $payload = [
+            'id' => $id,
+            'business_id' => $businessId,
+            'business_name' => $validated['business_name'] ?? null,
+            'outlet_id' => $outletId,
+            'outlet_name' => $validated['outlet_name'] ?? null,
+            'user_id' => $userId,
+            'user_email' => $userEmail,
+            'user_name' => $userName,
+            'page_name' => $validated['page_name'] ?? $validated['location'] ?? 'Unknown Screen',
+            'location' => $validated['location'] ?? $validated['page_name'] ?? 'App',
+            'problem_summary' => $validated['problem_summary'],
+            'line_number' => $validated['line_number'] ?? null,
+            'stack_trace' => $validated['stack_trace'] ?? null,
+            'device_platform' => $validated['device_platform'] ?? 'all',
+            'app_version' => $validated['app_version'] ?? null,
+            'metadata' => $validated['metadata'] ?? [],
+            'reported_at' => $now->toIso8601String(),
+        ];
+
+        DB::table('system_error_analytics')->insert([
+            'id' => $id,
+            'document_path' => 'system_error_analytics/'.$id,
+            'business_id' => $businessId,
+            'outlet_id' => $outletId,
+            'tenant_id' => $businessId,
+            'status' => 'UNRESOLVED',
+            'is_deleted' => 0,
+            'payload' => json_encode($payload),
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        return ApiResponse::success([
+            'id' => $id,
+            'recorded_at' => $now->toIso8601String(),
+        ], 'Error analytics report received.');
+    }
 }

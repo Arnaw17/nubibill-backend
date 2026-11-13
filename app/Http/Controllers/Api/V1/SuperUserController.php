@@ -477,4 +477,195 @@ class SuperUserController extends Controller
             );
         }
     }
+
+    /**
+     * Get system error analytics reports for the SuperUser app.
+     */
+    public function systemErrors(Request $request): JsonResponse
+    {
+        $limit = min(max((int) $request->query('limit', 50), 1), 200);
+        $status = $request->query('status');
+
+        $query = DB::table('system_error_analytics')
+            ->where('is_deleted', 0);
+
+        if ($status && in_array(strtoupper($status), ['RESOLVED', 'UNRESOLVED', 'ACTIVE'], true)) {
+            $query->where('status', strtoupper($status));
+        }
+
+        $reports = $query->orderBy('created_at', 'desc')
+            ->limit($limit)
+            ->get()
+            ->map(function ($row) {
+                $payload = json_decode($row->payload ?? '{}', true) ?: [];
+                return [
+                    'id' => $row->id,
+                    'status' => $row->status,
+                    'businessId' => $row->business_id,
+                    'businessName' => $payload['business_name'] ?? null,
+                    'outletId' => $row->outlet_id,
+                    'outletName' => $payload['outlet_name'] ?? null,
+                    'userEmail' => $payload['user_email'] ?? null,
+                    'userName' => $payload['user_name'] ?? null,
+                    'pageName' => $payload['page_name'] ?? $payload['location'] ?? 'Unknown Screen',
+                    'lineNumber' => $payload['line_number'] ?? null,
+                    'problemSummary' => $payload['problem_summary'] ?? 'Error occurred',
+                    'stackTrace' => $payload['stack_trace'] ?? null,
+                    'devicePlatform' => $payload['device_platform'] ?? 'all',
+                    'appVersion' => $payload['app_version'] ?? null,
+                    'createdAt' => Carbon::parse($row->created_at)->toIso8601String(),
+                    'timeAgo' => Carbon::parse($row->created_at)->diffForHumans(),
+                ];
+            });
+
+        return ApiResponse::success([
+            'errors' => $reports,
+            'total' => count($reports),
+            'unresolvedCount' => DB::table('system_error_analytics')->where('status', 'UNRESOLVED')->where('is_deleted', 0)->count(),
+        ], 'System error analytics retrieved.');
+    }
+
+    /**
+     * Resolve or dismiss a system error report.
+     */
+    public function resolveError(string $id): JsonResponse
+    {
+        $updated = DB::table('system_error_analytics')
+            ->where('id', $id)
+            ->update([
+                'status' => 'RESOLVED',
+                'updated_at' => Carbon::now(),
+            ]);
+
+        if (! $updated) {
+            return ApiResponse::error('Error report not found.', 404);
+        }
+
+        return ApiResponse::success(null, 'Error marked as resolved.');
+    }
+
+    /**
+     * Get all user complaints across businesses for SuperUser review.
+     */
+    public function complaints(Request $request): JsonResponse
+    {
+        $status = $request->query('status');
+        $query = DB::table('user_complaints');
+
+        if ($status && strtoupper($status) !== 'ALL') {
+            $query->where('status', strtoupper($status));
+        }
+
+        $complaints = $query->orderBy('created_at', 'desc')->limit(200)->get();
+
+        $formatted = $complaints->map(function ($c) {
+            $c->timeline = $c->timeline ? json_decode($c->timeline, true) : [];
+            $c->system_logs = $c->system_logs ? json_decode($c->system_logs, true) : null;
+            return $c;
+        });
+
+        return ApiResponse::success([
+            'complaints' => $formatted,
+            'total' => $complaints->count(),
+            'unresolved' => DB::table('user_complaints')->whereNotIn('status', ['RESOLVED', 'CLOSED'])->count(),
+        ], 'Complaints retrieved.');
+    }
+
+    /**
+     * Update complaint status and progress timeline (Amazon / Flipkart tracking).
+     */
+    public function updateComplaintStatus(Request $request, string $id): JsonResponse
+    {
+        $validated = $request->validate([
+            'status' => 'required|string|in:SUBMITTED,UNDER_REVIEW,IN_PROGRESS,RESOLVED,CLOSED',
+            'resolution_summary' => 'nullable|string',
+            'admin_notes' => 'nullable|string',
+        ]);
+
+        $complaint = DB::table('user_complaints')->where('id', $id)->first();
+        if (! $complaint) {
+            return ApiResponse::error('Complaint not found.', 404);
+        }
+
+        $now = Carbon::now();
+        $targetStatus = strtoupper($validated['status']);
+        $stages = ['SUBMITTED', 'UNDER_REVIEW', 'IN_PROGRESS', 'RESOLVED'];
+
+        $existingTimeline = $complaint->timeline ? json_decode($complaint->timeline, true) : [];
+        if (empty($existingTimeline) || count($existingTimeline) < 4) {
+            $existingTimeline = [
+                [
+                    'stage' => 'SUBMITTED',
+                    'title' => 'Complaint Raised',
+                    'description' => 'Complaint submitted with ticket ' . $complaint->complaint_code,
+                    'timestamp' => $complaint->created_at,
+                    'is_completed' => true,
+                ],
+                [
+                    'stage' => 'UNDER_REVIEW',
+                    'title' => 'Under Review',
+                    'description' => 'Technical support is evaluating the details',
+                    'timestamp' => null,
+                    'is_completed' => false,
+                ],
+                [
+                    'stage' => 'IN_PROGRESS',
+                    'title' => 'In Progress',
+                    'description' => 'Engineering team is working on the resolution',
+                    'timestamp' => null,
+                    'is_completed' => false,
+                ],
+                [
+                    'stage' => 'RESOLVED',
+                    'title' => 'Resolved',
+                    'description' => 'Issue resolved and verified',
+                    'timestamp' => null,
+                    'is_completed' => false,
+                ],
+            ];
+        }
+
+        $targetIndex = array_search($targetStatus, $stages);
+        if ($targetIndex === false) {
+            $targetIndex = 3; // For CLOSED, treat as past resolved
+        }
+
+        for ($i = 0; $i < count($existingTimeline); $i++) {
+            if ($i <= $targetIndex) {
+                $existingTimeline[$i]['is_completed'] = true;
+                if (empty($existingTimeline[$i]['timestamp'])) {
+                    $existingTimeline[$i]['timestamp'] = $now->toIso8601String();
+                }
+                if ($i === $targetIndex && !empty($validated['resolution_summary'])) {
+                    $existingTimeline[$i]['description'] = $validated['resolution_summary'];
+                }
+            } else {
+                $existingTimeline[$i]['is_completed'] = false;
+                $existingTimeline[$i]['timestamp'] = null;
+            }
+        }
+
+        $updateData = [
+            'status' => $targetStatus,
+            'timeline' => json_encode($existingTimeline),
+            'updated_at' => $now,
+        ];
+
+        if (isset($validated['resolution_summary'])) {
+            $updateData['resolution_summary'] = $validated['resolution_summary'];
+        }
+        if (isset($validated['admin_notes'])) {
+            $updateData['admin_notes'] = $validated['admin_notes'];
+        }
+        if ($targetStatus === 'RESOLVED' || $targetStatus === 'CLOSED') {
+            $updateData['resolved_at'] = $now;
+        }
+
+        DB::table('user_complaints')->where('id', $id)->update($updateData);
+
+        $complaint = DB::table('user_complaints')->where('id', $id)->first();
+        $complaint->timeline = $existingTimeline;
+
+        return ApiResponse::success($complaint, 'Complaint status updated.');
+    }
 }
