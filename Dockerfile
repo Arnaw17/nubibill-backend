@@ -31,6 +31,20 @@ RUN sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf
 RUN sed -ri -e 's!Listen 80!Listen ${PORT}!g' /etc/apache2/ports.conf
 RUN sed -ri -e 's!<VirtualHost \*:80>!<VirtualHost \*:${PORT}>!g' /etc/apache2/sites-available/*.conf
 
+# Configure Apache & PHP settings for large OTA releases (up to 512MB)
+RUN { \
+    echo 'upload_max_filesize = 512M'; \
+    echo 'post_max_size = 512M'; \
+    echo 'memory_limit = 512M'; \
+    echo 'max_execution_time = 600'; \
+    echo 'max_input_time = 600'; \
+} > /usr/local/etc/php/conf.d/uploads.ini \
+    && { \
+    echo 'LimitRequestBody 536870912'; \
+    echo 'Timeout 600'; \
+} > /etc/apache2/conf-available/limits.conf \
+    && a2enconf limits
+
 # Set default environment variables for Render & Aiven MySQL Cloud
 ENV PORT=10000 \
     APP_NAME="NubiBill" \
@@ -58,7 +72,8 @@ COPY . /var/www/html
 RUN composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
 
 # Set permissions for Laravel storage and cache directories
-RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache \
+RUN mkdir -p /var/www/html/storage/app/private/releases /var/www/html/storage/app/public \
+    && chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache \
     && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
 
 # Copy entrypoint script and set permissions
