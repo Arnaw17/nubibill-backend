@@ -446,6 +446,8 @@ Route::prefix('v1')->group(function () {
             Route::post('/notifications/send', [SuperUserController::class, 'sendNotification']);
             Route::get('/errors', [SuperUserController::class, 'systemErrors']);
             Route::post('/errors/{id}/resolve', [SuperUserController::class, 'resolveError']);
+            Route::delete('/errors', [SuperUserController::class, 'clearErrors']);
+            Route::delete('/errors/{id}', [SuperUserController::class, 'deleteError']);
             Route::get('/complaints', [SuperUserController::class, 'complaints']);
             Route::post('/complaints/{id}/status', [SuperUserController::class, 'updateComplaintStatus']);
 

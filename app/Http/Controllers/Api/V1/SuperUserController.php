@@ -705,6 +705,52 @@ class SuperUserController extends Controller
     }
 
     /**
+     * Clear all or resolved system error logs (SuperUser only).
+     */
+    public function clearErrors(Request $request): JsonResponse
+    {
+        $scope = strtolower((string) ($request->input('scope') ?? $request->query('scope', 'all')));
+
+        $query = DB::table('system_error_analytics')->where('is_deleted', 0);
+
+        if ($scope === 'resolved') {
+            $query->where('status', 'RESOLVED');
+        } elseif ($scope === 'unresolved') {
+            $query->whereIn('status', ['UNRESOLVED', 'ACTIVE']);
+        }
+
+        $count = $query->count();
+        $query->update([
+            'is_deleted' => 1,
+            'updated_at' => Carbon::now(),
+        ]);
+
+        return ApiResponse::success([
+            'cleared_count' => $count,
+            'scope' => $scope,
+        ], "{$count} error logs cleared successfully.");
+    }
+
+    /**
+     * Delete an individual system error report.
+     */
+    public function deleteError(string $id): JsonResponse
+    {
+        $updated = DB::table('system_error_analytics')
+            ->where('id', $id)
+            ->update([
+                'is_deleted' => 1,
+                'updated_at' => Carbon::now(),
+            ]);
+
+        if (! $updated) {
+            return ApiResponse::error('Error report not found.', 404);
+        }
+
+        return ApiResponse::success(null, 'Error report deleted successfully.');
+    }
+
+    /**
      * Get all user complaints across businesses for SuperUser review.
      */
     public function complaints(Request $request): JsonResponse
