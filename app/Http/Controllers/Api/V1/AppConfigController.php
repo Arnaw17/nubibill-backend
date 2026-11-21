@@ -48,6 +48,15 @@ class AppConfigController extends Controller
         $payload = json_decode($row->payload, true);
         $fields = $payload['fields'] ?? [];
 
+        $defaultLinks = [
+            'website' => 'https://nubibill.com',
+            'docs' => 'https://nubibill.com/docs',
+            'support' => 'support@nubibill.com',
+            'privacy' => 'https://nubibill.com/privacy',
+            'terms' => 'https://nubibill.com/terms',
+        ];
+        $appLinks = array_merge($defaultLinks, $fields['appLinks'] ?? []);
+
         return response()->json([
             'status' => 'success',
             'data' => [
@@ -55,6 +64,7 @@ class AppConfigController extends Controller
                 'maintenanceTitle' => $fields['maintenanceTitle'] ?? 'System Maintenance',
                 'maintenanceMessage' => $fields['maintenanceMessage'] ?? null,
                 'maintenanceImageUrl' => $fields['maintenanceImageUrl'] ?? null,
+                'appLinks' => $appLinks,
                 'updatedAt' => $fields['updatedAt'] ?? $row->updated_at,
             ],
         ]);
@@ -121,6 +131,108 @@ class AppConfigController extends Controller
                 'maintenanceImageUrl' => $fields['maintenanceImageUrl'] ?? null,
                 'updatedAt' => $now,
             ],
+        ]);
+    }
+
+    /**
+     * Get company & web resources links (public).
+     */
+    public function links(): JsonResponse
+    {
+        $defaultLinks = [
+            'website' => 'https://nubibill.com',
+            'docs' => 'https://nubibill.com/docs',
+            'support' => 'support@nubibill.com',
+            'privacy' => 'https://nubibill.com/privacy',
+            'terms' => 'https://nubibill.com/terms',
+        ];
+
+        if (! \Illuminate\Support\Facades\Schema::hasTable('app_config')) {
+            return response()->json([
+                'status' => 'success',
+                'data' => $defaultLinks,
+            ]);
+        }
+
+        $row = DB::table('app_config')->where('id', 'system')->where('is_deleted', 0)->first();
+        if (! $row) {
+            return response()->json([
+                'status' => 'success',
+                'data' => $defaultLinks,
+            ]);
+        }
+
+        $payload = json_decode($row->payload, true);
+        $fields = $payload['fields'] ?? [];
+        $appLinks = array_merge($defaultLinks, $fields['appLinks'] ?? []);
+
+        return response()->json([
+            'status' => 'success',
+            'data' => $appLinks,
+        ]);
+    }
+
+    /**
+     * Update company & web resources links (SuperUser only).
+     */
+    public function updateLinks(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'website' => ['nullable', 'string', 'max:500'],
+            'docs' => ['nullable', 'string', 'max:500'],
+            'support' => ['nullable', 'string', 'max:500'],
+            'privacy' => ['nullable', 'string', 'max:500'],
+            'terms' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $defaultLinks = [
+            'website' => 'https://nubibill.com',
+            'docs' => 'https://nubibill.com/docs',
+            'support' => 'support@nubibill.com',
+            'privacy' => 'https://nubibill.com/privacy',
+            'terms' => 'https://nubibill.com/terms',
+        ];
+
+        $row = DB::table('app_config')->where('id', 'system')->first();
+        $payload = $row ? json_decode($row->payload, true) : [];
+        $fields = $payload['fields'] ?? [];
+
+        $currentLinks = array_merge($defaultLinks, $fields['appLinks'] ?? []);
+        foreach (['website', 'docs', 'support', 'privacy', 'terms'] as $key) {
+            if ($request->has($key)) {
+                $val = trim((string) ($request->input($key) ?? ''));
+                $currentLinks[$key] = $val !== '' ? $val : $defaultLinks[$key];
+            }
+        }
+
+        $now = now()->toIso8601String();
+        $fields['appLinks'] = $currentLinks;
+        $fields['updatedAt'] = $now;
+
+        $payload['fields'] = $fields;
+        $payload['_documentId'] = 'system';
+        $payload['_documentPath'] = 'app_config/system';
+
+        if ($row) {
+            DB::table('app_config')->where('id', 'system')->update([
+                'payload' => json_encode($payload),
+                'updated_at' => now(),
+            ]);
+        } else {
+            DB::table('app_config')->insert([
+                'id' => 'system',
+                'document_path' => 'app_config/system',
+                'is_deleted' => 0,
+                'payload' => json_encode($payload),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Web resource links updated successfully.',
+            'data' => $currentLinks,
         ]);
     }
 }

@@ -11,6 +11,8 @@ use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Database\Schema\Blueprint;
 
 class SuperUserController extends Controller
 {
@@ -378,6 +380,163 @@ class SuperUserController extends Controller
             'feature_key' => $validated['feature_key'],
             'updated_at' => $now->toIso8601String(),
         ], 'Feature flag saved successfully.');
+    }
+
+    /**
+     * Ensure the app_user_feature_overrides table exists.
+     */
+    private static function ensureUserOverridesTable(): void
+    {
+        if (! Schema::hasTable('app_user_feature_overrides')) {
+            Schema::create('app_user_feature_overrides', function (Blueprint $table) {
+                $table->id();
+                $table->string('user_id')->index();
+                $table->string('user_email')->nullable();
+                $table->string('user_name')->nullable();
+                $table->string('feature_key')->index();
+                $table->boolean('is_enabled')->default(false);
+                $table->string('disabled_reason')->nullable();
+                $table->string('updated_by')->nullable();
+                $table->timestamps();
+                $table->unique(['user_id', 'feature_key']);
+            });
+        }
+    }
+
+    /**
+     * Fetch all active per-user feature and maintenance overrides.
+     */
+    public function userOverrides(Request $request): JsonResponse
+    {
+        self::ensureUserOverridesTable();
+        $userId = $request->query('user_id');
+
+        $query = DB::table('app_user_feature_overrides');
+        if ($userId) {
+            $query->where('user_id', $userId);
+        }
+
+        $overrides = $query->orderBy('updated_at', 'desc')->get()->map(function ($row) {
+            return [
+                'id' => $row->id,
+                'userId' => $row->user_id,
+                'userEmail' => $row->user_email,
+                'userName' => $row->user_name,
+                'featureKey' => $row->feature_key,
+                'isEnabled' => (bool) $row->is_enabled,
+                'disabledReason' => $row->disabled_reason,
+                'updatedBy' => $row->updated_by,
+                'updatedAt' => Carbon::parse($row->updated_at)->toIso8601String(),
+            ];
+        });
+
+        return ApiResponse::success([
+            'overrides' => $overrides,
+            'total' => count($overrides),
+        ], 'User feature overrides retrieved.');
+    }
+
+    /**
+     * Toggle or set a per-user maintenance mode or feature override.
+     */
+    public function toggleUserOverride(Request $request): JsonResponse
+    {
+        self::ensureUserOverridesTable();
+        $validated = $request->validate([
+            'user_id' => 'required|string',
+            'feature_key' => 'required|string',
+            'is_enabled' => 'required|boolean',
+            'disabled_reason' => 'nullable|string',
+            'user_email' => 'nullable|string',
+            'user_name' => 'nullable|string',
+        ]);
+
+        $user = $request->user();
+        $targetUser = DB::table('users')->where('id', $validated['user_id'])->first();
+        $email = $validated['user_email'] ?? $targetUser?->email;
+        $name = $validated['user_name'] ?? $targetUser?->name;
+
+        $now = Carbon::now();
+        DB::table('app_user_feature_overrides')->updateOrInsert(
+            [
+                'user_id' => $validated['user_id'],
+                'feature_key' => $validated['feature_key'],
+            ],
+            [
+                'user_email' => $email,
+                'user_name' => $name,
+                'is_enabled' => $validated['is_enabled'] ? 1 : 0,
+                'disabled_reason' => $validated['is_enabled'] ? null : ($validated['disabled_reason'] ?? 'Disabled by Super User'),
+                'updated_by' => $user?->name ?? 'Super User',
+                'updated_at' => $now,
+                'created_at' => $now,
+            ]
+        );
+
+        // If maintenance mode is enabled (is_enabled = true for maintenance), update user session to MAINTENANCE
+        if ($validated['feature_key'] === 'maintenance_mode' && $validated['is_enabled']) {
+            DB::table('app_user_sessions')
+                ->where('user_id', $validated['user_id'])
+                ->where('status', 'ONLINE')
+                ->update(['status' => 'MAINTENANCE', 'updated_at' => $now]);
+        }
+
+        return ApiResponse::success([
+            'user_id' => $validated['user_id'],
+            'feature_key' => $validated['feature_key'],
+            'is_enabled' => (bool) $validated['is_enabled'],
+            'disabled_reason' => $validated['disabled_reason'] ?? null,
+            'updated_at' => $now->toIso8601String(),
+        ], "Per-user override for {$validated['user_id']} updated successfully.");
+    }
+
+    /**
+     * Remove a per-user override, returning the user to global defaults.
+     */
+    public function removeUserOverride(Request $request): JsonResponse
+    {
+        self::ensureUserOverridesTable();
+        $userId = $request->input('user_id') ?? $request->query('user_id');
+        $featureKey = $request->input('feature_key') ?? $request->query('feature_key');
+
+        if (! $userId || ! $featureKey) {
+            return ApiResponse::error('user_id and feature_key are required.', 422);
+        }
+
+        DB::table('app_user_feature_overrides')
+            ->where('user_id', $userId)
+            ->where('feature_key', $featureKey)
+            ->delete();
+
+        return ApiResponse::success(null, 'User override removed. User will inherit global switches.');
+    }
+
+    /**
+     * Search users by keyword for selection.
+     */
+    public function searchUsers(Request $request): JsonResponse
+    {
+        $query = trim($request->query('q', ''));
+        $usersQuery = DB::table('users')->where('is_deleted', 0);
+        if ($query !== '') {
+            $usersQuery->where(function ($q) use ($query) {
+                $q->where('id', 'like', "%{$query}%")
+                    ->orWhere('name', 'like', "%{$query}%")
+                    ->orWhere('email', 'like', "%{$query}%")
+                    ->orWhere('phone', 'like', "%{$query}%");
+            });
+        }
+
+        $users = $usersQuery->limit(30)->get()->map(fn ($u) => [
+            'id' => (string) $u->id,
+            'name' => $u->name,
+            'email' => $u->email,
+            'phone' => $u->phone,
+            'businessId' => $u->business_id,
+            'status' => $u->status,
+        ]);
+
+        return ApiResponse::success(['users' => $users]);
     }
 
     /**

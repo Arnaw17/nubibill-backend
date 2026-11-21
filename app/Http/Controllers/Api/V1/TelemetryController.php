@@ -13,9 +13,9 @@ use Illuminate\Support\Str;
 class TelemetryController extends Controller
 {
     /**
-     * Helper to resolve active feature flags for a business and platform.
+     * Helper to resolve active feature flags for a business and platform, including per-user overrides.
      */
-    public static function getActiveFlags(?string $businessId = null, ?string $platform = null): array
+    public static function getActiveFlags(?string $businessId = null, ?string $platform = null, ?string $userId = null): array
     {
         $flagsQuery = DB::table('app_remote_feature_flags');
         if ($businessId) {
@@ -42,6 +42,37 @@ class TelemetryController extends Controller
                 'disabledReason' => $f->disabled_reason,
                 'minVersion' => $f->min_app_version,
             ];
+        }
+
+        if ($userId && Schema::hasTable('app_user_feature_overrides')) {
+            $overrides = DB::table('app_user_feature_overrides')
+                ->where('user_id', $userId)
+                ->get();
+
+            foreach ($overrides as $ov) {
+                if ($ov->feature_key === 'maintenance_mode') {
+                    $map['maintenance_mode'] = [
+                        'key' => 'maintenance_mode',
+                        'name' => 'Account Maintenance Mode',
+                        'category' => 'SYSTEM',
+                        'enabled' => (bool) $ov->is_enabled,
+                        'disabledReason' => $ov->disabled_reason ?? 'Your account is currently under maintenance.',
+                    ];
+                } elseif (isset($map[$ov->feature_key])) {
+                    $map[$ov->feature_key]['enabled'] = (bool) $ov->is_enabled;
+                    if (! $ov->is_enabled && $ov->disabled_reason) {
+                        $map[$ov->feature_key]['disabledReason'] = $ov->disabled_reason;
+                    }
+                } else {
+                    $map[$ov->feature_key] = [
+                        'key' => $ov->feature_key,
+                        'name' => ucfirst(str_replace('_', ' ', $ov->feature_key)),
+                        'category' => 'USER_OVERRIDE',
+                        'enabled' => (bool) $ov->is_enabled,
+                        'disabledReason' => $ov->disabled_reason,
+                    ];
+                }
+            }
         }
 
         return $map;
@@ -116,7 +147,7 @@ class TelemetryController extends Controller
             $sessionData
         );
 
-        $flags = self::getActiveFlags($sessionData['business_id'], $sessionData['device_platform']);
+        $flags = self::getActiveFlags($sessionData['business_id'], $sessionData['device_platform'], (string) $user->id);
 
         return ApiResponse::success([
             'session_id' => $sessionId,
@@ -157,7 +188,7 @@ class TelemetryController extends Controller
                 'session_id' => $sessionId,
                 'is_terminated' => true,
                 'server_time' => $now->toIso8601String(),
-                'feature_flags' => self::getActiveFlags($session->business_id, $session->device_platform),
+                'feature_flags' => self::getActiveFlags($session->business_id, $session->device_platform, (string) $user?->id),
             ], 'Session was terminated by an administrator.');
         }
 
@@ -205,7 +236,7 @@ class TelemetryController extends Controller
             $isTerminated = false;
         }
 
-        $flags = self::getActiveFlags($businessId, $platform);
+        $flags = self::getActiveFlags($businessId, $platform, (string) $user->id);
 
         return ApiResponse::success([
             'session_id' => $sessionId,
@@ -299,7 +330,7 @@ class TelemetryController extends Controller
         $businessId = $request->query('business_id') ?? $request->header('X-Business-Id');
         $platform = $request->query('platform') ?? 'windows';
 
-        $flags = self::getActiveFlags($businessId, $platform);
+        $flags = self::getActiveFlags($businessId, $platform, (string) $user->id);
 
         return ApiResponse::success([
             'flags' => $flags,

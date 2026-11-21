@@ -40,6 +40,7 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('v1')->group(function () {
     // Public Application Configuration & Metadata Routes
     Route::get('/app-config', [AppConfigController::class, 'show']);
+    Route::get('/app-links', [AppConfigController::class, 'links']);
 
     // Public OTA Update Check, Release Catalog & Package Download Routes
     Route::prefix('updates')->group(function () {
@@ -90,6 +91,7 @@ Route::prefix('v1')->group(function () {
     Route::post('/complaints', [ComplaintController::class, 'store']);
     Route::get('/complaints', [ComplaintController::class, 'index']);
     Route::get('/complaints/{id}', [ComplaintController::class, 'show']);
+    Route::get('/complaints/{id}/attachment', [ComplaintController::class, 'attachment']);
     Route::prefix('auth')->group(function () {
         Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:10,1');
         Route::post('/email-otp/resend', [AuthController::class, 'resendOtp'])->middleware('throttle:6,1');
@@ -435,6 +437,10 @@ Route::prefix('v1')->group(function () {
             Route::get('/feature-flags', [SuperUserController::class, 'featureFlags']);
             Route::post('/feature-flags/toggle', [SuperUserController::class, 'toggleFeature']);
             Route::post('/feature-flags', [SuperUserController::class, 'saveFeature']);
+            Route::get('/user-overrides', [SuperUserController::class, 'userOverrides']);
+            Route::post('/user-overrides/toggle', [SuperUserController::class, 'toggleUserOverride']);
+            Route::delete('/user-overrides', [SuperUserController::class, 'removeUserOverride']);
+            Route::get('/users-search', [SuperUserController::class, 'searchUsers']);
             Route::post('/sessions/{sessionId}/terminate', [SuperUserController::class, 'terminateSession']);
             Route::get('/owners', [SuperUserController::class, 'owners']);
             Route::post('/notifications/send', [SuperUserController::class, 'sendNotification']);
@@ -450,6 +456,11 @@ Route::prefix('v1')->group(function () {
             Route::post('/releases/{release}/toggle-active', [SuperUserReleaseController::class, 'toggleActive']);
             Route::post('/releases/{release}/recall', [SuperUserReleaseController::class, 'recall']);
             Route::delete('/releases/{release}', [SuperUserReleaseController::class, 'destroy']);
+
+            // Web Resources & App Links
+            Route::get('/app-links', [AppConfigController::class, 'links']);
+            Route::post('/app-links', [AppConfigController::class, 'updateLinks']);
+            Route::put('/app-links', [AppConfigController::class, 'updateLinks']);
         });
 
     // Reports & Statutory Analytics Routes (Direct & Authenticated reporting)

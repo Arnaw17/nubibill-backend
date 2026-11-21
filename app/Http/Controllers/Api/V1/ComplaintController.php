@@ -8,6 +8,7 @@ use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 class ComplaintController extends Controller
@@ -64,6 +65,10 @@ class ComplaintController extends Controller
             'error_summary' => 'nullable|string',
             'error_details' => 'nullable|string',
             'system_logs' => 'nullable|array',
+            'attachment_name' => 'nullable|string|max:255',
+            'attachment_url' => 'nullable|string|max:1000',
+            'attachment_base64' => 'nullable|string',
+            'attachment' => 'nullable|file|mimes:jpg,jpeg,png,webp|max:10240',
         ]);
 
         $user = $request->user();
@@ -111,6 +116,47 @@ class ComplaintController extends Controller
             ],
         ];
 
+        $attachmentUrl = $validated['attachment_url'] ?? null;
+        $attachmentName = $validated['attachment_name'] ?? null;
+        $attachmentData = null;
+
+        if ($request->hasFile('attachment')) {
+            $file = $request->file('attachment');
+            $attachmentName = $file->getClientOriginalName();
+            try {
+                $path = $file->storePublicly('complaints', 'public');
+                $attachmentUrl = Storage::disk('public')->url($path);
+            } catch (\Throwable $e) {
+                // Storage fallback
+            }
+            $rawBytes = file_get_contents($file->getRealPath());
+            if ($rawBytes) {
+                $mime = $file->getMimeType() ?: 'image/jpeg';
+                $attachmentData = 'data:' . $mime . ';base64,' . base64_encode($rawBytes);
+            }
+        } elseif ($request->filled('attachment_base64')) {
+            $base64 = (string) $request->input('attachment_base64');
+            $attachmentData = str_starts_with($base64, 'data:') ? $base64 : ('data:image/jpeg;base64,' . $base64);
+            $cleanBase64 = str_contains($base64, ',') ? substr($base64, strpos($base64, ',') + 1) : $base64;
+            $decoded = base64_decode($cleanBase64, true);
+            if ($decoded !== false && strlen($decoded) > 0) {
+                $ext = 'jpg';
+                if (str_contains($attachmentData, 'image/png')) {
+                    $ext = 'png';
+                } elseif (str_contains($attachmentData, 'image/webp')) {
+                    $ext = 'webp';
+                }
+                $filename = 'complaints/cmp_' . Str::uuid() . '.' . $ext;
+                try {
+                    Storage::disk('public')->put($filename, $decoded);
+                    $attachmentUrl = Storage::disk('public')->url($filename);
+                } catch (\Throwable $e) {
+                    // Fallback to storing in attachment_data
+                }
+                $attachmentName = $attachmentName ?? ('screenshot.' . $ext);
+            }
+        }
+
         $data = [
             'id' => $id,
             'complaint_code' => $code,
@@ -132,6 +178,9 @@ class ComplaintController extends Controller
             'error_summary' => $validated['error_summary'] ?? null,
             'error_details' => $validated['error_details'] ?? null,
             'system_logs' => isset($validated['system_logs']) ? json_encode($validated['system_logs']) : null,
+            'attachment_url' => $attachmentUrl,
+            'attachment_name' => $attachmentName,
+            'attachment_data' => $attachmentData,
             'status' => 'SUBMITTED',
             'admin_notes' => null,
             'resolution_summary' => null,
@@ -166,5 +215,40 @@ class ComplaintController extends Controller
         $complaint->system_logs = $complaint->system_logs ? json_decode($complaint->system_logs, true) : null;
 
         return ApiResponse::success($complaint, 'Complaint details retrieved.');
+    }
+
+    /**
+     * Download or stream complaint attachment.
+     */
+    public function attachment(string $id)
+    {
+        $complaint = DB::table('user_complaints')
+            ->where('id', $id)
+            ->orWhere('complaint_code', $id)
+            ->first();
+
+        if (! $complaint || (empty($complaint->attachment_url) && empty($complaint->attachment_data))) {
+            return ApiResponse::error('Attachment not found.', 404);
+        }
+
+        if (! empty($complaint->attachment_data)) {
+            $data = $complaint->attachment_data;
+            $mime = 'image/jpeg';
+            if (preg_match('/^data:(image\/[a-zA-Z0-9\+\-]+);base64,/', $data, $matches)) {
+                $mime = $matches[1];
+                $data = substr($data, strlen($matches[0]));
+            }
+            $binary = base64_decode($data);
+            return response($binary, 200, [
+                'Content-Type' => $mime,
+                'Content-Disposition' => 'inline; filename="' . ($complaint->attachment_name ?: 'complaint_attachment.jpg') . '"',
+            ]);
+        }
+
+        if (! empty($complaint->attachment_url)) {
+            return redirect($complaint->attachment_url);
+        }
+
+        return ApiResponse::error('Attachment not found.', 404);
     }
 }
