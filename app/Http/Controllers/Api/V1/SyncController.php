@@ -7,6 +7,7 @@ use App\Services\InvoiceCreationService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -438,14 +439,57 @@ class SyncController extends Controller
     }
 
     /**
+     * In-memory / cached mapping of all tables and columns in the active database.
+     * Prevents repetitive information_schema round-trips over remote database connections.
+     */
+    private function getTableColumnsMap(): array
+    {
+        static $cached = null;
+        if ($cached !== null) {
+            return $cached;
+        }
+
+        try {
+            $cached = Cache::remember('sync_table_columns_map_v2', 86400, function () {
+                $rows = DB::select('SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.columns WHERE TABLE_SCHEMA = DATABASE()');
+                $map = [];
+                foreach ($rows as $r) {
+                    $t = $r->TABLE_NAME ?? $r->table_name ?? null;
+                    $c = $r->COLUMN_NAME ?? $r->column_name ?? null;
+                    if ($t && $c) {
+                        $map[$t][$c] = true;
+                    }
+                }
+                return $map;
+            });
+        } catch (\Throwable $e) {
+            $cached = [];
+        }
+
+        return $cached ?? [];
+    }
+
+    private function tableExists(string $table): bool
+    {
+        $map = $this->getTableColumnsMap();
+        return !empty($map) ? isset($map[$table]) : Schema::hasTable($table);
+    }
+
+    private function columnExists(string $table, string $column): bool
+    {
+        $map = $this->getTableColumnsMap();
+        return !empty($map) ? isset($map[$table][$column]) : Schema::hasColumn($table, $column);
+    }
+
+    /**
      * Resolve Firestore collection name to actual MySQL table name.
      */
     private function resolveTable(string $collection): ?string
     {
-        if (Schema::hasTable($collection)) {
+        if ($this->tableExists($collection)) {
             return $collection;
         }
-        if ($collection === 'user' && Schema::hasTable('users')) {
+        if ($collection === 'user' && $this->tableExists('users')) {
             return 'users';
         }
 
@@ -910,6 +954,12 @@ class SyncController extends Controller
             'salary_periods',
             'employee_salary_profiles',
             'units',
+            'product_categories',
+            'product_subcategories',
+            'brands',
+            'product_attributes',
+            'product_attribute_options',
+            'subcategory_attribute_templates',
         ];
 
         $changes = [];
@@ -917,18 +967,18 @@ class SyncController extends Controller
 
         foreach ($operationalCollections as $collection) {
             $table = $this->resolveTable($collection);
-            if (! $table || ! Schema::hasTable($table)) {
+            if (! $table) {
                 continue;
             }
 
             $query = DB::table($table);
 
             // Scope by business_id if present
-            if ($businessId && Schema::hasColumn($table, 'business_id')) {
+            if ($businessId && $this->columnExists($table, 'business_id')) {
                 $query->where('business_id', $businessId);
-            } elseif ($businessId && $collection === 'businesses' && Schema::hasColumn($table, 'id')) {
+            } elseif ($businessId && $collection === 'businesses' && $this->columnExists($table, 'id')) {
                 $query->where('id', $businessId);
-            } elseif ($businessId && $collection === 'outlets' && Schema::hasColumn($table, 'business_id')) {
+            } elseif ($businessId && $collection === 'outlets' && $this->columnExists($table, 'business_id')) {
                 $query->where('business_id', $businessId);
             }
 
@@ -936,7 +986,7 @@ class SyncController extends Controller
                 // Incremental delta: get records updated since given timestamp
                 try {
                     $sinceCarbon = Carbon::parse($since)->subSeconds(2);
-                    if (Schema::hasColumn($table, 'updated_at')) {
+                    if ($this->columnExists($table, 'updated_at')) {
                         $query->where('updated_at', '>=', $sinceCarbon);
                     }
                 } catch (\Exception $e) {
@@ -944,10 +994,10 @@ class SyncController extends Controller
                 }
             } else {
                 // Initial pull: get active non-deleted records
-                if (Schema::hasColumn($table, 'is_deleted')) {
+                if ($this->columnExists($table, 'is_deleted')) {
                     $query->where('is_deleted', 0);
                 }
-                if (Schema::hasColumn($table, 'status')) {
+                if ($this->columnExists($table, 'status')) {
                     $query->where('status', '!=', 'DELETED');
                 }
             }
