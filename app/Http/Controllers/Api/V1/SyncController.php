@@ -1048,8 +1048,8 @@ class SyncController extends Controller
 
         return response()->json([
             'serverTime' => $now,
-            'changes' => $changes,
-            'deleted' => $deleted,
+            'changes' => (object) $changes,
+            'deleted' => (object) $deleted,
         ]);
     }
 
