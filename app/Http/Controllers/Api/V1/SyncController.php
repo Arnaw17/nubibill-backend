@@ -409,6 +409,9 @@ class SyncController extends Controller
         }
 
         // Standard column checks across any table
+        if (Schema::hasColumn($table, 'scope_type')) {
+            $row['scope_type'] = strtoupper((string) ($decoded['scopeType'] ?? ($existing->scope_type ?? 'SYSTEM')));
+        }
         if (Schema::hasColumn($table, 'business_id')) {
             $row['business_id'] = $decoded['businessId'] ?? ($existing->business_id ?? null);
         }
@@ -841,6 +844,163 @@ class SyncController extends Controller
         }
 
         return response()->json($results);
+    }
+
+    /**
+     * Unified Delta Synchronization endpoint.
+     * Returns all changed documents and deletions across all operational collections
+     * in a single round-trip.
+     */
+    public function delta(Request $request): JsonResponse
+    {
+        $since = $request->input('since');
+        $businessId = $request->input('business_id') ?: $request->input('businessId');
+        $outletId = $request->input('outlet_id') ?: $request->input('outletId');
+        $tenantId = $request->input('tenant_id') ?: $request->input('tenantId');
+        $now = now()->toIso8601String();
+
+        $operationalCollections = [
+            'businesses',
+            'outlets',
+            'roles',
+            'permissions',
+            'app_config',
+            'business_settings',
+            'products',
+            'product_variants',
+            'outlet_products',
+            'stock_balances',
+            'stock_movements',
+            'inventory_transactions',
+            'inventory_batches',
+            'inventory_batch_movements',
+            'inventory_settings',
+            'purchases',
+            'purchase_bills',
+            'purchase_bill_items',
+            'purchase_orders',
+            'purchase_order_items',
+            'purchase_returns',
+            'suppliers',
+            'supplier_balances',
+            'supplier_businesses',
+            'supplier_ledger_entries',
+            'supplier_payments',
+            'supplier_refunds',
+            'financial_transactions',
+            'customers',
+            'customer_balances',
+            'customer_ledger_entries',
+            'invoices',
+            'invoice_items',
+            'payments',
+            'quotations',
+            'expenses',
+            'godowns',
+            'godown_code_reservations',
+            'racks',
+            'shelves',
+            'storage_locations',
+            'employees',
+            'employee_outlet_allocations',
+            'employee_activities',
+            'staff_attendance',
+            'staff_attendance_events',
+            'staff_khata_transactions',
+            'salary_periods',
+            'employee_salary_profiles',
+            'units',
+        ];
+
+        $changes = [];
+        $deleted = [];
+
+        foreach ($operationalCollections as $collection) {
+            $table = $this->resolveTable($collection);
+            if (! $table || ! Schema::hasTable($table)) {
+                continue;
+            }
+
+            $query = DB::table($table);
+
+            // Scope by business_id if present
+            if ($businessId && Schema::hasColumn($table, 'business_id')) {
+                $query->where('business_id', $businessId);
+            } elseif ($businessId && $collection === 'businesses' && Schema::hasColumn($table, 'id')) {
+                $query->where('id', $businessId);
+            } elseif ($businessId && $collection === 'outlets' && Schema::hasColumn($table, 'business_id')) {
+                $query->where('business_id', $businessId);
+            }
+
+            if ($since) {
+                // Incremental delta: get records updated since given timestamp
+                try {
+                    $sinceCarbon = Carbon::parse($since)->subSeconds(2);
+                    if (Schema::hasColumn($table, 'updated_at')) {
+                        $query->where('updated_at', '>=', $sinceCarbon);
+                    }
+                } catch (\Exception $e) {
+                    // If timestamp unparseable, skip updated_at filter
+                }
+            } else {
+                // Initial pull: get active non-deleted records
+                if (Schema::hasColumn($table, 'is_deleted')) {
+                    $query->where('is_deleted', 0);
+                }
+                if (Schema::hasColumn($table, 'status')) {
+                    $query->where('status', '!=', 'DELETED');
+                }
+            }
+
+            $rows = $query->limit(1000)->get();
+            if ($rows->isEmpty()) {
+                continue;
+            }
+
+            foreach ($rows as $row) {
+                $id = (string) $row->id;
+                $isDeleted = false;
+                if (isset($row->is_deleted) && (int) $row->is_deleted === 1) {
+                    $isDeleted = true;
+                }
+                if (isset($row->status) && strtoupper((string) $row->status) === 'DELETED') {
+                    $isDeleted = true;
+                }
+
+                if ($isDeleted) {
+                    $deleted[$collection][] = $id;
+                    continue;
+                }
+
+                $payload = json_decode($row->payload ?? '', true) ?: [];
+                $rawFields = $payload['fields'] ?? [];
+                if (empty($rawFields)) {
+                    if ($table === 'users') {
+                        $rawFields = $this->synthesizeUserFields($row);
+                    } else {
+                        $rawFields = self::encodeFields((array) $row);
+                    }
+                } else {
+                    $rawFields = self::formatFirestoreFields($rawFields);
+                }
+
+                $updateTime = isset($row->updated_at) ? Carbon::parse($row->updated_at)->toIso8601String() : $now;
+                $createTime = isset($row->created_at) ? Carbon::parse($row->created_at)->toIso8601String() : $now;
+
+                $changes[$collection][] = [
+                    'name' => "projects/nubibilling-local/databases/(default)/documents/{$collection}/{$id}",
+                    'fields' => $rawFields,
+                    'createTime' => $createTime,
+                    'updateTime' => $updateTime,
+                ];
+            }
+        }
+
+        return response()->json([
+            'serverTime' => $now,
+            'changes' => $changes,
+            'deleted' => $deleted,
+        ]);
     }
 
     /**

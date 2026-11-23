@@ -85,6 +85,7 @@ Route::prefix('v1')->group(function () {
         Route::post('/sync/documents/{collection}/{id?}', [SyncController::class, 'createDocument']);
         Route::post('/sync/documents:runQuery', [SyncController::class, 'runQuery']);
         Route::post('/sync/runQuery', [SyncController::class, 'runQuery']);
+        Route::post('/sync/delta', [SyncController::class, 'delta']);
     });
     // Public Authentication & Registration Routes
     Route::post('/telemetry/error', [TelemetryController::class, 'reportError']);
