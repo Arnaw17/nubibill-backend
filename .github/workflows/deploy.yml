@@ -19,22 +19,22 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: 22
           script: |
+            echo "--- Ensuring network MTU allows GitHub connection ---"
+            ip link set dev enp3s0 mtu 1350 2>/dev/null || true
+
             echo "--- Navigating to project directory ---"
             cd "${{ secrets.TARGET_DIR || '/var/www/nubibill-backend' }}"
             
             echo "--- Pulling latest code from GitHub main branch ---"
             git pull origin main
             
-            echo "--- Installing composer dependencies ---"
-            composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
+            echo "--- Updating running Docker container ---"
+            docker cp /var/www/nubibill-backend/. nubibill-backend:/var/www/html/
             
-            echo "--- Running Database Migrations ---"
-            php artisan migrate --force
+            echo "--- Running Database Migrations inside Container ---"
+            docker exec nubibill-backend php artisan migrate --force
             
-            echo "--- Clearing & Caching Configuration ---"
-            php artisan optimize:clear
-            php artisan config:cache
-            php artisan route:cache
-            php artisan view:cache
+            echo "--- Clearing and Caching inside Container ---"
+            docker exec nubibill-backend php artisan optimize:clear
             
             echo "--- Deployment successfully completed! ---"
