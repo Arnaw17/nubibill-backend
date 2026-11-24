@@ -473,7 +473,9 @@ Route::prefix('v1')->group(function () {
             Route::post('/sync/dlq/{id}/retry', [SyncReplayController::class, 'reprocessDlq']);
             Route::post('/sync/dlq/{id}/discard', [SyncReplayController::class, 'discardDlq']);
             Route::post('/sync/sessions/{sessionId}/request-diagnostic', [SyncReplayController::class, 'requestRemoteDiagnostic']);
+            Route::post('/sync/sessions/{sessionId}/command', [SyncReplayController::class, 'sendCommand']);
             Route::get('/sync/sessions/{sessionId}/diagnostic', [SyncReplayController::class, 'getRemoteDiagnostic']);
+            Route::get('/sync/sessions/{sessionId}/download', [SyncReplayController::class, 'downloadDiagnostic']);
         });
 
     // Reports & Statutory Analytics Routes (Direct & Authenticated reporting)

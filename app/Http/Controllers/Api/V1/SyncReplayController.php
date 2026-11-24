@@ -237,6 +237,46 @@ class SyncReplayController extends Controller
     }
 
     /**
+     * Send a remote command (e.g. FORCE_RESYNC, RESOLVE_CONFLICTS, UPLOAD_SYNC_DIAGNOSTIC) to a client session.
+     */
+    public function sendCommand(Request $request, string $sessionId): JsonResponse
+    {
+        $validated = $request->validate([
+            'command' => 'required|string|in:FORCE_RESYNC,RESOLVE_CONFLICTS,UPLOAD_SYNC_DIAGNOSTIC,CLEAR_RESOLVED_CONFLICTS',
+        ]);
+
+        $command = $validated['command'];
+        Cache::put("remote_cmd:$sessionId", $command, now()->addMinutes(15));
+
+        return response()->json([
+            'status' => 'success',
+            'message' => "Remote command '$command' dispatched to client session.",
+            'session_id' => $sessionId,
+            'command' => $command,
+        ]);
+    }
+
+    /**
+     * Download the raw uploaded diagnostic package for a session.
+     */
+    public function downloadDiagnostic(string $sessionId)
+    {
+        $path = "sync_diagnostics/{$sessionId}.json";
+        if (!Storage::disk('local')->exists($path)) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Diagnostic package not found for this session.',
+            ], 404);
+        }
+
+        $raw = Storage::disk('local')->get($path);
+        return response($raw, 200, [
+            'Content-Type' => 'application/json',
+            'Content-Disposition' => "attachment; filename=\"sync_diagnostic_{$sessionId}.json\"",
+        ]);
+    }
+
+    /**
      * Request a remote client session to upload its sync diagnostic package.
      */
     public function requestRemoteDiagnostic(string $sessionId): JsonResponse
