@@ -33,6 +33,7 @@ use App\Http\Controllers\Api\V1\SuperUserReleaseController;
 use App\Http\Controllers\Api\V1\SupplierController;
 use App\Http\Controllers\Api\V1\SupplierRefundController;
 use App\Http\Controllers\Api\V1\SyncController;
+use App\Http\Controllers\Api\V1\SyncReplayController;
 use App\Http\Controllers\Api\V1\TelemetryController;
 use App\Http\Controllers\Api\V1\UserController;
 use Illuminate\Support\Facades\Route;
@@ -464,6 +465,12 @@ Route::prefix('v1')->group(function () {
             Route::get('/app-links', [AppConfigController::class, 'links']);
             Route::post('/app-links', [AppConfigController::class, 'updateLinks']);
             Route::put('/app-links', [AppConfigController::class, 'updateLinks']);
+
+            // Sync Replay & Dead-Letter Queue (DLQ) Management
+            Route::post('/sync/replay-bundle', [SyncReplayController::class, 'replayBundle']);
+            Route::get('/sync/dlq', [SyncReplayController::class, 'listDlq']);
+            Route::post('/sync/dlq/{id}/retry', [SyncReplayController::class, 'reprocessDlq']);
+            Route::post('/sync/dlq/{id}/discard', [SyncReplayController::class, 'discardDlq']);
         });
 
     // Reports & Statutory Analytics Routes (Direct & Authenticated reporting)
