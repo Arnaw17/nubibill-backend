@@ -133,7 +133,10 @@ class InvoiceController extends Controller
         $data = [];
         foreach ($rows as $row) {
             $payload = json_decode($row->payload, true) ?: [];
-            $fields = $payload['fields'] ?? [];
+            $fields = $payload['fields'] ?? $payload;
+            if (is_array($fields)) {
+                $fields = SyncController::decodeFields($fields);
+            }
 
             $invoiceNumber = (string) ($fields['invoiceNumber'] ?? $fields['invoice_number'] ?? $row->id);
             $customerName = (string) ($fields['customerName'] ?? $fields['customer_name'] ?? '');
@@ -151,7 +154,7 @@ class InvoiceController extends Controller
 
             $dueAmount = (int) ($fields['dueAmount'] ?? $fields['duePaise'] ?? 0);
             $paidPaise = (int) ($fields['paidPaise'] ?? $fields['paidAmount'] ?? 0);
-            $totalAmount = (int) ($fields['totalAmount'] ?? $fields['grandTotal'] ?? $fields['subtotal'] ?? 0);
+            $totalAmount = (int) ($fields['totalAmount'] ?? $fields['grandTotal'] ?? $fields['grandTotalPaise'] ?? $fields['subtotal'] ?? 0);
             $status = (string) ($fields['status'] ?? $row->status ?? 'PAID');
             $paymentStatus = (string) ($fields['paymentStatus'] ?? ($dueAmount == 0 ? 'PAID' : 'PARTIALLY_PAID'));
 
@@ -178,6 +181,9 @@ class InvoiceController extends Controller
                 'gstAmount' => $gstAmount,
                 'taxableAmount' => $taxableAmount,
                 'taxablePaise' => $taxableAmount,
+                'grandTotal' => $totalAmount,
+                'grandTotalPaise' => $totalAmount,
+                'totalAmount' => $totalAmount,
                 'totalAmount' => $totalAmount,
                 'grandTotal' => $totalAmount,
                 'grandTotalPaise' => $totalAmount,
@@ -227,7 +233,10 @@ class InvoiceController extends Controller
         }
 
         $payload = json_decode($row->payload, true) ?: [];
-        $fields = $payload['fields'] ?? [];
+        $fields = $payload['fields'] ?? $payload;
+        if (is_array($fields)) {
+            $fields = SyncController::decodeFields($fields);
+        }
 
         if ($user && app(EmployeePermissionService::class)->isBillingStaff($user)) {
             $createdByUid = (string) ($fields['createdByUid'] ?? $fields['creatorUid'] ?? $fields['created_by'] ?? '');
@@ -249,8 +258,16 @@ class InvoiceController extends Controller
 
             foreach ($itemRows as $iRow) {
                 $iPayload = json_decode($iRow->payload, true) ?: [];
-                $items[] = $iPayload['fields'] ?? [];
+                $iFields = $iPayload['fields'] ?? $iPayload;
+                if (is_array($iFields)) {
+                    $iFields = SyncController::decodeFields($iFields);
+                }
+                $items[] = $iFields;
             }
+        } elseif (is_array($items)) {
+            $items = array_map(function ($it) {
+                return is_array($it) ? SyncController::decodeFields($it) : $it;
+            }, $items);
         }
 
         $dueAmount = (int) ($fields['dueAmount'] ?? $fields['duePaise'] ?? 0);
