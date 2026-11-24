@@ -26,7 +26,8 @@ jobs:
             cd "${{ secrets.TARGET_DIR || '/var/www/nubibill-backend' }}"
             
             echo "--- Pulling latest code from GitHub main branch ---"
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
             
             echo "--- Updating running Docker container ---"
             docker cp /var/www/nubibill-backend/. nubibill-backend:/var/www/html/
