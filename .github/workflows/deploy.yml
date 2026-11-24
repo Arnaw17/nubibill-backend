@@ -31,6 +31,12 @@ jobs:
             echo "--- Updating running Docker container ---"
             docker cp /var/www/nubibill-backend/. nubibill-backend:/var/www/html/
             
+            echo "--- Fixing permissions and reloading Apache inside Container ---"
+            docker exec nubibill-backend chown -R www-data:www-data /var/www/html
+            docker exec nubibill-backend chmod -R 755 /var/www/html
+            docker exec nubibill-backend chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
+            docker exec nubibill-backend apache2ctl graceful
+            
             echo "--- Running Database Migrations inside Container ---"
             docker exec nubibill-backend php artisan migrate --force
             
