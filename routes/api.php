@@ -117,6 +117,7 @@ Route::prefix('v1')->group(function () {
         Route::post('/telemetry/heartbeat', [TelemetryController::class, 'heartbeat']);
         Route::post('/telemetry/screen', [TelemetryController::class, 'recordScreen']);
         Route::post('/telemetry/logout', [TelemetryController::class, 'logout']);
+        Route::post('/telemetry/sync-diagnostic', [TelemetryController::class, 'uploadSyncDiagnostic']);
 
         // Firebase Cloud Messaging (FCM) Device Token Registration
         Route::post('/fcm/token', [FcmTokenController::class, 'store']);
@@ -471,6 +472,8 @@ Route::prefix('v1')->group(function () {
             Route::get('/sync/dlq', [SyncReplayController::class, 'listDlq']);
             Route::post('/sync/dlq/{id}/retry', [SyncReplayController::class, 'reprocessDlq']);
             Route::post('/sync/dlq/{id}/discard', [SyncReplayController::class, 'discardDlq']);
+            Route::post('/sync/sessions/{sessionId}/request-diagnostic', [SyncReplayController::class, 'requestRemoteDiagnostic']);
+            Route::get('/sync/sessions/{sessionId}/diagnostic', [SyncReplayController::class, 'getRemoteDiagnostic']);
         });
 
     // Reports & Statutory Analytics Routes (Direct & Authenticated reporting)

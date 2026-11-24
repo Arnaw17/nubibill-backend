@@ -7,7 +7,10 @@ use App\Models\SyncDeadLetterQueue;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 class SyncReplayController extends Controller
@@ -230,6 +233,62 @@ class SyncReplayController extends Controller
         return response()->json([
             'status' => 'success',
             'message' => 'DLQ item discarded.',
+        ]);
+    }
+
+    /**
+     * Request a remote client session to upload its sync diagnostic package.
+     */
+    public function requestRemoteDiagnostic(string $sessionId): JsonResponse
+    {
+        Cache::put("remote_cmd:$sessionId", 'UPLOAD_SYNC_DIAGNOSTIC', now()->addMinutes(15));
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Remote sync diagnostic requested. Client will upload on next heartbeat.',
+            'session_id' => $sessionId,
+        ]);
+    }
+
+    /**
+     * Fetch the uploaded diagnostic package and corresponding MySQL records for comparison.
+     */
+    public function getRemoteDiagnostic(string $sessionId): JsonResponse
+    {
+        $path = "sync_diagnostics/{$sessionId}.json";
+        if (!Storage::disk('local')->exists($path)) {
+            return response()->json([
+                'status' => 'pending',
+                'message' => 'Diagnostic package not yet uploaded or pending next heartbeat.',
+                'session_id' => $sessionId,
+            ], 202);
+        }
+
+        $raw = Storage::disk('local')->get($path);
+        $diagnostic = json_decode($raw, true) ?: [];
+        $tenantId = $diagnostic['tenant_id'] ?? null;
+
+        // Fetch corresponding MySQL records for comparison
+        $mysqlRecords = [];
+        if ($tenantId) {
+            $collections = ['invoices', 'products', 'customers', 'stock_balances'];
+            foreach ($collections as $col) {
+                if (Schema::hasTable($col)) {
+                    $mysqlRecords[$col] = DB::table($col)
+                        ->where('tenant_id', $tenantId)
+                        ->orderBy('updated_at', 'desc')
+                        ->limit(20)
+                        ->get();
+                }
+            }
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'data' => [
+                'diagnostic' => $diagnostic,
+                'mysql_comparison' => $mysqlRecords,
+            ],
         ]);
     }
 }

@@ -7,7 +7,9 @@ use App\Http\Responses\ApiResponse;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 class TelemetryController extends Controller
@@ -237,13 +239,54 @@ class TelemetryController extends Controller
         }
 
         $flags = self::getActiveFlags($businessId, $platform, (string) $user->id);
+        $remoteCmd = Cache::pull("remote_cmd:$sessionId");
 
         return ApiResponse::success([
             'session_id' => $sessionId,
             'is_terminated' => $isTerminated,
             'server_time' => $now->toIso8601String(),
             'feature_flags' => $flags,
+            'remote_command' => $remoteCmd,
         ], 'Heartbeat received.');
+    }
+
+    /**
+     * Client silently uploads local sync diagnostic package upon superuser request.
+     */
+    public function uploadSyncDiagnostic(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'session_id' => 'required|string',
+            'metadata' => 'nullable|array',
+            'outbox_rows' => 'nullable|array',
+            'conflicts' => 'nullable|array',
+            'db_summary' => 'nullable|array',
+        ]);
+
+        $sessionId = $validated['session_id'];
+        $user = $request->user();
+        $tenantId = $user->tenant_id ?? 'TENANT-DEFAULT';
+
+        $data = [
+            'session_id' => $sessionId,
+            'user_id' => $user->id,
+            'user_name' => $user->name,
+            'user_email' => $user->email,
+            'tenant_id' => $tenantId,
+            'uploaded_at' => Carbon::now()->toIso8601String(),
+            'metadata' => $validated['metadata'] ?? [],
+            'outbox_rows' => $validated['outbox_rows'] ?? [],
+            'conflicts' => $validated['conflicts'] ?? [],
+            'db_summary' => $validated['db_summary'] ?? [],
+        ];
+
+        Storage::disk('local')->put("sync_diagnostics/{$sessionId}.json", json_encode($data, JSON_PRETTY_PRINT));
+        Cache::put("diagnostic_ready:$sessionId", true, now()->addHours(24));
+
+        return ApiResponse::success([
+            'session_id' => $sessionId,
+            'status' => 'STORED',
+        ], 'Sync diagnostic uploaded successfully.');
     }
 
     /**
