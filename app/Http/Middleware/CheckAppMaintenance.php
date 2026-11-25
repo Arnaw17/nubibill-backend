@@ -33,7 +33,6 @@ class CheckAppMaintenance
             $userMaint = DB::table('app_user_feature_overrides')
                 ->where('user_id', $user->id)
                 ->where('feature_key', 'maintenance_mode')
-                ->where('is_deleted', 0)
                 ->first();
 
             if ($userMaint && (bool) $userMaint->is_enabled) {
@@ -59,7 +58,6 @@ class CheckAppMaintenance
         if (Schema::hasTable('app_remote_feature_flags')) {
             $globalFlag = DB::table('app_remote_feature_flags')
                 ->where('feature_key', 'app_maintenance_mode')
-                ->where('is_deleted', 0)
                 ->first();
 
             if ($globalFlag && (bool) $globalFlag->is_enabled) {
